@@ -46,12 +46,17 @@ const LINK_RE = /href\s*=\s*["']([^"'#]+)["']/gi
 
 /** 提取页面同域绝对链接（去重；javascript:/非法剔除）。 */
 export function extractLinks(html: string, baseUrl: string, ownHost: string): string[] {
+  return extractAllLinks(html, baseUrl).filter((u) => captureHost(u) === ownHost)
+}
+
+/** 同上但不做 host 过滤——crawler 调用方自持 host 过滤并统计被跳过的外域。 */
+export function extractAllLinks(html: string, baseUrl: string): string[] {
   const out = new Set<string>()
   let match: RegExpExecArray | null
   while ((match = LINK_RE.exec(html)) !== null) {
     try {
       const u = new URL(match[1], baseUrl)
-      if (u.host === ownHost && u.protocol.startsWith('http')) out.add(u.href)
+      if (u.protocol.startsWith('http')) out.add(u.href)
     } catch {
       // 非法链接跳过
     }
