@@ -80,3 +80,6 @@ export interface EnginePreflight {
   bridgePath?: string
   reasons: string[]
 }
+
+/** 任意可 JSON 化对象（采集正文解析用；仅作形状标注，运行时以 JSON.parse 后按需收紧）。 */
+export type RawJson = { [key: string]: unknown }
