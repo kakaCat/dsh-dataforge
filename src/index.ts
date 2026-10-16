@@ -23,7 +23,15 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { Config, normalizeConfig, type Config as ConfigType } from './config.js'
 import { discoverFlows, type PackRoots } from './flows/discover.js'
 import { DataforgeError } from './shared/errors.js'
-import { defineFlowsTool, defineRunTool, defineStatusTool } from './tools.js'
+import {
+  defineBrowserActTool, defineBrowserCloseTool, defineBrowserOpenTool, defineBrowserSnapshotTool,
+  defineCaptureCancelTool, defineCaptureResultTool, defineCaptureStatusTool, defineCaptureTool,
+  defineFlowsTool, defineRunTool, defineStatusTool,
+} from './tools.js'
+import { openCapturingPage } from './capture/browser.js'
+import { CaptureStore } from './capture/store.js'
+import { SessionRegistry } from './capture/session.js'
+import type { CaptureDeps } from './capture/application.js'
 import type { DataforgeDeps } from './application.js'
 import { buildDataforgeDeps } from './application.js'
 
@@ -67,6 +75,15 @@ function loadPolicyText(engineRoot: string): { text: string; source: string } {
   }
 }
 
+/** 采集域纪律：追加到 policy 文本末尾的常驻段。 */
+const CAPTURE_POLICY = [
+  '## dataforge-capture（接口采集）',
+  '- 采集目标站任何写操作只经 dataforge_capture(task_type=action) 且用户明确 confirm；禁止用 browser_act 未确认直接提交表单。',
+  '- site_crawl 是后台任务：dataforge_capture 返回 captureId 后用 dataforge_capture_status 轮询，不要凭空报结果。',
+  '- 采集结果用 dataforge_capture_result(scope=cards|samples|credentials|pages) 取回，报给用户时只说接口名/用途/出入参要点，不贴 token/cookie 原文。',
+  '- 诚实边界：遇风控/验证码/超限截断/外部域名跳过，如实转述 capture_status/capture_result 里的 notice，不隐瞒。',
+].join('\n')
+
 /** 装载插件。 */
 export function apply(ctx: Context, rawConfig: ConfigType): void {
   const anyCtx = ctx as unknown as {
@@ -93,6 +110,18 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
     resolveWorkspaceRoot,
   })
 
+  const captureDeps: CaptureDeps = {
+    config,
+    resolveJobs: () => jobsService,
+    store: new CaptureStore(
+      join(config.dataRoot, 'capture', 'capture.sqlite'),
+      join(config.dataRoot, 'capture', 'samples'),
+      join(config.dataRoot, 'capture', 'events.ndjson'),
+    ),
+    registry: new SessionRegistry({ openCapturingPage, bodyLimit: config.captureBodyLimitBytes }),
+    openCapturingPage,
+  }
+
   anyCtx.inject?.(['tools'], (toolsService) => {
     const tools = toolsService['tools'] as { register?: (tool: unknown) => unknown } | undefined
     if (typeof tools?.register !== 'function') {
@@ -109,10 +138,18 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       defineFlowsTool(dataforgeDeps),
       defineRunTool(dataforgeDeps),
       defineStatusTool(dataforgeDeps),
+      defineCaptureTool(captureDeps),
+      defineCaptureStatusTool(captureDeps),
+      defineCaptureResultTool(captureDeps),
+      defineCaptureCancelTool(captureDeps),
+      defineBrowserOpenTool(captureDeps),
+      defineBrowserActTool(captureDeps),
+      defineBrowserSnapshotTool(captureDeps),
+      defineBrowserCloseTool(captureDeps),
     ]) {
       tools.register(tool)
     }
-    logger?.info?.(`已注册 3 个工具：dataforge_flows / dataforge_run / dataforge_status`
+    logger?.info?.(`已注册 11 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
       + `（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
   })
 
@@ -120,11 +157,12 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
   if (config.injectPolicy) {
     try {
       const policy = loadPolicyText(config.engineRoot)
+      const combined = `${policy.text}\n\n${CAPTURE_POLICY}`
       const sectionName = 'tool:dataforge'
       anyCtx.systemPrompt?.section?.({
         name: sectionName,
         order: anyCtx.systemPrompt?.getSectionOrder?.('TOOL_GOAL'),
-        text: policy.text,
+        text: combined,
       })
       logger?.info?.(`策略段 ${sectionName} 已注入（来源 ${policy.source}）`)
     } catch (err) {

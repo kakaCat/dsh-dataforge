@@ -11,6 +11,14 @@
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { DataforgeDeps, FlowsValue, RunToolValue, StatusValue } from './application.js'
 import { listFlows, runFlow, runStatus } from './application.js'
+import {
+  startCapture, captureStatus, captureResult, captureCancel,
+  type CaptureDeps, type CaptureToolValue, type StartCaptureArgs,
+} from './capture/application.js'
+import type { ActSpec } from './capture/session.js'
+import type {
+  CardRow, CaptureRunRow, CredentialRow, PageRow, SampleRow,
+} from './shared/capture-types.js'
 import type { RunSummary } from './shared/types.js'
 
 /** 渲染边界单向收紧：进 render 的值已被 defineTool 按 schema 运行时校验，只是 TS 推断偏松。 */
@@ -243,6 +251,326 @@ export function defineStatusTool(deps: DataforgeDeps) {
     },
     async execute(args) {
       return runStatus(deps, args.run_id)
+    },
+  })
+}
+
+// ────────────────────────────────────────────────
+// 采集域：dataforge_capture / _status / _result / _cancel
+// ────────────────────────────────────────────────
+
+type CaptureStatusValue = { ok: boolean; run?: CaptureRunRow; runs?: CaptureRunRow[]; notice?: string }
+type CaptureResultValue = { ok: boolean; items?: Array<CardRow | SampleRow | CredentialRow | PageRow>; notice?: string }
+type CaptureCancelValue = { ok: boolean; status?: string; notice?: string }
+
+function renderCapture(value: CaptureToolValue): string {
+  if (!value.accepted) return value.card ?? '❌ 采集请求未被接受（缺细节）'
+  if (value.sessionId !== undefined) {
+    return `✅ 已开会话 ${value.sessionId}（captureId ${value.captureId ?? '?'}）：用 dataforge_browser_snapshot 看 UI、dataforge_browser_act 交互；结束后 dataforge_browser_close 收 cookie。`
+  }
+  return `🚀 采集已启动（captureId ${value.captureId ?? '?'}）：site_crawl 是后台任务，用 dataforge_capture_status 轮询，完成后 dataforge_capture_result(scope=cards) 取卡。`
+}
+
+export function defineCaptureTool(deps: CaptureDeps) {
+  return defineTool({
+    name: 'dataforge_capture',
+    description: `启动接口采集（接口测试流水线第一期）。
+
+三种任务型：
+- single_page：打开一个页面，静止期收 XHR/fetch → 接口卡（后台 job）。
+- site_crawl：从入口 BFS 同域逐页采集，maxDepth/maxPages 截断、诚实标注（后台 job）。
+- action：智能驱动采集——由你经 dataforge_browser_* 原语模拟真实 UI 操作（搜索/翻页/提交），
+  遇到的 XHR 全部成卡；**任何写操作必须先向用户转述并获同意**。
+
+三道闸语义：
+- single_page/site_crawl 只读，accepted 即后台启动；用 captureId 轮询。
+- action 是写操作闸：未 confirm=true 一律拒绝（gate=action-confirm-required）。
+
+失败门：bad-url（entryUrl 非法）/ bad-task（taskType 非法）/ action-confirm-required（未确认）。`,
+    parameters: {
+      task_type: { type: 'string', required: true, description: 'single_page | site_crawl | action' },
+      entry_url: { type: 'string', required: true, description: '采集入口 URL（https:// 开头）' },
+      confirm: { type: 'boolean', description: '仅 action 需要：用户确认真实 UI 写操作后为 true' },
+      max_depth: { type: 'number', description: 'site_crawl BFS 深度上限（缺省用配置）' },
+      max_pages: { type: 'number', description: 'site_crawl BFS 页数上限（缺省用配置）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          accepted: { type: 'boolean' },
+          gate: { type: 'string', description: 'started / bad-url / bad-task / action-confirm-required' },
+          captureId: { type: 'string' },
+          sessionId: { type: 'string', description: 'action 型：会话原语 id' },
+          card: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderCapture(tighten<CaptureToolValue>(value)) }],
+    },
+    async execute(args): Promise<CaptureToolValue> {
+      const taskType = args.task_type
+      if (taskType !== 'single_page' && taskType !== 'site_crawl' && taskType !== 'action') {
+        return { accepted: false, gate: 'bad-task', card: `❌ taskType 非法：${String(taskType)}` }
+      }
+      return await startCapture(deps, {
+        taskType,
+        entryUrl: args.entry_url,
+        ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
+        ...(args.max_depth === undefined ? {} : { maxDepth: args.max_depth }),
+        ...(args.max_pages === undefined ? {} : { maxPages: args.max_pages }),
+      } satisfies StartCaptureArgs)
+    },
+  })
+}
+
+export function defineCaptureStatusTool(deps: CaptureDeps) {
+  return defineTool({
+    name: 'dataforge_capture_status',
+    description: `查采集运行状态。capture_id 给出时单查（running/done/failed/cancelled + 页面/请求/卡/凭证计数）；省缺省列最近 10 条。site_crawl 后台任务用它轮询，不要凭空报结果。`,
+    parameters: {
+      capture_id: { type: 'string', description: '缺省 = 列最近 10 条' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          notice: { type: 'string' },
+          run: { type: 'object', additionalProperties: true },
+          runs: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        },
+      },
+      render: (_args, value) => {
+        const v = tighten<CaptureStatusValue>(value)
+        if (v.runs !== undefined) {
+          const lines = v.runs.map((r) => `- ${r.id}: ${r.status}`).join('\n')
+          return [{ type: 'text', text: `🗂 最近采集：\n${lines}` }]
+        }
+        const run = v.run
+        return [{ type: 'text', text: run === undefined
+          ? `⚠️ ${v.notice ?? '查询无结果'}`
+          : `📡 ${run.id}：${run.status} 页${run.stats.pages}/请求${run.stats.requests}/卡${run.stats.cards}/凭证${run.stats.credentials}` }]
+      },
+    },
+    async execute(args) {
+      return captureStatus(deps, args.capture_id)
+    },
+  })
+}
+
+export function defineCaptureResultTool(deps: CaptureDeps) {
+  return defineTool({
+    name: 'dataforge_capture_result',
+    description: `取采集产物（四种 scope）：cards=接口卡（模板/归并键）；samples=原始请求留痕（文件指针）；credentials=捕获的凭证（只报名称/来源，不贴原文）；pages=已抓页面清单。报给用户时只说接口名/用途/出入参要点，不贴 token/cookie 原文。`,
+    parameters: {
+      capture_id: { type: 'string', required: true },
+      scope: { type: 'string', required: true, description: 'cards | samples | credentials | pages' },
+      limit: { type: 'number', description: '缺省 50' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          notice: { type: 'string' },
+          items: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        },
+      },
+      render: (_args, value) => {
+        const v = tighten<CaptureResultValue>(value)
+        if (v.notice !== undefined) return [{ type: 'text', text: `📭 ${v.notice}` }]
+        return [{ type: 'text', text: `📦 ${v.items?.length ?? 0} 条记录（详见 items）` }]
+      },
+    },
+    async execute(args) {
+      if (args.scope !== 'cards' && args.scope !== 'samples' && args.scope !== 'credentials' && args.scope !== 'pages') {
+        return { ok: false, notice: `scope 非法：${String(args.scope)}（cards | samples | credentials | pages）` }
+      }
+      return captureResult(deps, args.capture_id, args.scope, args.limit)
+    },
+  })
+}
+
+export function defineCaptureCancelTool(deps: CaptureDeps) {
+  return defineTool({
+    name: 'dataforge_capture_cancel',
+    description: `取消一次采集：run 收口为 cancelled（幂等）。后台 job 的进程级取消由宿主 job 系统负责。`,
+    parameters: {
+      capture_id: { type: 'string', required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          status: { type: 'string' },
+          notice: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        const v = tighten<CaptureCancelValue>(value)
+        return [{ type: 'text', text: v.ok ? `🛑 已收口（status=${v.status ?? 'cancelled'}）` : `⚠️ ${v.notice ?? '取消未生效'}` }]
+      },
+    },
+    async execute(args) {
+      return captureCancel(deps, args.capture_id)
+    },
+  })
+}
+
+// ────────────────────────────────────────────────
+// 会话原语：dataforge_browser_open / _act / _snapshot / _close
+// ────────────────────────────────────────────────
+
+type BrowserActValue = { ok: boolean; pageUrl?: string; error?: string }
+type BrowserSnapshotValue = { ok: boolean; elements?: string[]; error?: string }
+type BrowserCloseValue = { ok: boolean; cookies: Array<{ name: string; domain: string }>; captureId?: string }
+
+function toActSpec(raw: unknown): ActSpec | undefined {
+  const r = raw as Record<string, unknown>
+  const selector = typeof r['selector'] === 'string' ? r['selector'] : undefined
+  switch (r['kind']) {
+    case 'click':
+      return selector === undefined ? undefined : { kind: 'click', selector }
+    case 'submit':
+      return selector === undefined ? undefined : { kind: 'submit', selector }
+    case 'fill':
+      return selector === undefined || typeof r['value'] !== 'string' ? undefined : { kind: 'fill', selector, value: r['value'] }
+    case 'press':
+      return typeof r['key'] !== 'string' ? undefined : { kind: 'press', key: r['key'] }
+    case 'wait':
+      return typeof r['ms'] !== 'number' ? undefined : { kind: 'wait', ms: r['ms'] }
+    case 'goto':
+      return typeof r['url'] !== 'string' ? undefined : { kind: 'goto', url: r['url'] }
+    default:
+      return undefined
+  }
+}
+
+export function defineBrowserOpenTool(deps: CaptureDeps) {
+  return defineTool({
+    name: 'dataforge_browser_open',
+    description: `开一个无头 Chrome 采集会话（系统 Chrome，流经隐私侧通道）。entry_url 给出时直接导航过去。与 dataforge_capture(task_type=action) 配合使用：action 会话可自动开。`,
+    parameters: {
+      entry_url: { type: 'string', description: '打开后立刻导航的 URL' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          sessionId: { type: 'string' },
+          pageUrl: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        const v = tighten<{ sessionId: string; pageUrl: string }>(value)
+        return [{ type: 'text', text: `🖥 会话 ${v.sessionId} 已开（${v.pageUrl}）。下一步用 dataforge_browser_snapshot 看页面。` }]
+      },
+    },
+    async execute(args) {
+      return deps.registry.open(args.entry_url === undefined ? {} : { entryUrl: args.entry_url })
+    },
+  })
+}
+
+export function defineBrowserActTool(deps: CaptureDeps) {
+  return defineTool({
+    name: 'dataforge_browser_act',
+    description: `对采集会话执行一次页面动作：click/fill/press/submit/wait/goto。⚠️ 此工具生成真实用户操作（含写）：生产站点填表/点击前先转述给用户确认；提交类只应出现在 dataforge_capture(task_type=action) 且用户 confirm 之后。`,
+    parameters: {
+      session_id: { type: 'string', required: true },
+      act: {
+        type: 'object', required: true, additionalProperties: true,
+        description: '{kind: click|fill|press|submit|wait|goto, selector?, value?, key?, url?, ms?}',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          ok: { type: 'boolean' },
+          pageUrl: { type: 'string' },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        const v = tighten<BrowserActValue>(value)
+        return [{ type: 'text', text: v.ok ? `✅ 动作完成（当前页 ${v.pageUrl ?? '?'}）` : `❌ 动作失败：${v.error ?? '未知'}` }]
+      },
+    },
+    async execute(args) {
+      const spec = toActSpec(args.act)
+      if (spec === undefined) return { ok: false, error: `act 非法：${JSON.stringify(args.act).slice(0, 200)}` }
+      return await deps.registry.act(args.session_id, spec)
+    },
+  })
+}
+
+export function defineBrowserSnapshotTool(deps: CaptureDeps) {
+  return defineTool({
+    name: 'dataforge_browser_snapshot',
+    description: `抓当前页面可交互元素清单（≤80 个：链接/按钮/输入/表单），据此决定下一步 browser_act。$eval：id/name/textElement 每个元素一行。`,
+    parameters: {
+      session_id: { type: 'string', required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          ok: { type: 'boolean' },
+          elements: { type: 'array', items: { type: 'string' } },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        const v = tighten<BrowserSnapshotValue>(value)
+        if (!v.ok) return [{ type: 'text', text: `❌ 快照失败：${v.error ?? '未知'}` }]
+        const lines = (v.elements ?? []).map((e) => `- ${e}`).join('\n')
+        return [{ type: 'text', text: `🔍 可交互元素 ${v.elements?.length ?? 0} 个：\n${lines}` }]
+      },
+    },
+    async execute(args) {
+      return await deps.registry.snapshot(args.session_id)
+    },
+  })
+}
+
+export function defineBrowserCloseTool(deps: CaptureDeps) {
+  return defineTool({
+    name: 'dataforge_browser_close',
+    description: `关闭采集会话并交回 cookie 总结；若会话绑定了 captureId，凭证已在收口时入库。`,
+    parameters: {
+      session_id: { type: 'string', required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          ok: { type: 'boolean' },
+          cookies: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          captureId: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        const v = tighten<BrowserCloseValue>(value)
+        return [{
+          type: 'text',
+          text: v.ok
+            ? `🔒 会话已关（cookie ${v.cookies.length} 个${v.captureId === undefined ? '' : `，已挂到 ${v.captureId}`}）`
+            : '❌ 会话不存在或已关闭',
+        }]
+      },
+    },
+    async execute(args) {
+      return await deps.registry.close(args.session_id)
     },
   })
 }

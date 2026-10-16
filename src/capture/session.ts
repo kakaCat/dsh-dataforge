@@ -93,10 +93,11 @@ export class SessionRegistry {
     }
   }
 
-  async close(sessionId: string): Promise<{ ok: boolean; cookies: unknown[]; captureId?: string }> {
+  async close(sessionId: string): Promise<{ ok: boolean; cookies: Array<{ name: string; domain: string }>; captureId?: string }> {
     const s = this.sessions.get(sessionId)
     if (s === undefined) return { ok: false, cookies: [] }
-    const cookies = await s.context.cookies()
+    const raw = await s.context.cookies()
+    const cookies = raw.map((c) => ({ name: String(c['name'] ?? ''), domain: String(c['domain'] ?? '') }))
     await s.browser.close().catch(() => undefined)
     this.sessions.delete(sessionId)
     return s.captureId === undefined ? { ok: true, cookies } : { ok: true, cookies, captureId: s.captureId }

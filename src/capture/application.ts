@@ -12,7 +12,9 @@ import { openCapturingPage, responseToRawSample, type WireSample } from './brows
 import type { CaptureStore } from './store.js'
 import type { Config } from '../config.js'
 import type { RawJson } from '../shared/types.js'
-import type { CaptureTaskType, Template } from '../shared/capture-types.js'
+import type {
+  CardRow, CaptureRunRow, CaptureTaskType, CredentialRow, PageRow, SampleRow, Template,
+} from '../shared/capture-types.js'
 
 export type CaptureGate = 'started' | 'bad-task' | 'action-confirm-required' | 'bad-url'
 
@@ -20,7 +22,7 @@ export type CaptureDeps = {
   config: Required<Config>
   resolveJobs: () => unknown
   store: CaptureStore
-  registry: Pick<SessionRegistry, 'open'>
+  registry: Pick<SessionRegistry, 'open' | 'act' | 'snapshot' | 'close'>
   openCapturingPage: typeof openCapturingPage
 }
 
@@ -192,7 +194,7 @@ function makeAutonomousRun(
 export function captureStatus(
   deps: CaptureDeps,
   captureId?: string,
-): { ok: boolean; run?: unknown; runs?: unknown[]; notice?: string } {
+): { ok: boolean; run?: CaptureRunRow; runs?: CaptureRunRow[]; notice?: string } {
   if (captureId !== undefined) {
     const run = deps.store.getRun(captureId)
     if (run === undefined) return { ok: false, notice: `captureId ${captureId} 无记录` }
@@ -206,7 +208,7 @@ export function captureResult(
   captureId: string,
   scope: 'cards' | 'samples' | 'credentials' | 'pages',
   limit = 50,
-): { ok: boolean; items?: unknown[]; notice?: string } {
+): { ok: boolean; items?: Array<CardRow | SampleRow | CredentialRow | PageRow>; notice?: string } {
   const labels = { cards: '卡片', samples: '样本', credentials: '凭证', pages: '页面' }
   if (deps.store.getRun(captureId) === undefined) return { ok: false, notice: `captureId ${captureId} 无记录` }
   const items =
