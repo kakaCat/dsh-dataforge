@@ -19,6 +19,16 @@ export interface Config {
   timeoutSeconds: number
   /** 是否把流程包 policy.md 注入常驻策略段（三道闸纪律 + 业务映射）。 */
   injectPolicy: boolean
+  /** 采集：站点爬行 BFS 深度上限。 */
+  captureMaxDepth: number
+  /** 采集：单次 site_crawl 页面数上限（超限诚实截断）。 */
+  captureMaxPages: number
+  /** 采集：网络 idle 后的稳定窗口 ms。 */
+  captureStabilityWindowMs: number
+  /** 采集：单响应体留盘点上限（字节），超过落文件。 */
+  captureBodyLimitBytes: number
+  /** 采集：Chrome 通道（缺省 'chrome' = 本机系统 Chrome，免下载浏览器）。 */
+  captureChromeChannel: string
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -27,6 +37,11 @@ export const Config: Schema<Config> = Schema.object({
   dataRoot: Schema.string().default(join(homedir(), '.dsh', 'storages', 'dsh-dataforge')),
   timeoutSeconds: Schema.number().default(600),
   injectPolicy: Schema.boolean().default(true),
+  captureMaxDepth: Schema.number().default(3),
+  captureMaxPages: Schema.number().default(50),
+  captureStabilityWindowMs: Schema.number().default(1500),
+  captureBodyLimitBytes: Schema.number().default(262_144),
+  captureChromeChannel: Schema.string().default('chrome'),
 })
 
 /** 归一化（相对路径 → 绝对；~ 展开）。 */
@@ -38,5 +53,10 @@ export function normalizeConfig(raw: Config): Required<Config> {
     dataRoot: resolvePath(expandHome(raw.dataRoot)),
     timeoutSeconds: raw.timeoutSeconds,
     injectPolicy: raw.injectPolicy,
+    captureMaxDepth: raw.captureMaxDepth,
+    captureMaxPages: raw.captureMaxPages,
+    captureStabilityWindowMs: raw.captureStabilityWindowMs,
+    captureBodyLimitBytes: raw.captureBodyLimitBytes,
+    captureChromeChannel: raw.captureChromeChannel,
   }
 }
