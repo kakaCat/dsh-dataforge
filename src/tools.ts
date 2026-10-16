@@ -572,10 +572,25 @@ export function defineBrowserCloseTool(deps: CaptureDeps) {
     async execute(args) {
       const closed = await deps.registry.close(args.session_id)
       if (closed.captureId !== undefined) {
+        for (const c of closed.cookies) {
+          deps.store.upsertCredential(
+            closed.captureId,
+            'cookie',
+            String(c['domain'] ?? ''),
+            String(c['name'] ?? ''),
+            Date.now(),
+            c,
+          )
+        }
         const run = deps.store.getRun(closed.captureId)
         if (run?.status === 'running') deps.store.finishRun(closed.captureId, 'done')
       }
-      return closed
+      const summarized: BrowserCloseValue = {
+        ok: closed.ok,
+        cookies: closed.cookies.map((c) => ({ name: String(c['name'] ?? ''), domain: String(c['domain'] ?? '') })),
+        ...(closed.captureId === undefined ? {} : { captureId: closed.captureId }),
+      }
+      return summarized
     },
   })
 }

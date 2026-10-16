@@ -2628,9 +2628,17 @@ function defineBrowserCloseTool(deps) {
 		async execute(args) {
 			const closed = await deps.registry.close(args.session_id);
 			if (closed.captureId !== void 0) {
+				for (const c of closed.cookies) deps.store.upsertCredential(closed.captureId, "cookie", String(c["domain"] ?? ""), String(c["name"] ?? ""), Date.now(), c);
 				if (deps.store.getRun(closed.captureId)?.status === "running") deps.store.finishRun(closed.captureId, "done");
 			}
-			return closed;
+			return {
+				ok: closed.ok,
+				cookies: closed.cookies.map((c) => ({
+					name: String(c["name"] ?? ""),
+					domain: String(c["domain"] ?? "")
+				})),
+				...closed.captureId === void 0 ? {} : { captureId: closed.captureId }
+			};
 		}
 	});
 }
@@ -3055,18 +3063,15 @@ var SessionRegistry = class {
 			ok: false,
 			cookies: []
 		};
-		const cookies = (await s.context.cookies()).map((c) => ({
-			name: String(c["name"] ?? ""),
-			domain: String(c["domain"] ?? "")
-		}));
+		const raw = await s.context.cookies();
 		await s.browser.close().catch(() => void 0);
 		this.sessions.delete(sessionId);
 		return s.captureId === void 0 ? {
 			ok: true,
-			cookies
+			cookies: raw
 		} : {
 			ok: true,
-			cookies,
+			cookies: raw,
 			captureId: s.captureId
 		};
 	}

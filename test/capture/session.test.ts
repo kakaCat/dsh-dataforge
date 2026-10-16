@@ -3,7 +3,7 @@ import { SessionRegistry } from '../../src/capture/session.js'
 
 const cookiesTotal = (closed: { cookies: unknown[] }): number => closed.cookies.length
 
-it('session: open 登记 → act click 分派 → close 释放并交出 cookie 总结', async () => {
+it('session: open 登记 → act click 分派 → close 释放并交出 raw cookie 总结', async () => {
   const fakePage = {
     on: vi.fn(),
     url: () => 'https://x.test/a',
@@ -14,7 +14,9 @@ it('session: open 登记 → act click 分派 → close 释放并交出 cookie �
   const fakeMaker = async () => ({
     page: fakePage as never,
     browser: { close: () => plastic.close() } as never,
-    context: { cookies: async () => [1, 2] as never[] } as never,
+    context: {
+      cookies: async () => [{ name: 'UID', domain: 'x.test', value: 'secret', httpOnly: false }] as never[],
+    } as never,
   })
   const reg = new SessionRegistry({ openCapturingPage: fakeMaker as never, bodyLimit: 100 })
   const { sessionId } = await reg.open({ entryUrl: 'https://x.test' })
@@ -22,7 +24,8 @@ it('session: open 登记 → act click 分派 → close 释放并交出 cookie �
   expect(res.ok).toBe(true)
   const closed = await reg.close(sessionId)
   expect(closed.ok).toBe(true)
-  expect(cookiesTotal(closed)).toBe(2)
+  expect(cookiesTotal(closed)).toBe(1)
+  expect(closed.cookies[0]).toEqual({ name: 'UID', domain: 'x.test', value: 'secret', httpOnly: false })
   // close 后复用应失败（释放干净）
   expect((await reg.act(sessionId, { kind: 'click', selector: '#kw' })).ok).toBe(false)
 })
