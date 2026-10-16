@@ -403,10 +403,12 @@ function rowToCard(row: Record<string, unknown>): CardRow {
 }
 
 function optTemplate(raw: unknown): Template | undefined {
-  const parsed = optRecord<unknown>(raw)
-  if (parsed === undefined) return undefined
-  const fields = Array.isArray(parsed['fields']) ? parsed['fields'] : []
-  const codePath = typeof parsed['codePath'] === 'string' ? parsed['codePath'] : undefined
+  if (typeof raw !== 'string' || raw.trim().startsWith('{') === false) return undefined
+  const parsed: unknown = JSON.parse(raw)
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+  const record = parsed as { fields?: unknown; codePath?: unknown }
+  const fields = Array.isArray(record['fields']) ? (record['fields'] as unknown[]) : []
+  const codePath = typeof record['codePath'] === 'string' ? record['codePath'] : undefined
   return { fields: fields as Template['fields'], codePath }
 }
 

@@ -24,7 +24,7 @@ it('全链路：run → page → sample → credential → card 去重归并 →
   store.upsertSample(captureId, pageId, {
     url: 'https://x.api/a', method: 'GET', status: 200,
     requestHeaders: { 'a': '1' }, responseHeaders: { 'b': '2' },
-    responseBody: '{"err_no":0}', ts: 9,
+    responseBody: '{"err_no":0}', ts: 9, bodyLimit: 262_144,
   })
   store.upsertCredential(captureId, 'cookie', 'https://x.test', 'HID', 9)
 
