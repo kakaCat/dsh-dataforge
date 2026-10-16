@@ -1,0 +1,17 @@
+# dsh-dataforge 的装载层（bundle patch）。
+#
+# 一包一 patch（对齐 dsh-window / tool-workprocess 先例）：本文件只插自己那一行。
+# 目标 profile 的 `dsh.profile.bundles` 里列了本包 ⇒ 这一行才会被应用；
+# **`dsh.bundle.patch` 指向的文件读不到，宿主会整个跳过这个 bundle**（现象：重启也不见本包生效）。
+#
+# engineRoot 必填：指向「流程包 + 引擎」checkout 的绝对路径（首步即 DataForge Loop 引擎仓库）。
+# 流程包加载优先级：工作区 .dsh/dataforge/flows > dataRoot/flows > engineRoot/configs（内置默认）。
+# 凭证永远住在引擎 checkout 自己的 .env / 环境变量里；本表只配路径与超时，不配任何密钥。
+- insert:
+    - id: dsh-dataforge
+      name: dsh-dataforge
+      config:
+        engineRoot: "/Volumes/ORICO/doc/github/dsh/ai-dataforge-loop"
+        # pythonBin: "python3"
+        # timeoutSeconds: 600
+        # injectPolicy: true
