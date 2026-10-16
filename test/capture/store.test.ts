@@ -67,6 +67,7 @@ it('大响应体落文件（相对路径 samples/）', () => {
     url: 'https://x.api/big', method: 'POST', status: 200,
     requestHeaders: {}, responseHeaders: {},
     responseBody: Buffer.alloc(300_000, 'x'),
+    bodyLimit: 262_144,
   })
   const rows = store.listSamples('cap_2')
   expect(rows[0]?.responseBodyPath).toContain('cap_2')
