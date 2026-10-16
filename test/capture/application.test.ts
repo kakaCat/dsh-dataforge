@@ -21,7 +21,11 @@ const WIRE: WireSample = {
   ts: 42,
 }
 
-function fixture(): { deps: CaptureDeps; jobs: { start: ReturnType<typeof vi.fn>; dones: Promise<unknown>[] } } {
+function fixture(): {
+  deps: CaptureDeps
+  jobs: { start: ReturnType<typeof vi.fn>; dones: Promise<unknown>[] }
+  lastBoundSink(): ((w: WireSample) => void) | undefined
+} {
   const dir = mkdtempSync(join(tmpdir(), 'cap-app-'))
   const store = new CaptureStore(join(dir, 'c.sqlite'), join(dir, 'samples'), join(dir, 'events.ndjson'))
   const config: Required<Config> = {
@@ -45,7 +49,11 @@ function fixture(): { deps: CaptureDeps; jobs: { start: ReturnType<typeof vi.fn>
     }),
     dones,
   }
-  const fakeRegistry = { open: vi.fn().mockResolvedValue({ sessionId: 'bs_x', pageUrl: 'https://x.test/' }) }
+  let lastBoundSink: ((w: WireSample) => void) | undefined
+  const fakeRegistry = {
+    open: vi.fn().mockResolvedValue({ sessionId: 'bs_x', pageUrl: 'https://x.test/' }),
+    bindSink: vi.fn((id: string, sink: (w: WireSample) => void) => { lastBoundSink = sink }),
+  }
   const maker = async (_channel: string, onWire: (w: WireSample) => void) => ({
     page: {
       goto: async () => { onWire(WIRE) },
@@ -62,7 +70,7 @@ function fixture(): { deps: CaptureDeps; jobs: { start: ReturnType<typeof vi.fn>
     registry: fakeRegistry as never,
     openCapturingPage: maker as never,
   }
-  return { deps, jobs }
+  return { deps, jobs, lastBoundSink: () => lastBoundSink }
 }
 
 it('single_page：闸放行 → job 跑完 → 样本/卡/cookie 落库，run=done', async () => {
@@ -99,6 +107,18 @@ it('action：未 confirm → gate=action-confirm-required 不启动；confirm=tr
   const c = await startCapture(f.deps, { taskType: 'action', entryUrl: 'https://x.test/', confirm: true })
   expect(c.accepted).toBe(true)
   expect(c.sessionId).toBe('bs_x')
+})
+
+it('action：open 后绑 sink，wire 样本经桥落库成卡（回归：会话样本曾静默丢弃）', async () => {
+  const f = fixture()
+  const c = await startCapture(f.deps, { taskType: 'action', entryUrl: 'https://x.test/', confirm: true })
+  expect(f.deps.registry.bindSink).toHaveBeenCalledWith('bs_x', expect.any(Function))
+  expect((c.captureId as string | undefined) !== undefined).toBe(true)
+  f.lastBoundSink()?.(WIRE)
+  const cards = f.deps.store.listCards(c.captureId as string)
+  expect(cards).toHaveLength(1)
+  expect(cards[0]?.method).toBe('GET')
+  expect(f.deps.store.countSamples(c.captureId as string)).toBe(1)
 })
 
 it('闸：bad-url / bad-task 如实拒绝', async () => {

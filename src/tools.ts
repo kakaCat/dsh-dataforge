@@ -570,7 +570,12 @@ export function defineBrowserCloseTool(deps: CaptureDeps) {
       },
     },
     async execute(args) {
-      return await deps.registry.close(args.session_id)
+      const closed = await deps.registry.close(args.session_id)
+      if (closed.captureId !== undefined) {
+        const run = deps.store.getRun(closed.captureId)
+        if (run?.status === 'running') deps.store.finishRun(closed.captureId, 'done')
+      }
+      return closed
     },
   })
 }

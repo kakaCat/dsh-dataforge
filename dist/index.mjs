@@ -1738,6 +1738,36 @@ function jsonTemplateOf(body) {
 		return;
 	}
 }
+/** wire→store 桥：样本落库 + 归并卡（自治 job 与 action 会话共用同一投影）。 */
+function wireToStore(deps, captureId) {
+	const pageUrls = /* @__PURE__ */ new Map();
+	return (w) => {
+		const raw = responseToRawSample(w, deps.config.captureBodyLimitBytes);
+		if (raw === void 0) return;
+		deps.store.upsertSample(captureId, void 0, {
+			...raw,
+			responseHeaders: { "content-type": w.contentType },
+			pageUrl: w.pageUrl,
+			ts: w.ts,
+			bodyLimit: deps.config.captureBodyLimitBytes
+		});
+		const urlTemplate = normalizeUrlForTemplate(raw.url).urlTemplate;
+		const mergeKey = mergeKeyOf(raw.method, urlTemplate);
+		const pages = pageUrls.get(mergeKey) ?? /* @__PURE__ */ new Set();
+		pages.add(w.pageUrl);
+		pageUrls.set(mergeKey, pages);
+		const requestTemplate = raw.truncated ? void 0 : jsonTemplateOf(raw.requestBody);
+		const responseTemplate = raw.truncated ? void 0 : jsonTemplateOf(raw.responseBody);
+		deps.store.upsertCard(captureId, {
+			mergeKey,
+			method: raw.method,
+			urlTemplate,
+			relatedPageUrls: [...pages],
+			...requestTemplate === void 0 ? {} : { requestTemplate },
+			...responseTemplate === void 0 ? {} : { responseTemplate }
+		});
+	};
+}
 async function startCapture(deps, args) {
 	const { taskType, entryUrl } = args;
 	let entry;
@@ -1779,6 +1809,7 @@ async function startCapture(deps, args) {
 			entryUrl,
 			captureId
 		});
+		deps.registry.bindSink(sessionId, wireToStore(deps, captureId));
 		return {
 			accepted: true,
 			gate: "started",
@@ -1826,33 +1857,7 @@ function makeAutonomousRun(deps, captureId, taskType, entry, args) {
 			},
 			done: (async () => {
 				try {
-					const pageUrls = /* @__PURE__ */ new Map();
-					const onWire = (w) => {
-						const raw = responseToRawSample(w, deps.config.captureBodyLimitBytes);
-						if (raw === void 0) return;
-						deps.store.upsertSample(captureId, void 0, {
-							...raw,
-							responseHeaders: { "content-type": w.contentType },
-							pageUrl: w.pageUrl,
-							ts: w.ts,
-							bodyLimit: deps.config.captureBodyLimitBytes
-						});
-						const urlTemplate = normalizeUrlForTemplate(raw.url).urlTemplate;
-						const mergeKey = mergeKeyOf(raw.method, urlTemplate);
-						const pages = pageUrls.get(mergeKey) ?? /* @__PURE__ */ new Set();
-						pages.add(w.pageUrl);
-						pageUrls.set(mergeKey, pages);
-						const requestTemplate = raw.truncated ? void 0 : jsonTemplateOf(raw.requestBody);
-						const responseTemplate = raw.truncated ? void 0 : jsonTemplateOf(raw.responseBody);
-						deps.store.upsertCard(captureId, {
-							mergeKey,
-							method: raw.method,
-							urlTemplate,
-							relatedPageUrls: [...pages],
-							...requestTemplate === void 0 ? {} : { requestTemplate },
-							...responseTemplate === void 0 ? {} : { responseTemplate }
-						});
-					};
+					const onWire = wireToStore(deps, captureId);
 					const { page, context, browser } = await deps.openCapturingPage(deps.config.captureChromeChannel, onWire);
 					closeBrowser = async () => {
 						await browser.close().catch(() => void 0);
@@ -2621,7 +2626,11 @@ function defineBrowserCloseTool(deps) {
 			}
 		},
 		async execute(args) {
-			return await deps.registry.close(args.session_id);
+			const closed = await deps.registry.close(args.session_id);
+			if (closed.captureId !== void 0) {
+				if (deps.store.getRun(closed.captureId)?.status === "running") deps.store.finishRun(closed.captureId, "done");
+			}
+			return closed;
 		}
 	});
 }

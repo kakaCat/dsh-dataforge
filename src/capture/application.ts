@@ -22,7 +22,7 @@ export type CaptureDeps = {
   config: Required<Config>
   resolveJobs: () => unknown
   store: CaptureStore
-  registry: Pick<SessionRegistry, 'open' | 'act' | 'snapshot' | 'close'>
+  registry: Pick<SessionRegistry, 'open' | 'act' | 'snapshot' | 'close' | 'bindSink'>
   openCapturingPage: typeof openCapturingPage
 }
 
@@ -62,6 +62,34 @@ function jsonTemplateOf(body: string | Buffer | undefined): Template | undefined
   }
 }
 
+/** wire→store 桥：样本落库 + 归并卡（自治 job 与 action 会话共用同一投影）。 */
+function wireToStore(deps: CaptureDeps, captureId: string): (w: WireSample) => void {
+  const pageUrls = new Map<string, Set<string>>()
+  return (w: WireSample): void => {
+    const raw = responseToRawSample(w, deps.config.captureBodyLimitBytes)
+    if (raw === undefined) return
+    deps.store.upsertSample(captureId, undefined, {
+      ...raw,
+      responseHeaders: { 'content-type': w.contentType },
+      pageUrl: w.pageUrl,
+      ts: w.ts,
+      bodyLimit: deps.config.captureBodyLimitBytes,
+    })
+    const urlTemplate = normalizeUrlForTemplate(raw.url).urlTemplate
+    const mergeKey = mergeKeyOf(raw.method, urlTemplate)
+    const pages = pageUrls.get(mergeKey) ?? new Set<string>()
+    pages.add(w.pageUrl)
+    pageUrls.set(mergeKey, pages)
+    const requestTemplate = raw.truncated ? undefined : jsonTemplateOf(raw.requestBody)
+    const responseTemplate = raw.truncated ? undefined : jsonTemplateOf(raw.responseBody)
+    deps.store.upsertCard(captureId, {
+      mergeKey, method: raw.method, urlTemplate, relatedPageUrls: [...pages],
+      ...(requestTemplate === undefined ? {} : { requestTemplate }),
+      ...(responseTemplate === undefined ? {} : { responseTemplate }),
+    })
+  }
+}
+
 export async function startCapture(deps: CaptureDeps, args: StartCaptureArgs): Promise<CaptureToolValue> {
   const { taskType, entryUrl } = args
   let entry: URL
@@ -82,6 +110,7 @@ export async function startCapture(deps: CaptureDeps, args: StartCaptureArgs): P
       stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
     })
     const { sessionId } = await deps.registry.open({ entryUrl, captureId })
+    deps.registry.bindSink(sessionId, wireToStore(deps, captureId))
     return { accepted: true, gate: 'started', captureId, sessionId }
   }
 
@@ -111,30 +140,7 @@ function makeAutonomousRun(
     let closeBrowser: (() => Promise<void>) | undefined
     const done = (async (): Promise<{ status: 'completed' | 'killed' | 'failed'; detail?: string }> => {
       try {
-        const pageUrls = new Map<string, Set<string>>()
-        const onWire = (w: WireSample): void => {
-          const raw = responseToRawSample(w, deps.config.captureBodyLimitBytes)
-          if (raw === undefined) return
-          deps.store.upsertSample(captureId, undefined, {
-            ...raw,
-            responseHeaders: { 'content-type': w.contentType },
-            pageUrl: w.pageUrl,
-            ts: w.ts,
-            bodyLimit: deps.config.captureBodyLimitBytes,
-          })
-          const urlTemplate = normalizeUrlForTemplate(raw.url).urlTemplate
-          const mergeKey = mergeKeyOf(raw.method, urlTemplate)
-          const pages = pageUrls.get(mergeKey) ?? new Set<string>()
-          pages.add(w.pageUrl)
-          pageUrls.set(mergeKey, pages)
-          const requestTemplate = raw.truncated ? undefined : jsonTemplateOf(raw.requestBody)
-          const responseTemplate = raw.truncated ? undefined : jsonTemplateOf(raw.responseBody)
-          deps.store.upsertCard(captureId, {
-            mergeKey, method: raw.method, urlTemplate, relatedPageUrls: [...pages],
-            ...(requestTemplate === undefined ? {} : { requestTemplate }),
-            ...(responseTemplate === undefined ? {} : { responseTemplate }),
-          })
-        }
+        const onWire = wireToStore(deps, captureId)
         const { page, context, browser } = await deps.openCapturingPage(deps.config.captureChromeChannel, onWire)
         closeBrowser = async () => { await browser.close().catch(() => undefined) }
         if (taskType === 'single_page') {
