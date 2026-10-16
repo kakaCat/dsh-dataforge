@@ -85,6 +85,7 @@ export interface UpsertCardInput {
 export class CaptureStore {
   private readonly db: Database.Database
   private readonly seqCounters = new Map<string, { requests: number }>()
+  private readonly io: CaptureStoreIo
 
   constructor(
     dbPath: string,
@@ -307,7 +308,7 @@ export class CaptureStore {
       .prepare('INSERT INTO credential_events(id,capture_id,kind,url,name,value_json,obtained_at) VALUES (?,?,?,?,?,?,?)')
       .run(id, captureId, kind, url, name, value === undefined ? null : JSON.stringify(value), obtainedAt)
     this.bumpRunStats(captureId, 'credentials')
-    this.appendEvent({ kind: 'credential', captureId, kind, name, url })
+    this.appendEvent({ kind: 'credential', captureId, credentialKind: kind, name, url })
     return id
   }
 
