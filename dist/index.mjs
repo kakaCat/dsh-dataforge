@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { spawn } from "node:child_process";
 import yaml from "js-yaml";
+import Database from "better-sqlite3";
 
 //#region node_modules/.pnpm/@deepseek-ai+cosmokit@1.8.5/node_modules/@deepseek-ai/cosmokit/lib/index.js
 /** Return true when a value is `null` or `undefined`. */
@@ -910,7 +911,12 @@ const Config = Schema.object({
 	pythonBin: Schema.string().default("python3"),
 	dataRoot: Schema.string().default(join(homedir(), ".dsh", "storages", "dsh-dataforge")),
 	timeoutSeconds: Schema.number().default(600),
-	injectPolicy: Schema.boolean().default(true)
+	injectPolicy: Schema.boolean().default(true),
+	captureMaxDepth: Schema.number().default(3),
+	captureMaxPages: Schema.number().default(50),
+	captureStabilityWindowMs: Schema.number().default(1500),
+	captureBodyLimitBytes: Schema.number().default(262144),
+	captureChromeChannel: Schema.string().default("chrome")
 });
 /** 归一化（相对路径 → 绝对；~ 展开）。 */
 function normalizeConfig(raw) {
@@ -920,7 +926,12 @@ function normalizeConfig(raw) {
 		pythonBin: raw.pythonBin,
 		dataRoot: resolve(expandHome(raw.dataRoot)),
 		timeoutSeconds: raw.timeoutSeconds,
-		injectPolicy: raw.injectPolicy
+		injectPolicy: raw.injectPolicy,
+		captureMaxDepth: raw.captureMaxDepth,
+		captureMaxPages: raw.captureMaxPages,
+		captureStabilityWindowMs: raw.captureStabilityWindowMs,
+		captureBodyLimitBytes: raw.captureBodyLimitBytes,
+		captureChromeChannel: raw.captureChromeChannel
 	};
 }
 
@@ -1490,6 +1501,469 @@ function runStatus(deps, runId) {
 }
 
 //#endregion
+//#region src/capture/normalizer.ts
+/** 每次必变不参与归并与模板比对的 query 键。 */
+const VOLATILE = /* @__PURE__ */ new Set([
+	"sid",
+	"ts",
+	"t",
+	"token",
+	"nonce",
+	"cb",
+	"callback",
+	"rsv_t",
+	"rsv_pq"
+]);
+const SEGMENT_PARAM = /\/(?:\d+|[a-f0-9][a-f0-9-]{19,})(?=\/|$)/gi;
+function normalizeUrlForTemplate(rawUrl) {
+	const u = new URL(rawUrl, "http://capture.local");
+	const seen = /* @__PURE__ */ new Map();
+	for (const [k, v] of u.searchParams.entries()) {
+		if (VOLATILE.has(k)) continue;
+		if (!seen.has(k)) seen.set(k, v);
+	}
+	const path = u.pathname.replace(SEGMENT_PARAM, "/{p}");
+	const query = sortedParamsToString([...seen.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+	return { urlTemplate: query === "" ? path : `${path}:${query}` };
+}
+function sortedParamsToString(pairs) {
+	return pairs.map(([k, v]) => v === "" ? k : `${k}=${v}`).join("&");
+}
+/** 归并键：值不入键（键集合排序），同接口跨参数值变化可归并。 */
+function mergeKeyOf(method, urlTemplate) {
+	const colon = urlTemplate.lastIndexOf(":");
+	if (colon === -1) return `${method} ${urlTemplate}`;
+	return `${method} ${urlTemplate.slice(0, colon)}:${urlTemplate.slice(colon + 1).split("&").map((kv) => kv.split("=")[0]).sort().join(",")}`;
+}
+const LINK_RE = /href\s*=\s*["']([^"'#]+)["']/gi;
+/** 同上但不做 host 过滤——crawler 调用方自持 host 过滤并统计被跳过的外域。 */
+function extractAllLinks(html, baseUrl) {
+	const out = /* @__PURE__ */ new Set();
+	let match;
+	while ((match = LINK_RE.exec(html)) !== null) try {
+		const u = new URL(match[1], baseUrl);
+		if (u.protocol.startsWith("http")) out.add(u.href);
+	} catch {}
+	return [...out];
+}
+/** 站点归并域：host（协议差异不出域，https/http 视为同站点）。 */
+function captureHost(url) {
+	return new URL(url).host;
+}
+const MAX_TEMPLATE_DEPTH = 2;
+const SAMPLE_MAX = 120;
+function jsonToTemplate(body) {
+	const fields = [];
+	const walk = (obj, prefix, depth) => {
+		for (const [key, value] of Object.entries(obj)) {
+			const field = prefix === "" ? key : `${prefix}.${key}`;
+			if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+				if (depth < MAX_TEMPLATE_DEPTH) walk(value, field, depth + 1);
+				continue;
+			}
+			if (Array.isArray(value)) {
+				const first = value[0];
+				if (depth < MAX_TEMPLATE_DEPTH && first !== null && typeof first === "object" && !Array.isArray(first)) walk(first, `${field}[]`, depth + 1);
+				continue;
+			}
+			fields.push({
+				field,
+				type: value === null ? "null" : typeof value === "number" ? "number" : typeof value === "boolean" ? "boolean" : "string",
+				sample: value === null ? "null" : String(value).slice(0, SAMPLE_MAX),
+				role: "constant",
+				unverified: true
+			});
+		}
+	};
+	walk(body, "", 0);
+	const hasCode = fields.find((f) => f.field === "code");
+	const hasErrNo = fields.find((f) => f.field === "err_no");
+	const codePath = hasCode !== void 0 ? "code" : hasErrNo !== void 0 ? "err_no" : void 0;
+	return {
+		fields,
+		...codePath === void 0 ? {} : { codePath }
+	};
+}
+
+//#endregion
+//#region src/capture/crawler.ts
+/**
+* site_crawl BFS driver：同域逐页采集与链接发现。
+*
+* 登录会话由调用方先就绪（application 层先 open 会话再委托抓取）；
+* 这里只做 BFS 队列调度、同 host 过滤、深度/页数截断与诚实标注。
+*
+* @module dsh-dataforge/capture/crawler
+*/
+/** site_crawl BFS：登录会话由调用方先就绪；这里只做同域逐页采集与链接发现。 */
+async function crawlSite(o) {
+	const visited = /* @__PURE__ */ new Set();
+	const queued = /* @__PURE__ */ new Set([o.entryUrl]);
+	const queue = [{
+		url: o.entryUrl,
+		depth: 0
+	}];
+	let externalSkipped = 0;
+	const errors = [];
+	while (queue.length > 0 && visited.size < o.maxPages) {
+		const { url, depth } = queue.shift();
+		if (visited.has(url) || depth > o.maxDepth) continue;
+		visited.add(url);
+		try {
+			const { html } = await o.driver.openPage(url);
+			o.onEvent({
+				kind: "page",
+				url
+			});
+			for (const link of extractAllLinks(html, url)) {
+				if (visited.has(link) || queued.has(link)) continue;
+				if (captureHost(link) !== o.ownHost) {
+					externalSkipped += 1;
+					o.onEvent({
+						kind: "skip",
+						url: link,
+						detail: "external host"
+					});
+					continue;
+				}
+				if (visited.size + queue.length >= o.maxPages || depth + 1 > o.maxDepth) continue;
+				queued.add(link);
+				queue.push({
+					url: link,
+					depth: depth + 1
+				});
+			}
+		} catch (err) {
+			const msg = err?.message?.slice(0, 200) ?? "unknown error";
+			errors.push(msg);
+			o.onEvent({
+				kind: "error",
+				url,
+				detail: msg
+			});
+		}
+	}
+	await o.driver.close().catch(() => void 0);
+	return {
+		pagesVisited: visited.size,
+		externalSkipped,
+		truncated: queue.length > 0 || visited.size >= o.maxPages,
+		errors
+	};
+}
+
+//#endregion
+//#region src/capture/browser.ts
+const SAMPLE_THRESHOLD = 1e4;
+/** wire→store 输入：小体量 JSON 才读全量；超限标 truncated 不挂预览。 */
+function responseToRawSample(wire, bodyLimit) {
+	const body = wire.responseText;
+	const oversized = body !== void 0 && Buffer.byteLength(body) > bodyLimit;
+	return {
+		url: wire.url,
+		method: wire.method,
+		status: wire.status,
+		requestHeaders: wire.requestHeaders,
+		requestBody: wire.requestPostData === void 0 || Buffer.byteLength(wire.requestPostData) > SAMPLE_THRESHOLD ? void 0 : wire.requestPostData,
+		responseBody: body === void 0 || oversized ? void 0 : body,
+		truncated: oversized
+	};
+}
+/**
+* 起一次会话：无头 chrome（channel: 'chrome' 系统浏览器）
+* + 旁路 CDP response 流（只收 xhr/fetch，静态资源全滤）。
+* 页面与 context 由 openCapturingPage 拥有，close 也由它交付（SessionRegistry 调 close）。
+*/
+async function openCapturingPage(channel, onWireSample) {
+	const { chromium } = await import("playwright-core");
+	const browser = await chromium.launch({
+		channel,
+		headless: true,
+		args: ["--disable-blink-features=AutomationControlled"]
+	});
+	const context = await browser.newContext();
+	const page = await context.newPage();
+	page.on("response", (response) => {
+		(async () => {
+			const request = response.request();
+			const resourceType = request.resourceType();
+			if (resourceType !== "xhr" && resourceType !== "fetch") return;
+			let responseText;
+			const contentType = response.headers()["content-type"] ?? "";
+			let status;
+			let method = request.method();
+			let url = request.url();
+			try {
+				status = response.status();
+				url = response.url();
+				if (contentType.includes("json") || contentType.includes("javascript")) responseText = await response.text();
+			} catch {
+				responseText = void 0;
+			}
+			try {
+				method = request.method();
+				const postRaw = resourceType === "fetch" ? request.postData() : null;
+				onWireSample({
+					url,
+					method,
+					status,
+					resourceType,
+					contentType,
+					requestHeaders: request.headers(),
+					requestPostData: postRaw === null ? void 0 : postRaw,
+					responseText,
+					pageUrl: page.url(),
+					ts: Date.now()
+				});
+			} catch {}
+		})().catch(() => void 0);
+	});
+	return {
+		browser,
+		context,
+		page
+	};
+}
+
+//#endregion
+//#region src/capture/application.ts
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+function jsonTemplateOf(body) {
+	if (typeof body !== "string" || body.trim().startsWith("{") === false) return void 0;
+	try {
+		const parsed = JSON.parse(body);
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+		return jsonToTemplate(parsed);
+	} catch {
+		return;
+	}
+}
+async function startCapture(deps, args) {
+	const { taskType, entryUrl } = args;
+	let entry;
+	try {
+		entry = new URL(entryUrl);
+	} catch {
+		return {
+			accepted: false,
+			gate: "bad-url",
+			card: `❌ entryUrl 不是合法 URL：${entryUrl}`
+		};
+	}
+	if (taskType !== "single_page" && taskType !== "site_crawl" && taskType !== "action") return {
+		accepted: false,
+		gate: "bad-task",
+		card: `❌ taskType 非法：${String(taskType)}（可选 single_page/site_crawl/action）`
+	};
+	const captureId = `cap_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+	if (taskType === "action") {
+		if (args.confirm !== true) return {
+			accepted: false,
+			gate: "action-confirm-required",
+			card: `⚠️ action 任务将对 ${entry.host} 执行真实 UI 写操作（提交/创建类）。请用户确认后以 confirm=true 重调。`
+		};
+		deps.store.upsertRun({
+			id: captureId,
+			taskType,
+			entryUrl,
+			status: "running",
+			startedAt: Date.now(),
+			stats: {
+				pages: 0,
+				requests: 0,
+				cards: 0,
+				credentials: 0
+			}
+		});
+		const { sessionId } = await deps.registry.open({
+			entryUrl,
+			captureId
+		});
+		return {
+			accepted: true,
+			gate: "started",
+			captureId,
+			sessionId
+		};
+	}
+	deps.store.upsertRun({
+		id: captureId,
+		taskType,
+		entryUrl,
+		status: "running",
+		startedAt: Date.now(),
+		stats: {
+			pages: 0,
+			requests: 0,
+			cards: 0,
+			credentials: 0
+		}
+	});
+	const jobs = deps.resolveJobs();
+	const spec = {
+		kind: "dataforge-capture",
+		label: `capture ${taskType} ${entry.host}`,
+		run: makeAutonomousRun(deps, captureId, taskType, entry, args)
+	};
+	return {
+		accepted: true,
+		gate: "started",
+		captureId,
+		...jobs?.start?.(spec) === void 0 ? {} : {}
+	};
+}
+function makeAutonomousRun(deps, captureId, taskType, entry, args) {
+	return (job) => {
+		let browserClosed = false;
+		let closeBrowser;
+		return {
+			cancel: (reason) => {
+				browserClosed = true;
+				(async () => {
+					await closeBrowser?.();
+				})();
+				job.append(`capture cancel: ${reason ?? "user requested"}`);
+			},
+			done: (async () => {
+				try {
+					const pageUrls = /* @__PURE__ */ new Map();
+					const onWire = (w) => {
+						const raw = responseToRawSample(w, deps.config.captureBodyLimitBytes);
+						if (raw === void 0) return;
+						deps.store.upsertSample(captureId, void 0, {
+							...raw,
+							responseHeaders: { "content-type": w.contentType },
+							pageUrl: w.pageUrl,
+							ts: w.ts,
+							bodyLimit: deps.config.captureBodyLimitBytes
+						});
+						const urlTemplate = normalizeUrlForTemplate(raw.url).urlTemplate;
+						const mergeKey = mergeKeyOf(raw.method, urlTemplate);
+						const pages = pageUrls.get(mergeKey) ?? /* @__PURE__ */ new Set();
+						pages.add(w.pageUrl);
+						pageUrls.set(mergeKey, pages);
+						const requestTemplate = raw.truncated ? void 0 : jsonTemplateOf(raw.requestBody);
+						const responseTemplate = raw.truncated ? void 0 : jsonTemplateOf(raw.responseBody);
+						deps.store.upsertCard(captureId, {
+							mergeKey,
+							method: raw.method,
+							urlTemplate,
+							relatedPageUrls: [...pages],
+							...requestTemplate === void 0 ? {} : { requestTemplate },
+							...responseTemplate === void 0 ? {} : { responseTemplate }
+						});
+					};
+					const { page, context, browser } = await deps.openCapturingPage(deps.config.captureChromeChannel, onWire);
+					closeBrowser = async () => {
+						await browser.close().catch(() => void 0);
+					};
+					if (taskType === "single_page") {
+						await page.goto(entry.href, {
+							waitUntil: "domcontentloaded",
+							timeout: 3e4
+						});
+						await page.waitForLoadState("networkidle", { timeout: Math.max(deps.config.captureStabilityWindowMs, 8e3) }).catch(() => void 0);
+					} else {
+						job.updateProgress("crawl-start");
+						const r = await crawlSite({
+							entryUrl: entry.href,
+							driver: {
+								openPage: async (url) => {
+									await page.goto(url, {
+										waitUntil: "domcontentloaded",
+										timeout: 3e4
+									});
+									await sleep(deps.config.captureStabilityWindowMs);
+									return {
+										pageId: "",
+										html: await page.content(),
+										sampleCount: deps.store.countSamples(captureId)
+									};
+								},
+								close: async () => {
+									await closeBrowser?.();
+								}
+							},
+							ownHost: entry.host,
+							maxDepth: args.maxDepth ?? deps.config.captureMaxDepth,
+							maxPages: args.maxPages ?? deps.config.captureMaxPages,
+							stabilityMs: deps.config.captureStabilityWindowMs,
+							onEvent: (e) => {
+								if (e.kind === "page") deps.store.upsertPage(captureId, e.url, 0, "ok");
+							},
+							onSample: () => void 0
+						});
+						job.updateProgress(`crawl-end pages=${r.pagesVisited} truncated=${r.truncated}`);
+					}
+					if (browserClosed) return { status: "killed" };
+					for (const c of await context.cookies()) deps.store.upsertCredential(captureId, "cookie", String(c["domain"] ?? ""), String(c["name"] ?? ""), Date.now(), c);
+					deps.store.finishRun(captureId, "done", void 0);
+					return {
+						status: "completed",
+						detail: `capture ${captureId} 完成`
+					};
+				} catch (err) {
+					const msg = err?.message?.slice(0, 400) ?? "unknown error";
+					deps.store.finishRun(captureId, "failed", msg);
+					return {
+						status: "failed",
+						detail: msg
+					};
+				}
+			})()
+		};
+	};
+}
+function captureStatus(deps, captureId) {
+	if (captureId !== void 0) {
+		const run = deps.store.getRun(captureId);
+		if (run === void 0) return {
+			ok: false,
+			notice: `captureId ${captureId} 无记录`
+		};
+		return {
+			ok: true,
+			run
+		};
+	}
+	return {
+		ok: true,
+		runs: deps.store.listRuns(10)
+	};
+}
+function captureResult(deps, captureId, scope, limit = 50) {
+	const labels = {
+		cards: "卡片",
+		samples: "样本",
+		credentials: "凭证",
+		pages: "页面"
+	};
+	if (deps.store.getRun(captureId) === void 0) return {
+		ok: false,
+		notice: `captureId ${captureId} 无记录`
+	};
+	const items = scope === "cards" ? deps.store.listCards(captureId, limit) : scope === "samples" ? deps.store.listSamples(captureId, limit) : scope === "credentials" ? deps.store.listCredentials(captureId, limit) : deps.store.listPages(captureId, limit);
+	return items.length === 0 ? {
+		ok: true,
+		notice: `captureId ${captureId} 的${labels[scope]}暂无记录`
+	} : {
+		ok: true,
+		items
+	};
+}
+function captureCancel(deps, captureId) {
+	if (deps.store.getRun(captureId) === void 0) return {
+		ok: false,
+		notice: `captureId ${captureId} 无记录`
+	};
+	deps.store.finishRun(captureId, "cancelled");
+	return {
+		ok: true,
+		status: "cancelled"
+	};
+}
+
+//#endregion
 //#region src/tools.ts
 /**
 * 三个工具壳：参数声明 / 规范值 / 回执渲染；判定全在 application 层。
@@ -1751,6 +2225,843 @@ function defineStatusTool(deps) {
 		}
 	});
 }
+function renderCapture(value) {
+	if (!value.accepted) return value.card ?? "❌ 采集请求未被接受（缺细节）";
+	if (value.sessionId !== void 0) return `✅ 已开会话 ${value.sessionId}（captureId ${value.captureId ?? "?"}）：用 dataforge_browser_snapshot 看 UI、dataforge_browser_act 交互；结束后 dataforge_browser_close 收 cookie。`;
+	return `🚀 采集已启动（captureId ${value.captureId ?? "?"}）：site_crawl 是后台任务，用 dataforge_capture_status 轮询，完成后 dataforge_capture_result(scope=cards) 取卡。`;
+}
+function defineCaptureTool(deps) {
+	return defineTool({
+		name: "dataforge_capture",
+		description: `启动接口采集（接口测试流水线第一期）。
+
+三种任务型：
+- single_page：打开一个页面，静止期收 XHR/fetch → 接口卡（后台 job）。
+- site_crawl：从入口 BFS 同域逐页采集，maxDepth/maxPages 截断、诚实标注（后台 job）。
+- action：智能驱动采集——由你经 dataforge_browser_* 原语模拟真实 UI 操作（搜索/翻页/提交），
+  遇到的 XHR 全部成卡；**任何写操作必须先向用户转述并获同意**。
+
+三道闸语义：
+- single_page/site_crawl 只读，accepted 即后台启动；用 captureId 轮询。
+- action 是写操作闸：未 confirm=true 一律拒绝（gate=action-confirm-required）。
+
+失败门：bad-url（entryUrl 非法）/ bad-task（taskType 非法）/ action-confirm-required（未确认）。`,
+		parameters: {
+			task_type: {
+				type: "string",
+				required: true,
+				description: "single_page | site_crawl | action"
+			},
+			entry_url: {
+				type: "string",
+				required: true,
+				description: "采集入口 URL（https:// 开头）"
+			},
+			confirm: {
+				type: "boolean",
+				description: "仅 action 需要：用户确认真实 UI 写操作后为 true"
+			},
+			max_depth: {
+				type: "number",
+				description: "site_crawl BFS 深度上限（缺省用配置）"
+			},
+			max_pages: {
+				type: "number",
+				description: "site_crawl BFS 页数上限（缺省用配置）"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					accepted: { type: "boolean" },
+					gate: {
+						type: "string",
+						description: "started / bad-url / bad-task / action-confirm-required"
+					},
+					captureId: { type: "string" },
+					sessionId: {
+						type: "string",
+						description: "action 型：会话原语 id"
+					},
+					card: { type: "string" }
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderCapture(tighten(value))
+			}]
+		},
+		async execute(args) {
+			const taskType = args.task_type;
+			if (taskType !== "single_page" && taskType !== "site_crawl" && taskType !== "action") return {
+				accepted: false,
+				gate: "bad-task",
+				card: `❌ taskType 非法：${String(taskType)}`
+			};
+			return await startCapture(deps, {
+				taskType,
+				entryUrl: args.entry_url,
+				...args.confirm === void 0 ? {} : { confirm: args.confirm },
+				...args.max_depth === void 0 ? {} : { maxDepth: args.max_depth },
+				...args.max_pages === void 0 ? {} : { maxPages: args.max_pages }
+			});
+		}
+	});
+}
+function defineCaptureStatusTool(deps) {
+	return defineTool({
+		name: "dataforge_capture_status",
+		description: `查采集运行状态。capture_id 给出时单查（running/done/failed/cancelled + 页面/请求/卡/凭证计数）；省缺省列最近 10 条。site_crawl 后台任务用它轮询，不要凭空报结果。`,
+		parameters: { capture_id: {
+			type: "string",
+			description: "缺省 = 列最近 10 条"
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					notice: { type: "string" },
+					run: {
+						type: "object",
+						additionalProperties: true
+					},
+					runs: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: true
+						}
+					}
+				}
+			},
+			render: (_args, value) => {
+				const v = tighten(value);
+				if (v.runs !== void 0) return [{
+					type: "text",
+					text: `🗂 最近采集：\n${v.runs.map((r) => `- ${r.id}: ${r.status}`).join("\n")}`
+				}];
+				const run = v.run;
+				return [{
+					type: "text",
+					text: run === void 0 ? `⚠️ ${v.notice ?? "查询无结果"}` : `📡 ${run.id}：${run.status} 页${run.stats.pages}/请求${run.stats.requests}/卡${run.stats.cards}/凭证${run.stats.credentials}`
+				}];
+			}
+		},
+		async execute(args) {
+			return captureStatus(deps, args.capture_id);
+		}
+	});
+}
+function defineCaptureResultTool(deps) {
+	return defineTool({
+		name: "dataforge_capture_result",
+		description: `取采集产物（四种 scope）：cards=接口卡（模板/归并键）；samples=原始请求留痕（文件指针）；credentials=捕获的凭证（只报名称/来源，不贴原文）；pages=已抓页面清单。报给用户时只说接口名/用途/出入参要点，不贴 token/cookie 原文。`,
+		parameters: {
+			capture_id: {
+				type: "string",
+				required: true
+			},
+			scope: {
+				type: "string",
+				required: true,
+				description: "cards | samples | credentials | pages"
+			},
+			limit: {
+				type: "number",
+				description: "缺省 50"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					notice: { type: "string" },
+					items: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: true
+						}
+					}
+				}
+			},
+			render: (_args, value) => {
+				const v = tighten(value);
+				if (v.notice !== void 0) return [{
+					type: "text",
+					text: `📭 ${v.notice}`
+				}];
+				return [{
+					type: "text",
+					text: `📦 ${v.items?.length ?? 0} 条记录（详见 items）`
+				}];
+			}
+		},
+		async execute(args) {
+			if (args.scope !== "cards" && args.scope !== "samples" && args.scope !== "credentials" && args.scope !== "pages") return {
+				ok: false,
+				notice: `scope 非法：${String(args.scope)}（cards | samples | credentials | pages）`
+			};
+			return captureResult(deps, args.capture_id, args.scope, args.limit);
+		}
+	});
+}
+function defineCaptureCancelTool(deps) {
+	return defineTool({
+		name: "dataforge_capture_cancel",
+		description: `取消一次采集：run 收口为 cancelled（幂等）。后台 job 的进程级取消由宿主 job 系统负责。`,
+		parameters: { capture_id: {
+			type: "string",
+			required: true
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					status: { type: "string" },
+					notice: { type: "string" }
+				}
+			},
+			render: (_args, value) => {
+				const v = tighten(value);
+				return [{
+					type: "text",
+					text: v.ok ? `🛑 已收口（status=${v.status ?? "cancelled"}）` : `⚠️ ${v.notice ?? "取消未生效"}`
+				}];
+			}
+		},
+		async execute(args) {
+			return captureCancel(deps, args.capture_id);
+		}
+	});
+}
+function toActSpec(raw) {
+	const r = raw;
+	const selector = typeof r["selector"] === "string" ? r["selector"] : void 0;
+	switch (r["kind"]) {
+		case "click": return selector === void 0 ? void 0 : {
+			kind: "click",
+			selector
+		};
+		case "submit": return selector === void 0 ? void 0 : {
+			kind: "submit",
+			selector
+		};
+		case "fill": return selector === void 0 || typeof r["value"] !== "string" ? void 0 : {
+			kind: "fill",
+			selector,
+			value: r["value"]
+		};
+		case "press": return typeof r["key"] !== "string" ? void 0 : {
+			kind: "press",
+			key: r["key"]
+		};
+		case "wait": return typeof r["ms"] !== "number" ? void 0 : {
+			kind: "wait",
+			ms: r["ms"]
+		};
+		case "goto": return typeof r["url"] !== "string" ? void 0 : {
+			kind: "goto",
+			url: r["url"]
+		};
+		default: return;
+	}
+}
+function defineBrowserOpenTool(deps) {
+	return defineTool({
+		name: "dataforge_browser_open",
+		description: `开一个无头 Chrome 采集会话（系统 Chrome，流经隐私侧通道）。entry_url 给出时直接导航过去。与 dataforge_capture(task_type=action) 配合使用：action 会话可自动开。`,
+		parameters: { entry_url: {
+			type: "string",
+			description: "打开后立刻导航的 URL"
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: true,
+				properties: {
+					sessionId: { type: "string" },
+					pageUrl: { type: "string" }
+				}
+			},
+			render: (_args, value) => {
+				const v = tighten(value);
+				return [{
+					type: "text",
+					text: `🖥 会话 ${v.sessionId} 已开（${v.pageUrl}）。下一步用 dataforge_browser_snapshot 看页面。`
+				}];
+			}
+		},
+		async execute(args) {
+			return deps.registry.open(args.entry_url === void 0 ? {} : { entryUrl: args.entry_url });
+		}
+	});
+}
+function defineBrowserActTool(deps) {
+	return defineTool({
+		name: "dataforge_browser_act",
+		description: `对采集会话执行一次页面动作：click/fill/press/submit/wait/goto。⚠️ 此工具生成真实用户操作（含写）：生产站点填表/点击前先转述给用户确认；提交类只应出现在 dataforge_capture(task_type=action) 且用户 confirm 之后。`,
+		parameters: {
+			session_id: {
+				type: "string",
+				required: true
+			},
+			act: {
+				type: "object",
+				required: true,
+				additionalProperties: true,
+				description: "{kind: click|fill|press|submit|wait|goto, selector?, value?, key?, url?, ms?}"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: true,
+				properties: {
+					ok: { type: "boolean" },
+					pageUrl: { type: "string" },
+					error: { type: "string" }
+				}
+			},
+			render: (_args, value) => {
+				const v = tighten(value);
+				return [{
+					type: "text",
+					text: v.ok ? `✅ 动作完成（当前页 ${v.pageUrl ?? "?"}）` : `❌ 动作失败：${v.error ?? "未知"}`
+				}];
+			}
+		},
+		async execute(args) {
+			const spec = toActSpec(args.act);
+			if (spec === void 0) return {
+				ok: false,
+				error: `act 非法：${JSON.stringify(args.act).slice(0, 200)}`
+			};
+			return await deps.registry.act(args.session_id, spec);
+		}
+	});
+}
+function defineBrowserSnapshotTool(deps) {
+	return defineTool({
+		name: "dataforge_browser_snapshot",
+		description: `抓当前页面可交互元素清单（≤80 个：链接/按钮/输入/表单），据此决定下一步 browser_act。$eval：id/name/textElement 每个元素一行。`,
+		parameters: { session_id: {
+			type: "string",
+			required: true
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: true,
+				properties: {
+					ok: { type: "boolean" },
+					elements: {
+						type: "array",
+						items: { type: "string" }
+					},
+					error: { type: "string" }
+				}
+			},
+			render: (_args, value) => {
+				const v = tighten(value);
+				if (!v.ok) return [{
+					type: "text",
+					text: `❌ 快照失败：${v.error ?? "未知"}`
+				}];
+				const lines = (v.elements ?? []).map((e) => `- ${e}`).join("\n");
+				return [{
+					type: "text",
+					text: `🔍 可交互元素 ${v.elements?.length ?? 0} 个：\n${lines}`
+				}];
+			}
+		},
+		async execute(args) {
+			return await deps.registry.snapshot(args.session_id);
+		}
+	});
+}
+function defineBrowserCloseTool(deps) {
+	return defineTool({
+		name: "dataforge_browser_close",
+		description: `关闭采集会话并交回 cookie 总结；若会话绑定了 captureId，凭证已在收口时入库。`,
+		parameters: { session_id: {
+			type: "string",
+			required: true
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: true,
+				properties: {
+					ok: { type: "boolean" },
+					cookies: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: true
+						}
+					},
+					captureId: { type: "string" }
+				}
+			},
+			render: (_args, value) => {
+				const v = tighten(value);
+				return [{
+					type: "text",
+					text: v.ok ? `🔒 会话已关（cookie ${v.cookies.length} 个${v.captureId === void 0 ? "" : `，已挂到 ${v.captureId}`}）` : "❌ 会话不存在或已关闭"
+				}];
+			}
+		},
+		async execute(args) {
+			return await deps.registry.close(args.session_id);
+		}
+	});
+}
+
+//#endregion
+//#region src/capture/store.ts
+/**
+* 采集留痕存储：SQLite（WAL）查询面 + NDJSON 事件审计面 + 大体二进制落文件。
+*
+* 写路径全部同步（better-sqlite3），跨会话/跨句柄并发天然串行；
+* 样本正文超 captureBodyLimitBytes 时落 `<samplesDir>/<captureId>/*.bin`，DB 存相对路径。
+*
+* @module dsh-dataforge/capture/store
+*/
+const DDL = `
+CREATE TABLE IF NOT EXISTS capture_runs (
+  id TEXT PRIMARY KEY, task_type TEXT NOT NULL, entry_url TEXT NOT NULL,
+  status TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER,
+  stats_json TEXT NOT NULL DEFAULT '{}', error TEXT
+);
+CREATE TABLE IF NOT EXISTS pages (
+  id TEXT PRIMARY KEY, capture_id TEXT REFERENCES capture_runs(id), url TEXT NOT NULL,
+  depth INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ok', visited_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS request_samples (
+  id TEXT PRIMARY KEY, capture_id TEXT REFERENCES capture_runs(id), page_id TEXT,
+  page_url TEXT, ts INTEGER NOT NULL, seq INTEGER NOT NULL, url TEXT NOT NULL, method TEXT NOT NULL,
+  status INTEGER, request_headers_json TEXT, request_body_path TEXT, request_body_preview TEXT,
+  response_headers_json TEXT, response_body_path TEXT, response_preview TEXT, truncated INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS interface_cards (
+  id TEXT PRIMARY KEY, capture_id TEXT REFERENCES capture_runs(id), merge_key TEXT UNIQUE NOT NULL,
+  name TEXT, url_template TEXT NOT NULL, method TEXT NOT NULL,
+  request_template_json TEXT, response_template_json TEXT, auth_json TEXT,
+  related_pages_json TEXT NOT NULL, sample_count INTEGER NOT NULL, created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS credential_events (
+  id TEXT PRIMARY KEY, capture_id TEXT REFERENCES capture_runs(id), kind TEXT NOT NULL,
+  url TEXT, name TEXT NOT NULL, value_json TEXT, obtained_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS login_sessions (
+  id TEXT PRIMARY KEY, capture_id TEXT, origin TEXT NOT NULL, stored_body TEXT NOT NULL, stored_at INTEGER NOT NULL
+);`;
+var CaptureStore = class {
+	db;
+	seqCounters = /* @__PURE__ */ new Map();
+	io;
+	constructor(dbPath, samplesDir, eventsNdjsonPath) {
+		this.io = {
+			dbPath,
+			samplesDir,
+			eventsNdjsonPath
+		};
+		mkdirSync(samplesDir, { recursive: true });
+		if (eventsNdjsonPath !== void 0) mkdirSync(join(eventsNdjsonPath, ".."), { recursive: true });
+		this.db = new Database(dbPath);
+		this.db.pragma("journal_mode = WAL");
+		this.db.exec(DDL);
+	}
+	close() {
+		this.db.close();
+	}
+	upsertRun(run) {
+		this.db.prepare(`INSERT INTO capture_runs(id,task_type,entry_url,status,started_at,stats_json)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET status=excluded.status`).run(run.id, run.taskType, run.entryUrl, run.status, run.startedAt, JSON.stringify(run.stats));
+		this.appendEvent({
+			kind: "terminal",
+			phase: "start",
+			captureId: run.id,
+			taskType: run.taskType
+		});
+	}
+	finishRun(id, status, error, stats) {
+		const existing = this.getRun(id);
+		if (existing === void 0) throw new Error(`capture ${id} 不存在，无法 finish`);
+		const finalStats = stats ?? existing.stats;
+		this.db.prepare(`UPDATE capture_runs SET status=?, ended_at=?, error=?, stats_json=? WHERE id=?`).run(status, Date.now(), error ?? null, JSON.stringify(finalStats), id);
+		this.appendEvent({
+			kind: "terminal",
+			phase: "end",
+			captureId: id,
+			status,
+			error
+		});
+	}
+	getRun(id) {
+		const row = this.db.prepare("SELECT * FROM capture_runs WHERE id=?").get(id);
+		if (row === void 0) return void 0;
+		return {
+			id: String(row["id"]),
+			taskType: String(row["task_type"]),
+			entryUrl: String(row["entry_url"]),
+			status: String(row["status"]),
+			startedAt: Number(row["started_at"]),
+			endedAt: row["ended_at"] === null || row["ended_at"] === void 0 ? void 0 : Number(row["ended_at"]),
+			stats: JSON.parse(String(row["stats_json"])),
+			error: row["error"] === null || row["error"] === void 0 ? void 0 : String(row["error"])
+		};
+	}
+	listRuns(limit = 10) {
+		return this.db.prepare("SELECT id FROM capture_runs ORDER BY started_at DESC LIMIT ?").all(limit).flatMap((r) => {
+			const run = this.getRun(r.id);
+			return run === void 0 ? [] : [run];
+		});
+	}
+	upsertPage(captureId, url, depth, status) {
+		const id = `pg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+		this.db.prepare("INSERT INTO pages(id,capture_id,url,depth,status,visited_at) VALUES (?,?,?,?,?,?)").run(id, captureId, url, depth, status, Date.now());
+		this.appendEvent({
+			kind: "page",
+			captureId,
+			url,
+			depth,
+			status
+		});
+		this.bumpRunStats(captureId, "pages");
+		return id;
+	}
+	listPages(captureId, limit = 50) {
+		return this.db.prepare("SELECT * FROM pages WHERE capture_id=? ORDER BY visited_at DESC LIMIT ?").all(captureId, limit).map((row) => ({
+			id: String(row["id"]),
+			captureId: String(row["capture_id"]),
+			url: String(row["url"]),
+			depth: Number(row["depth"]),
+			status: String(row["status"])
+		}));
+	}
+	upsertSample(captureId, pageId, input) {
+		const id = `sm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+		const counter = this.seqCounters.get(captureId) ?? { requests: 0 };
+		counter.requests += 1;
+		this.seqCounters.set(captureId, counter);
+		const reqPath = this.bodyPath(captureId, input.requestBody, input.bodyLimit);
+		const respPath = this.bodyPath(captureId, input.responseBody, input.bodyLimit);
+		const truncated = input.truncated === true || reqPath !== void 0 || respPath !== void 0;
+		this.db.prepare(`INSERT INTO request_samples(id,capture_id,page_id,page_url,ts,seq,url,method,status,
+          request_headers_json,request_body_path,request_body_preview,response_headers_json,response_body_path,response_preview,truncated)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, captureId, pageId ?? null, input.pageUrl ?? "", input.ts ?? Date.now(), counter.requests, input.url, input.method, input.status ?? null, JSON.stringify(input.requestHeaders), reqPath ?? null, previewOf(input.requestBody, input.bodyLimit), JSON.stringify(input.responseHeaders), respPath ?? null, previewOf(input.responseBody, input.bodyLimit), truncated ? 1 : 0);
+		this.appendEvent({
+			kind: "request",
+			captureId,
+			url: input.url,
+			method: input.method,
+			status: input.status
+		});
+		this.bumpRunStats(captureId, "requests");
+		return id;
+	}
+	countSamples(captureId) {
+		const row = this.db.prepare("SELECT COUNT(*) AS n FROM request_samples WHERE capture_id=?").get(captureId);
+		return Number(row["n"]);
+	}
+	listSamples(captureId, limit = 100) {
+		return this.db.prepare("SELECT * FROM request_samples WHERE capture_id=? ORDER BY ts ASC, seq ASC LIMIT ?").all(captureId, limit).map((row) => ({
+			id: String(row["id"]),
+			captureId: String(row["capture_id"]),
+			pageUrl: row["page_url"] === null || row["page_url"] === void 0 ? "" : String(row["page_url"]),
+			seq: Number(row["seq"]),
+			url: String(row["url"]),
+			method: String(row["method"]),
+			status: row["status"] === null || row["status"] === void 0 ? void 0 : Number(row["status"]),
+			requestHeaders: parseRecord(row["request_headers_json"]),
+			requestBodyPath: optString(row["request_body_path"]),
+			requestBodyPreview: optString(row["request_body_preview"]),
+			responseHeaders: parseRecord(row["response_headers_json"]),
+			responseBodyPath: optString(row["response_body_path"]),
+			responsePreview: optString(row["response_preview"]),
+			truncated: Number(row["truncated"]) === 1,
+			ts: Number(row["ts"])
+		}));
+	}
+	readBinary(relPath) {
+		const abs = join(this.io.samplesDir, relPath);
+		return existsSync(abs) ? readFileSync(abs) : void 0;
+	}
+	/** 按 merge_key 幂等：已有卡 → 追加页面引用 + 样本计数 +1；新卡 → 建行。 */
+	upsertCard(captureId, input) {
+		const existing = this.db.prepare("SELECT id FROM interface_cards WHERE merge_key=?").get(input.mergeKey);
+		if (existing !== void 0) {
+			this.db.prepare("UPDATE interface_cards SET related_pages_json=?, sample_count=sample_count+1 WHERE id=?").run(JSON.stringify(input.relatedPageUrls), existing.id);
+			if (input.requestTemplate !== void 0) this.db.prepare("UPDATE interface_cards SET request_template_json=? WHERE id=?").run(JSON.stringify(input.requestTemplate), existing.id);
+			if (input.responseTemplate !== void 0) this.db.prepare("UPDATE interface_cards SET response_template_json=? WHERE id=?").run(JSON.stringify(input.responseTemplate), existing.id);
+			if (input.authBinding !== void 0) this.db.prepare("UPDATE interface_cards SET auth_json=? WHERE id=?").run(JSON.stringify(input.authBinding), existing.id);
+			if (input.name !== void 0) this.db.prepare("UPDATE interface_cards SET name=? WHERE id=?").run(input.name, existing.id);
+			this.appendEvent({
+				kind: "card",
+				captureId,
+				cardId: existing.id,
+				merged: true
+			});
+			return existing.id;
+		}
+		const id = `card_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+		this.db.prepare(`INSERT INTO interface_cards(id,capture_id,merge_key,name,url_template,method,
+          request_template_json,response_template_json,auth_json,related_pages_json,sample_count,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,1,?)`).run(id, captureId, input.mergeKey, input.name ?? null, input.urlTemplate, input.method, input.requestTemplate === void 0 ? null : JSON.stringify(input.requestTemplate), input.responseTemplate === void 0 ? null : JSON.stringify(input.responseTemplate), input.authBinding === void 0 ? null : JSON.stringify(input.authBinding), JSON.stringify(input.relatedPageUrls), Date.now());
+		this.bumpRunStats(captureId, "cards");
+		this.appendEvent({
+			kind: "card",
+			captureId,
+			cardId: id
+		});
+		return id;
+	}
+	getCard(id) {
+		const row = this.db.prepare("SELECT * FROM interface_cards WHERE id=?").get(id);
+		return row === void 0 ? void 0 : rowToCard(row);
+	}
+	listCards(captureId, limit = 200) {
+		return this.db.prepare("SELECT * FROM interface_cards WHERE capture_id=? ORDER BY created_at ASC LIMIT ?").all(captureId, limit).map(rowToCard);
+	}
+	upsertCredential(captureId, kind, url, name, obtainedAt, value) {
+		const id = `cr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+		this.db.prepare("INSERT INTO credential_events(id,capture_id,kind,url,name,value_json,obtained_at) VALUES (?,?,?,?,?,?,?)").run(id, captureId, kind, url, name, value === void 0 ? null : JSON.stringify(value), obtainedAt);
+		this.bumpRunStats(captureId, "credentials");
+		this.appendEvent({
+			kind: "credential",
+			captureId,
+			credentialKind: kind,
+			name,
+			url
+		});
+		return id;
+	}
+	listCredentials(captureId, limit = 200) {
+		return this.db.prepare("SELECT * FROM credential_events WHERE capture_id=? ORDER BY obtained_at ASC LIMIT ?").all(captureId, limit).map((row) => ({
+			id: String(row["id"]),
+			captureId: String(row["capture_id"]),
+			kind: String(row["kind"]),
+			url: optString(row["url"]) ?? "",
+			name: String(row["name"]),
+			valueJson: optString(row["value_json"]),
+			obtainedAt: Number(row["obtained_at"])
+		}));
+	}
+	saveSession(origin, captureId, body) {
+		const id = `ls_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+		this.db.prepare("INSERT INTO login_sessions(id,capture_id,origin,stored_body,stored_at) VALUES (?,?,?,?,?)").run(id, captureId ?? null, origin, JSON.stringify(body), Date.now());
+		return id;
+	}
+	bumpRunStats(captureId, key) {
+		this.db.prepare(`UPDATE capture_runs SET stats_json = json_set(stats_json, '$.${key}', COALESCE(json_extract(stats_json, '$.${key}'),0)+1)
+         WHERE id=?`).run(captureId);
+	}
+	bodyPath(captureId, body, limit) {
+		if (body === void 0 || Buffer.byteLength(body) <= limit) return void 0;
+		const rel = join(captureId, `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}.bin`);
+		mkdirSync(join(this.io.samplesDir, captureId), { recursive: true });
+		writeFileSync(join(this.io.samplesDir, rel), body);
+		return rel;
+	}
+	appendEvent(event) {
+		if (this.io.eventsNdjsonPath === void 0) return;
+		appendFileSync(this.io.eventsNdjsonPath, `${JSON.stringify({
+			ts: Date.now(),
+			...event
+		})}\n`, "utf8");
+	}
+};
+function previewOf(body, limit) {
+	if (body === void 0) return void 0;
+	if (Buffer.byteLength(body) > limit) return void 0;
+	return String(body).slice(0, 512);
+}
+function parseRecord(raw) {
+	if (typeof raw !== "string") return {};
+	try {
+		const parsed = JSON.parse(raw);
+		if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+		return {};
+	} catch {
+		return {};
+	}
+}
+function optString(value) {
+	return value === null || value === void 0 ? void 0 : String(value);
+}
+function rowToCard(row) {
+	const related = parseArray(row["related_pages_json"]);
+	const requestTemplate = optTemplate(row["request_template_json"]);
+	const responseTemplate = optTemplate(row["response_template_json"]);
+	return {
+		id: String(row["id"]),
+		captureId: String(row["capture_id"]),
+		name: optString(row["name"]),
+		urlTemplate: String(row["url_template"]),
+		method: String(row["method"]),
+		requestTemplate,
+		responseTemplate,
+		authBinding: optRecord(row["auth_json"]),
+		relatedPageUrls: related,
+		sampleCount: Number(row["sample_count"]),
+		createdAt: Number(row["created_at"])
+	};
+}
+function optTemplate(raw) {
+	if (typeof raw !== "string" || raw.trim().startsWith("{") === false) return void 0;
+	const parsed = JSON.parse(raw);
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+	const record = parsed;
+	return {
+		fields: Array.isArray(record["fields"]) ? record["fields"] : [],
+		codePath: typeof record["codePath"] === "string" ? record["codePath"] : void 0
+	};
+}
+function optRecord(raw) {
+	if (typeof raw !== "string" || raw.trim().startsWith("{") === false) return void 0;
+	try {
+		const parsed = JSON.parse(raw);
+		return parsed === null || typeof parsed !== "object" || Array.isArray(parsed) ? void 0 : parsed;
+	} catch {
+		return;
+	}
+}
+function parseArray(raw) {
+	if (typeof raw !== "string") return [];
+	try {
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed.map(String) : [];
+	} catch {
+		return [];
+	}
+}
+
+//#endregion
+//#region src/capture/session.ts
+var SessionRegistry = class {
+	io;
+	sessions = /* @__PURE__ */ new Map();
+	constructor(io) {
+		this.io = io;
+	}
+	async open(o) {
+		const sessionId = `bs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+		const { browser, context, page } = await this.io.openCapturingPage("chrome", (w) => {
+			this.sessions.get(sessionId)?.sink?.(w);
+		});
+		this.sessions.set(sessionId, o.captureId === void 0 ? {
+			page,
+			browser,
+			context
+		} : {
+			page,
+			browser,
+			context,
+			captureId: o.captureId
+		});
+		if (o.entryUrl !== void 0) await page.goto(o.entryUrl, {
+			waitUntil: "domcontentloaded",
+			timeout: 15e3
+		}).catch(() => void 0);
+		return {
+			sessionId,
+			pageUrl: page.url()
+		};
+	}
+	bindSink(sessionId, sink) {
+		const s = this.sessions.get(sessionId);
+		if (s !== void 0) s.sink = sink;
+	}
+	async act(sessionId, spec) {
+		const s = this.sessions.get(sessionId);
+		if (s === void 0) return {
+			ok: false,
+			error: `session ${sessionId} 不存在`
+		};
+		try {
+			if (spec.kind === "click") await s.page.click(spec.selector, { timeout: 1e4 });
+			else if (spec.kind === "fill") await s.page.fill(spec.selector, spec.value, { timeout: 1e4 });
+			else if (spec.kind === "press") await s.page.keyboard.press(spec.key);
+			else if (spec.kind === "submit") await s.page.click(spec.selector, { timeout: 1e4 });
+			else if (spec.kind === "wait") await s.page.waitForTimeout(Math.min(spec.ms, 1e4));
+			else if (spec.kind === "goto") await s.page.goto(spec.url, {
+				waitUntil: "domcontentloaded",
+				timeout: 3e4
+			});
+			return {
+				ok: true,
+				pageUrl: s.page.url()
+			};
+		} catch (err) {
+			const msg = err?.message;
+			return typeof msg === "string" ? {
+				ok: false,
+				error: msg.slice(0, 300)
+			} : { ok: false };
+		}
+	}
+	async snapshot(sessionId) {
+		const s = this.sessions.get(sessionId);
+		if (s === void 0) return {
+			ok: false,
+			error: `session ${sessionId} 不存在`
+		};
+		try {
+			return {
+				ok: true,
+				elements: await s.page.$$eval("a[href], button, input, form, select, textarea", (els) => els.filter((el) => {
+					const e = el;
+					return typeof e.offsetWidth === "number" && e.offsetWidth > 0 && typeof e.offsetHeight === "number" && e.offsetHeight > 0;
+				}).slice(0, 80).map((el) => {
+					const e = el;
+					const tag = String(e.tagName ?? "?").toLowerCase();
+					const id = String(e.id ?? "");
+					const name = e.getAttribute("name") ?? "";
+					const txt = String(e.textContent ?? "").trim().slice(0, 40);
+					return `${tag}${id ? `#${id}` : ""}${name ? `[name=${name}]` : ""} ${txt}`.trim();
+				}))
+			};
+		} catch (err) {
+			const msg = err?.message;
+			return typeof msg === "string" ? {
+				ok: false,
+				error: msg.slice(0, 300)
+			} : { ok: false };
+		}
+	}
+	async close(sessionId) {
+		const s = this.sessions.get(sessionId);
+		if (s === void 0) return {
+			ok: false,
+			cookies: []
+		};
+		const cookies = (await s.context.cookies()).map((c) => ({
+			name: String(c["name"] ?? ""),
+			domain: String(c["domain"] ?? "")
+		}));
+		await s.browser.close().catch(() => void 0);
+		this.sessions.delete(sessionId);
+		return s.captureId === void 0 ? {
+			ok: true,
+			cookies
+		} : {
+			ok: true,
+			cookies,
+			captureId: s.captureId
+		};
+	}
+};
 
 //#endregion
 //#region src/index.ts
@@ -1801,6 +3112,14 @@ function loadPolicyText(engineRoot) {
 		].join("\n")
 	};
 }
+/** 采集域纪律：追加到 policy 文本末尾的常驻段。 */
+const CAPTURE_POLICY = [
+	"## dataforge-capture（接口采集）",
+	"- 采集目标站任何写操作只经 dataforge_capture(task_type=action) 且用户明确 confirm；禁止用 browser_act 未确认直接提交表单。",
+	"- site_crawl 是后台任务：dataforge_capture 返回 captureId 后用 dataforge_capture_status 轮询，不要凭空报结果。",
+	"- 采集结果用 dataforge_capture_result(scope=cards|samples|credentials|pages) 取回，报给用户时只说接口名/用途/出入参要点，不贴 token/cookie 原文。",
+	"- 诚实边界：遇风控/验证码/超限截断/外部域名跳过，如实转述 capture_status/capture_result 里的 notice，不隐瞒。"
+].join("\n");
 /** 装载插件。 */
 function apply(ctx, rawConfig) {
 	const anyCtx = ctx;
@@ -1815,6 +3134,16 @@ function apply(ctx, rawConfig) {
 		resolveJobs: () => jobsService,
 		resolveWorkspaceRoot
 	});
+	const captureDeps = {
+		config,
+		resolveJobs: () => jobsService,
+		store: new CaptureStore(join(config.dataRoot, "capture", "capture.sqlite"), join(config.dataRoot, "capture", "samples"), join(config.dataRoot, "capture", "events.ndjson")),
+		registry: new SessionRegistry({
+			openCapturingPage,
+			bodyLimit: config.captureBodyLimitBytes
+		}),
+		openCapturingPage
+	};
 	anyCtx.inject?.(["tools"], (toolsService) => {
 		const tools = toolsService["tools"];
 		if (typeof tools?.register !== "function") {
@@ -1825,17 +3154,26 @@ function apply(ctx, rawConfig) {
 		for (const tool of [
 			defineFlowsTool(dataforgeDeps),
 			defineRunTool(dataforgeDeps),
-			defineStatusTool(dataforgeDeps)
+			defineStatusTool(dataforgeDeps),
+			defineCaptureTool(captureDeps),
+			defineCaptureStatusTool(captureDeps),
+			defineCaptureResultTool(captureDeps),
+			defineCaptureCancelTool(captureDeps),
+			defineBrowserOpenTool(captureDeps),
+			defineBrowserActTool(captureDeps),
+			defineBrowserSnapshotTool(captureDeps),
+			defineBrowserCloseTool(captureDeps)
 		]) tools.register(tool);
-		logger?.info?.(`已注册 3 个工具：dataforge_flows / dataforge_run / dataforge_status（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
+		logger?.info?.(`已注册 11 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
 	});
 	if (config.injectPolicy) try {
 		const policy = loadPolicyText(config.engineRoot);
+		const combined = `${policy.text}\n\n${CAPTURE_POLICY}`;
 		const sectionName = "tool:dataforge";
 		anyCtx.systemPrompt?.section?.({
 			name: sectionName,
 			order: anyCtx.systemPrompt?.getSectionOrder?.("TOOL_GOAL"),
-			text: policy.text
+			text: combined
 		});
 		logger?.info?.(`策略段 ${sectionName} 已注入（来源 ${policy.source}）`);
 	} catch (err) {
