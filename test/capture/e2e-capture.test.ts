@@ -23,6 +23,7 @@ itReal('single_page 抓百度：run=done 且 cards ≥1（首页静止 0 卡时�
         engineRoot: dir, pythonBin: 'python3', dataRoot: dir, timeoutSeconds: 600, injectPolicy: false,
         captureMaxDepth: 3, captureMaxPages: 50, captureStabilityWindowMs: 1500,
         captureBodyLimitBytes: 262_144, captureChromeChannel: 'chrome',
+        chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152,
       },
       resolveJobs: () => ({
         start: (spec: { run: (h: { id: string; append: (t: string) => void; updateProgress: (t: string) => void }) => { done: Promise<unknown> } }) => {

@@ -26,10 +26,10 @@ import { DataforgeError } from './shared/errors.js'
 import {
   defineBrowserActTool, defineBrowserCloseTool, defineBrowserOpenTool, defineBrowserSnapshotTool,
   defineCaptureCancelTool, defineCaptureResultTool, defineCaptureStatusTool, defineCaptureTool,
-  defineChainGetTool, defineChainUpsertTool, defineFlowsTool, defineLibraryImportTool,
-  defineRunTool, defineStatusTool,
+  defineChainGetTool, defineChainRunsTool, defineChainRunTool, defineChainUpsertTool,
+  defineFlowsTool, defineLibraryImportTool, defineRunTool, defineStatusTool,
 } from './tools.js'
-import type { OrchestrationDeps } from './orchestration/application.js'
+import type { ChainRunToolDeps, OrchestrationDeps } from './orchestration/application.js'
 import { openCapturingPage } from './capture/browser.js'
 import { CaptureStore } from './capture/store.js'
 import { startCapture } from './capture/application.js'
@@ -133,6 +133,21 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
     resolveWorkspaceRoot,
   }
 
+  // 执行域：运行留痕复用 dataRoot/runs（与流程造数同一套投影），配置走四个执行开关。
+  const chainRunDeps: ChainRunToolDeps = {
+    ...orchestrationDeps,
+    dataRoot: config.dataRoot,
+    chain: {
+      enabled: config.chainRunEnabled,
+      nodeTimeoutSeconds: config.chainNodeTimeoutSeconds,
+      concurrency: config.chainConcurrency,
+      responseLimitBytes: config.chainResponseLimitBytes,
+      // 前台降级时的整链兜底超时：沿用桥进程的同一个开关，不新造一个。
+      foregroundTimeoutSeconds: config.timeoutSeconds,
+    },
+    resolveJobs: () => jobsService,
+  }
+
   // 面板数据面：/dashboard/api/dataforge 只读路由（webServer 惰性注入；服务缺席 → 工具面照常）。
   anyCtx.inject?.(['webServer'], (webSvc) => {
     const effect = webSvc['effect'] as ((fn: () => (() => void) | void, label?: string) => void) | undefined
@@ -186,11 +201,14 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       defineLibraryImportTool(orchestrationDeps),
       defineChainUpsertTool(orchestrationDeps),
       defineChainGetTool(orchestrationDeps),
+      defineChainRunTool(chainRunDeps),
+      defineChainRunsTool(chainRunDeps),
     ]) {
       tools.register(tool)
     }
-    logger?.info?.(`已注册 14 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
-      + ` + library_import/chain_upsert/chain_get（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
+    logger?.info?.(`已注册 16 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
+      + ` + library_import/chain_upsert/chain_get/chain_run/chain_runs（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
+    if (!config.chainRunEnabled) logger?.info?.('执行开关 chainRunEnabled=false：dataforge_chain_run 一律 execution-disabled')
   })
 
   // 常驻策略段：工具自述只在「打算调工具」时被读到，三道闸纪律得每轮在场。

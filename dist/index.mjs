@@ -13,7 +13,7 @@ function isNullable(value) {
 	return value === null || value === void 0;
 }
 /** Return true for non-array object values. */
-function isPlainObject(data) {
+function isPlainObject$1(data) {
 	return data && typeof data === "object" && !Array.isArray(data);
 }
 /** Filter object entries and return a new object. */
@@ -753,7 +753,7 @@ Schema.extend("array", (data, { inner, meta }, options) => {
 	return [data.map((_, index) => property(data, index, inner, options))];
 });
 Schema.extend("dict", (data, { inner, sKey }, options, strict) => {
-	if (!isPlainObject(data)) throw new ValidationError(`expected object but got ${data}`, options);
+	if (!isPlainObject$1(data)) throw new ValidationError(`expected object but got ${data}`, options);
 	const result = {};
 	for (const key in data) {
 		let rKey;
@@ -783,7 +783,7 @@ function merge(result, data) {
 	}
 }
 Schema.extend("object", (data, { dict }, options, strict) => {
-	if (!isPlainObject(data)) throw new ValidationError(`expected object but got ${data}`, options);
+	if (!isPlainObject$1(data)) throw new ValidationError(`expected object but got ${data}`, options);
 	const result = {};
 	for (const key in dict) {
 		const value = property(data, key, dict[key], options);
@@ -812,7 +812,7 @@ Schema.extend("intersect", (data, { list, toString }, options, strict) => {
 		else if (typeof value === "object") merge(result ??= {}, value);
 		else if (result !== value) throw new ValidationError(`expected ${toString()} but got ${JSON.stringify(data)}`, options);
 	}
-	if (!strict && isPlainObject(data)) merge(result, data);
+	if (!strict && isPlainObject$1(data)) merge(result, data);
 	return [result];
 });
 Schema.extend("transform", (data, { inner, callback, preserve }, options) => {
@@ -917,7 +917,11 @@ const Config = Schema.object({
 	captureMaxPages: Schema.number().default(50),
 	captureStabilityWindowMs: Schema.number().default(1500),
 	captureBodyLimitBytes: Schema.number().default(262144),
-	captureChromeChannel: Schema.string().default("chrome")
+	captureChromeChannel: Schema.string().default("chrome"),
+	chainRunEnabled: Schema.boolean().default(true),
+	chainNodeTimeoutSeconds: Schema.number().default(30),
+	chainConcurrency: Schema.number().default(4),
+	chainResponseLimitBytes: Schema.number().default(2097152)
 });
 /** 归一化（相对路径 → 绝对；~ 展开）。 */
 function normalizeConfig(raw) {
@@ -932,7 +936,11 @@ function normalizeConfig(raw) {
 		captureMaxPages: raw.captureMaxPages,
 		captureStabilityWindowMs: raw.captureStabilityWindowMs,
 		captureBodyLimitBytes: raw.captureBodyLimitBytes,
-		captureChromeChannel: raw.captureChromeChannel
+		captureChromeChannel: raw.captureChromeChannel,
+		chainRunEnabled: raw.chainRunEnabled,
+		chainNodeTimeoutSeconds: raw.chainNodeTimeoutSeconds,
+		chainConcurrency: raw.chainConcurrency,
+		chainResponseLimitBytes: raw.chainResponseLimitBytes
 	};
 }
 
@@ -1225,6 +1233,23 @@ function listRunIds(dataRoot, limit = 20) {
 	}).sort().reverse().slice(0, limit);
 }
 /**
+* 读 `run.json` 元数据；目录/文件不存在或 JSON 坏掉一律返回 undefined。
+*
+* 读侧对未知键完全容忍（链路运行多出的 `chain` 段、未来新增键都不影响旧读者）。
+* 返回 undefined 的语义是「这条记录读不出来」，由调用方决定跳过还是计数。
+*/
+function readRunRecord(dataRoot, runId) {
+	const path = join(runsRoot(dataRoot), runId, "run.json");
+	if (!existsSync(path)) return void 0;
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf8"));
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+		return parsed;
+	} catch {
+		return;
+	}
+}
+/**
 * 把事件流折叠成了 → 一张摘要（唯一投影规则）：
 * - meta 定 flow/steps/dryRun
 * - step.start 计入 lastStep；step.done 计入 stepsDone；step.error 计入 lastError
@@ -1238,6 +1263,7 @@ function foldSummary(runId, events, overrideStatus) {
 	let lastError;
 	let terminalMessage;
 	let terminalSuccess;
+	let terminalCancelled = false;
 	let result;
 	for (const e of events) if (e.event === "step") {
 		if (e.status === "start") lastStepId = e.id;
@@ -1249,10 +1275,12 @@ function foldSummary(runId, events, overrideStatus) {
 	} else if (e.event === "terminal") {
 		terminalMessage = e.message;
 		terminalSuccess = e.success;
+		terminalCancelled = e.cancelled === true;
 	} else if (e.event === "result") result = e;
 	const success = result?.success ?? terminalSuccess;
 	let status;
 	if (overrideStatus !== void 0) status = overrideStatus;
+	else if (terminalCancelled) status = "killed";
 	else if (result === void 0 && terminalMessage === void 0) status = "running";
 	else if (success === true) status = "completed";
 	else status = "failed";
@@ -1273,8 +1301,29 @@ function foldSummary(runId, events, overrideStatus) {
 		...lastError === void 0 ? {} : { lastError },
 		...success === void 0 ? {} : { success },
 		...bizData === void 0 ? {} : { businessData: bizData },
-		...terminalMessage === void 0 ? {} : { message: terminalMessage }
+		...terminalMessage === void 0 ? {} : { message: terminalMessage },
+		...chainSummaryOf(meta, bizData)
 	};
+}
+/**
+* 链运行的身份与节点级结果（IF-6）：`meta.chain` 是写入时的快照，
+* `result.businessData` 里的 `failedNode` / `completed` 是终态补充。
+*
+* 没有 `meta.chain` 的旧流程运行返回空对象——只增可选字段，旧 run 不受影响。
+*/
+function chainSummaryOf(meta, bizData) {
+	const chainMeta = plainRecord(meta?.chain);
+	if (chainMeta === void 0) return {};
+	const failedNode = typeof bizData?.["failedNode"] === "string" ? bizData["failedNode"] : void 0;
+	const completedRaw = bizData?.["completed"];
+	const completedNodes = Array.isArray(completedRaw) ? completedRaw.filter((item) => typeof item === "string") : void 0;
+	return { chain: {
+		site: typeof chainMeta["site"] === "string" ? chainMeta["site"] : "",
+		flow: typeof chainMeta["flow"] === "string" ? chainMeta["flow"] : "",
+		version: numOrUndefined(chainMeta["version"]) ?? 0,
+		...failedNode === void 0 ? {} : { failedNode },
+		...completedNodes === void 0 ? {} : { completedNodes }
+	} };
 }
 function numOrUndefined(value) {
 	return typeof value === "number" ? value : void 0;
@@ -2109,7 +2158,7 @@ async function openCapturingPage(channel, onWireSample) {
 
 //#endregion
 //#region src/capture/application.ts
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+const sleep$1 = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 /**
 * 单次采集样本上限（§11 A9）：一次 run 至多入库 1000 条样本，超出如实弃采并在 run 上附 notice。
 * 用模块常量而非 config 项——上限是采集纪律（验收基准），不是部署调参。
@@ -2354,7 +2403,7 @@ function makeAutonomousRun(deps, captureId, taskType, entry, args) {
 										waitUntil: "domcontentloaded",
 										timeout: 3e4
 									});
-									await sleep(deps.config.captureStabilityWindowMs);
+									await sleep$1(deps.config.captureStabilityWindowMs);
 									return {
 										pageId: "",
 										html: await page.content(),
@@ -2873,7 +2922,7 @@ function libraryError(code, message, hints = []) {
 		hints
 	});
 }
-function parseJson(text) {
+function parseJson$1(text) {
 	if (text === null || text === "") return void 0;
 	try {
 		return JSON.parse(text);
@@ -2882,13 +2931,13 @@ function parseJson(text) {
 	}
 }
 function parseStringArray(text) {
-	const parsed = parseJson(text);
+	const parsed = parseJson$1(text);
 	return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
 }
 /** 模板 JSON → Template；**存在但解析不出形状**返回 'broken'（调用方按坏卡跳过）。 */
 function parseTemplate(text) {
 	if (text === null || text === "") return void 0;
-	const parsed = parseJson(text);
+	const parsed = parseJson$1(text);
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return "broken";
 	const fields = parsed["fields"];
 	if (!Array.isArray(fields)) return "broken";
@@ -2902,7 +2951,7 @@ function parseTemplate(text) {
 	};
 }
 function parseAuthType(text) {
-	const parsed = parseJson(text);
+	const parsed = parseJson$1(text);
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return { auth: "unknown" };
 	const record = parsed;
 	const raw = record["authType"];
@@ -4196,6 +4245,1769 @@ function defaultCardResolver(workspaceRoot) {
 }
 
 //#endregion
+//#region src/execute/coverage.ts
+/**
+* 绑定/常量/卡模板路径的归一形式：`fieldSegments(path).join('.')`。
+*
+* `[0]` / `[*]` / `[]` 一律收敛成 `[*]`，所以覆盖判定不再需要关心写法差异。
+*/
+function normalizePath(path) {
+	return fieldSegments(path).join(".");
+}
+/**
+* 一个节点已被静态赋值的入参路径集合（归一后）。
+*
+* 两个来源：
+*   - 节点 `constants` 的键（R-6 结晶的常量写入点）；
+*   - 以该节点为终点的绑定边 `to` 的字段路径（边只表示「上游产出填这里」，
+*     值在执行期由 `resolveBinding` 取得）。
+*
+* 槽位引用 `$inputs.<name>` 不在这里展开：它仍是常量值，键已经被覆盖；
+* 槽位有没有运行值是 `buildPlan()` 的事（缺值是链级缺参，不是节点覆盖问题）。
+*/
+function coveredPaths(doc, node) {
+	const covered = /* @__PURE__ */ new Set();
+	for (const key of Object.keys(node.constants ?? {})) {
+		const normalized = normalizePath(key);
+		if (normalized.length > 0) covered.add(normalized);
+	}
+	for (const edge of doc.edges) {
+		const to = splitBindingPath(edge.to);
+		if (!to || to.nodeId !== node.id) continue;
+		const normalized = normalizePath(to.fieldPath);
+		if (normalized.length > 0) covered.add(normalized);
+	}
+	return covered;
+}
+/**
+* 卡模板里有、但节点既无常量也无绑定、且不是凭证字段的入参。
+*
+* 不看 `f.required`（见模块头注释）。`covered` 必须来自 {@link coveredPaths}
+* （已归一）；未归一的集合会让 `[n]`/`[*]` 的差异漏判。
+*
+* 凭证字段（`role === 'credential'`）直接跳过：凭证由 R-4 注入，引擎既不发空值
+* 也不报缺参；调用方需要自己记一条 `auth-not-injected` 提示（plan.ts 负责）。
+*/
+function missingInputs(node, card, covered) {
+	const gaps = [];
+	for (const field of card.inputs ?? []) {
+		if (field.role === "credential") continue;
+		if (covered.has(normalizePath(field.path))) continue;
+		gaps.push(gapOf(node, field));
+	}
+	return gaps;
+}
+function gapOf(node, field) {
+	return {
+		nodeId: node.id,
+		path: field.path,
+		type: field.type,
+		target: `node:${node.id}`
+	};
+}
+const SCALAR_CHECKS = {
+	string: (value) => typeof value === "string",
+	number: (value) => typeof value === "number",
+	boolean: (value) => typeof value === "boolean",
+	object: (value) => typeof value === "object" && value !== null && !Array.isArray(value),
+	array: (value) => Array.isArray(value),
+	null: (value) => value === null
+};
+/**
+* 运行值是否符合链/卡声明的类型；符合返回 `undefined`，不符返回中文原因（带路径）。
+*
+* 用于链级槽位值（`dataforge_chain_run` 的 `inputs`）与后续请求构造的入参校验。
+* 类型词表与 R-1 的 `CHAIN_VALUE_TYPES` 同源：`string` / `number` / `boolean` /
+* `object` / `array` / `null` 与 `array<T>`。
+*/
+function checkValueType(path, expected, value) {
+	const want = expected.trim();
+	const nested = /^array<(.+)>$/.exec(want);
+	if (nested) {
+		if (!Array.isArray(value)) return `${path}: 期望 ${want}，实际是 ${actualTypeOf(value)}`;
+		const inner = nested[1].trim();
+		for (let index = 0; index < value.length; index += 1) {
+			const reason = checkValueType(`${path}[${index}]`, inner, value[index]);
+			if (reason !== void 0) return reason;
+		}
+		return;
+	}
+	const check = SCALAR_CHECKS[want];
+	if (!check) return `${path}: 未知的值类型 ${want}`;
+	return check(value) ? void 0 : `${path}: 期望 ${want}，实际是 ${actualTypeOf(value)}`;
+}
+function actualTypeOf(value) {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "array";
+	if (typeof value === "object") return "object";
+	if (value === void 0) return "undefined";
+	return typeof value;
+}
+
+//#endregion
+//#region src/execute/plan.ts
+/**
+* 编译执行计划。
+*
+* `inputs` 是本次运行的槽位值（键 = 链文件声明的槽位名）；`baseUrl` 由调用方
+* （`chain_run`）解析后传入，本函数只判定「是不是 http(s) 源」，不做来源推断。
+*/
+function buildPlan(doc, cards, inputs, baseUrl) {
+	if (doc.kind === "page-chain") return failure("not-executable", `链 ${doc.meta.site}/${doc.meta.flow} 是 page-chain：先经 R-1 compilePageChain 编译成 interface-chain 草稿并落盘，再执行`);
+	const topo = topoOrder(doc);
+	if (topo.cycle.length > 0) return failure("cycle", `绑定关系成环，涉及节点：${topo.cycle.join(" → ")}`, [], topo.cycle);
+	const missingCards = [];
+	for (const node of doc.nodes) {
+		if (typeof node.card !== "string" || node.card.length === 0) {
+			missingCards.push(`节点 ${node.id} 没有 card 引用`);
+			continue;
+		}
+		if (!cards.has(node.card)) missingCards.push(`节点 ${node.id} 引用的卡 ${node.card} 不在项目接口库中`);
+	}
+	if (missingCards.length > 0) return failure("card-not-imported", `${missingCards.join("；")}：先跑 dataforge_library_import 把采集包导入`);
+	const runtimeInputs = inputs ?? {};
+	const declaredSlots = new Map(doc.inputs.map((input) => [input.name, input]));
+	const edgeSlots = slotRefsFromEdges(doc);
+	const gapsByNode = /* @__PURE__ */ new Map();
+	const notices = [];
+	const authGapNodes = [];
+	for (const nodeId of topo.order) {
+		const node = doc.nodes.find((candidate) => candidate.id === nodeId);
+		if (!node) continue;
+		const card = cards.get(node.card);
+		const covered = coveredPaths(doc, node);
+		const gaps = missingInputs(node, card, covered);
+		const uncoveredCredentials = (card.inputs ?? []).filter((field) => field.role === "credential" && !covered.has(normalizePath(field.path)));
+		if (uncoveredCredentials.length > 0) authGapNodes.push(`${node.id}（${uncoveredCredentials.map((field) => field.path).join(" / ")}）`);
+		const seenSlots = /* @__PURE__ */ new Set();
+		for (const value of Object.values(node.constants ?? {})) {
+			const slot = inputSlotNameOf(String(value));
+			if (slot === void 0 || seenSlots.has(slot)) continue;
+			seenSlots.add(slot);
+			const gap = slotGapOf(nodeId, slot, declaredSlots, runtimeInputs);
+			if (gap) gaps.push(gap);
+		}
+		for (const slot of edgeSlots.get(nodeId) ?? []) {
+			if (seenSlots.has(slot)) continue;
+			seenSlots.add(slot);
+			const gap = slotGapOf(nodeId, slot, declaredSlots, runtimeInputs);
+			if (gap) gaps.push(gap);
+		}
+		gapsByNode.set(nodeId, gaps);
+	}
+	const allGaps = topo.order.flatMap((nodeId) => gapsByNode.get(nodeId) ?? []);
+	if (allGaps.length > 0) return failure("missing-params", `静态缺参 ${allGaps.length} 条（一个请求都不会发）：${describeGaps(allGaps)}`, allGaps);
+	const resolvedBase = resolveBaseUrl(baseUrl);
+	if (!resolvedBase.ok) return failure("base-url-unresolved", resolvedBase.message);
+	if (authGapNodes.length > 0) notices.push(`auth-not-injected：节点 ${authGapNodes.join("、")} 的凭证入参未注入（R-4 负责），引擎不会发送空值`);
+	const idSet = new Set(topo.order);
+	const dependsOn = /* @__PURE__ */ new Map();
+	for (const pair of dependencyPairs(doc)) {
+		if (!idSet.has(pair.from) || !idSet.has(pair.to)) continue;
+		const list = dependsOn.get(pair.to) ?? [];
+		if (!list.includes(pair.from)) list.push(pair.from);
+		dependsOn.set(pair.to, list);
+	}
+	const nodes = topo.order.map((nodeId) => {
+		const node = doc.nodes.find((candidate) => candidate.id === nodeId);
+		const card = cards.get(node.card);
+		return {
+			nodeId,
+			cardId: card.cardId,
+			method: card.identity.method,
+			urlTemplate: card.identity.urlTemplate,
+			dependsOn: dependsOn.get(nodeId) ?? [],
+			constants: { ...node.constants ?? {} },
+			gaps: gapsByNode.get(nodeId) ?? []
+		};
+	});
+	return {
+		ok: true,
+		plan: {
+			order: [...topo.order],
+			nodes,
+			gaps: [],
+			baseUrl: resolvedBase.baseUrl,
+			writeNodes: nodes.filter((node) => isWriteMethod(node.method)).map((node) => node.nodeId),
+			totalNodes: topo.order.length
+		},
+		notices
+	};
+}
+function failure(code, message, gaps = [], cycle = []) {
+	return {
+		ok: false,
+		code,
+		message,
+		gaps,
+		cycle
+	};
+}
+/** 写方法 = 非 GET/HEAD（大小写不敏感）；用于回执里的写类节点清单与确认纪律。 */
+function isWriteMethod(method) {
+	const normalized = method.trim().toUpperCase();
+	return normalized !== "GET" && normalized !== "HEAD";
+}
+/** baseUrl 只判定：缺省、不是合法 URL、或协议不是 http(s) 都算不可解析。 */
+function resolveBaseUrl(baseUrl) {
+	const raw = typeof baseUrl === "string" ? baseUrl.trim() : "";
+	if (raw.length === 0) return {
+		ok: false,
+		message: "baseUrl 未提供：执行需要一个明确的 http(s) 源（工具入参 baseUrl）"
+	};
+	let parsed;
+	try {
+		parsed = new URL(raw);
+	} catch {
+		return {
+			ok: false,
+			message: `baseUrl 不是合法的 URL：${raw}`
+		};
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return {
+		ok: false,
+		message: `baseUrl 必须是 http(s) 源，实际是 ${parsed.protocol}//：${raw}`
+	};
+	return {
+		ok: true,
+		baseUrl: raw
+	};
+}
+/** 边 `from: $inputs.x` → 终点节点 id 上的槽位引用（槽位不是节点，不能算依赖）。 */
+function slotRefsFromEdges(doc) {
+	const refs = /* @__PURE__ */ new Map();
+	for (const edge of doc.edges) {
+		const slot = inputSlotNameOf(edge.from);
+		if (slot === void 0) continue;
+		const to = splitBindingPath(edge.to);
+		if (!to) continue;
+		const list = refs.get(to.nodeId) ?? [];
+		if (!list.includes(slot)) list.push(slot);
+		refs.set(to.nodeId, list);
+	}
+	return refs;
+}
+/** 槽位没有运行值 → 缺参；`inputs[].required` 不参与判据（引用即需要值）。 */
+function slotGapOf(nodeId, slot, declaredSlots, inputs) {
+	if (hasRuntimeValue(inputs, slot)) return void 0;
+	return {
+		nodeId,
+		path: `$inputs.${slot}`,
+		type: declaredSlots.get(slot)?.type ?? "unknown",
+		target: `$inputs.${slot}`
+	};
+}
+function hasRuntimeValue(inputs, name) {
+	return Object.prototype.hasOwnProperty.call(inputs, name) && inputs[name] !== void 0;
+}
+function describeGaps(gaps) {
+	return gaps.map((gap) => `${gap.nodeId} · ${gap.path} · ${gap.type}`).join("；");
+}
+
+//#endregion
+//#region src/execute/binding.ts
+/**
+* 绑定求值（IF-5）：从上游响应根按 R-1 绑定路径取出参值。
+*
+* 纯函数：不修改 `root`、不读磁盘、不联网；同输入同输出。
+*
+* 路径语法（R-1 的子集，不引 JSONPath）：
+*   - 首段是 `body` / `status` / `headers` 时按信封取；否则整条路径对 `root.body` 求值
+*     （兼容早期只写 `items[0].id` 的手写链）；
+*   - `[n]` 取数组第 n 项，越界 → `path-not-found`；
+*   - `[*]` / `[]` 对数组做投影，结果为数组；多级 `[*]` 如实产出嵌套数组；
+*   - 投影结果 0 个元素 → `empty-wildcard`；目标为标量且恰好 1 个元素 → 解包并记
+*     `unwrapped: true`；目标为数组时保持数组（`array<T>` 同理）。多于 1 个而目标为
+*     标量 → `type-mismatch`（提示改用 `[0]` 或把目标声明成数组）。
+*   - `null` / `undefined` 一律视为缺值 → `null-value`，不静默塞给下游；
+*   - 路径不存在 / 结构不符（该是数组却不是、下标越界）→ `path-not-found`。
+*
+* `matched` 用 R-1 的 `fieldSegments` 归一（`[0]` / `[]` / `[*]` 都收敛成 `[*]`），
+* 这样运行记录里的绑定值能回指到链上的绑定边。
+*
+* @module dsh-dataforge/execute/binding
+*/
+const ENVELOPES = /* @__PURE__ */ new Set([
+	"body",
+	"status",
+	"headers"
+]);
+/** `items[0][*]` → 字段名 `items` + 两个下标；字段名本身不含方括号。 */
+const SEGMENT_PATTERN = /^([^[\]]*)((?:\[[^[\]]*\])*)$/;
+/**
+* 解析一个可带下标的段；非法（如 `[abc]`）返回 undefined。
+*
+* 注意这里保留 `[n]` 的 n —— `fieldSegments` 会把 `[0]` 与 `[*]` 归一成同一个占位，
+* 求值时必须知道到底取第几项，只有 `matched` 才走归一化。
+*/
+function parseSegment(raw) {
+	const hit = SEGMENT_PATTERN.exec(raw);
+	if (!hit) return void 0;
+	const name = (hit[1] ?? "").trim();
+	const brackets = (hit[2] ?? "").match(/\[[^[\]]*\]/g) ?? [];
+	const indexes = [];
+	for (const bracket of brackets) {
+		const inner = bracket.slice(1, -1).trim();
+		if (inner === "" || inner === "*") indexes.push("wildcard");
+		else if (/^\d+$/.test(inner)) indexes.push(Number(inner));
+		else return;
+	}
+	if (name.length === 0 && indexes.length === 0) return void 0;
+	return {
+		name,
+		indexes
+	};
+}
+/** 路径 → 信封 + 段数组；空路径/非法段返回 undefined。 */
+function parsePath(path) {
+	const raws = path.split(".").map((raw) => raw.trim()).filter((raw) => raw.length > 0);
+	if (raws.length === 0) return void 0;
+	let envelope;
+	let start = 0;
+	const first = raws[0] ?? "";
+	if (ENVELOPES.has(first)) {
+		envelope = first;
+		start = 1;
+	}
+	const segments = [];
+	for (const raw of raws.slice(start)) {
+		const segment = parseSegment(raw);
+		if (!segment) return void 0;
+		segments.push(segment);
+	}
+	return {
+		envelope,
+		segments
+	};
+}
+/** 段的中文定位（错误信息指出断在第几段）。 */
+function segmentLabel(segment, step) {
+	const suffix = segment.indexes.map((index) => index === "wildcard" ? "[*]" : `[${index}]`).join("");
+	return `第 ${step} 段「${segment.name}${suffix}」`;
+}
+function whereOf(segments, step) {
+	const segment = segments[step];
+	return segment ? segmentLabel(segment, step + 1) : "路径末尾";
+}
+/** 运行记录里给人看的实际类型。 */
+function typeName(value) {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "array";
+	return typeof value;
+}
+function isPlainObject(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const proto = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+}
+/** 有限数字，或可无损往返的数字字符串（`"12"` 可以，`"12abc"` / `"1.0"` 不行）。 */
+function isNumericString(value) {
+	const text = value.trim();
+	if (text.length === 0) return false;
+	const parsed = Number(text);
+	return Number.isFinite(parsed) && String(parsed) === text;
+}
+function isArrayType(expectedType) {
+	const base = expectedType.trim().toLowerCase();
+	return base === "array" || base.startsWith("array<") && base.endsWith(">");
+}
+/**
+* 类型匹配（与卡模板同词表）。返回实际类型用于错误信息；
+* `array<T>` 逐元素校验，元素的第一个不符点写进 actual（如 `array<string>`）。
+*/
+function matchType(value, expectedType) {
+	const expected = expectedType.trim();
+	const base = expected.toLowerCase();
+	if (base.startsWith("array<") && base.endsWith(">")) {
+		if (!Array.isArray(value)) return {
+			ok: false,
+			actual: typeName(value)
+		};
+		const inner = expected.slice(6, -1).trim();
+		if (inner.length === 0) return {
+			ok: true,
+			actual: "array"
+		};
+		for (const item of value) {
+			const result = matchType(item, inner);
+			if (!result.ok) return {
+				ok: false,
+				actual: `array<${result.actual}>`
+			};
+		}
+		return {
+			ok: true,
+			actual: "array"
+		};
+	}
+	switch (base) {
+		case "string": return {
+			ok: typeof value === "string",
+			actual: typeName(value)
+		};
+		case "number": return {
+			ok: typeof value === "number" && Number.isFinite(value) || typeof value === "string" && isNumericString(value),
+			actual: typeName(value)
+		};
+		case "boolean": return {
+			ok: typeof value === "boolean" || value === "true" || value === "false",
+			actual: typeName(value)
+		};
+		case "object": return {
+			ok: isPlainObject(value),
+			actual: typeName(value)
+		};
+		case "array": return {
+			ok: Array.isArray(value),
+			actual: typeName(value)
+		};
+		case "null": return {
+			ok: value === null,
+			actual: typeName(value)
+		};
+		default: return {
+			ok: true,
+			actual: typeName(value)
+		};
+	}
+}
+function failureOf(code, message) {
+	return {
+		ok: false,
+		failure: {
+			code,
+			message
+		}
+	};
+}
+function nullFailure(path, where) {
+	return failureOf("null-value", `绑定路径「${path}」在${where}处取到 null/undefined，不能把空值传给下游`);
+}
+/** 路径求值里的每个中间值都不许是 null/undefined（显式缺值要如实报）。 */
+function guardNull(value, path, where) {
+	return value === null || value === void 0 ? nullFailure(path, where) : void 0;
+}
+/** 读对象字段；字段不存在才是 `path-not-found`，字段存在但值是 null 交给 guard。 */
+function readProperty(value, name, path, where) {
+	if (value === null || value === void 0) return nullFailure(path, where);
+	if (typeof value !== "object" || Array.isArray(value)) return failureOf("path-not-found", `绑定路径「${path}」在${where}处期望对象，实际类型 ${typeName(value)}`);
+	if (!(name in value)) return failureOf("path-not-found", `绑定路径「${path}」在${where}处未命中：字段「${name}」不存在`);
+	return {
+		ok: true,
+		value: value[name]
+	};
+}
+/** 依次应用段内下标；`[*]` 投影到每个元素，并继续求后续段（多级通配得到嵌套数组）。 */
+function applyIndexes(value, indexes, segments, step, where, path) {
+	const head = indexes[0];
+	if (head === void 0) return evalSegments(value, segments, step + 1, path);
+	if (!Array.isArray(value)) return failureOf("path-not-found", `绑定路径「${path}」在${where}处期望数组，实际类型 ${typeName(value)}`);
+	if (head === "wildcard") {
+		const rest = indexes.slice(1);
+		const projected = [];
+		for (const element of value) {
+			const result = applyIndexes(element, rest, segments, step, where, path);
+			if (!result.ok) return result;
+			projected.push(result.value);
+		}
+		return {
+			ok: true,
+			value: projected
+		};
+	}
+	if (head >= value.length) return failureOf("path-not-found", `绑定路径「${path}」在${where}处下标 ${head} 越界（数组长度 ${value.length}）`);
+	const element = value[head];
+	const missing = guardNull(element, path, where);
+	if (missing) return missing;
+	return applyIndexes(element, indexes.slice(1), segments, step, where, path);
+}
+/** 对当前值求第 step 段：先取字段，再应用段内下标，最后进入下一段。 */
+function evalSegments(value, segments, step, path) {
+	const where = whereOf(segments, step);
+	const missing = guardNull(value, path, where);
+	if (missing) return missing;
+	if (step >= segments.length) return {
+		ok: true,
+		value
+	};
+	const segment = segments[step];
+	let current = value;
+	if (segment.name.length > 0) {
+		const read = readProperty(current, segment.name, path, where);
+		if (!read.ok) return read;
+		current = read.value;
+		const bad = guardNull(current, path, where);
+		if (bad) return bad;
+	}
+	return applyIndexes(current, segment.indexes, segments, step, where, path);
+}
+/** HTTP 头名大小写不敏感：lower-case 视图只影响求值，不改调用方的 headers。 */
+function lowerCaseHeaders(headers) {
+	const view = {};
+	for (const [name, value] of Object.entries(headers ?? {})) view[name.toLowerCase()] = value;
+	return view;
+}
+/**
+* 按绑定路径从响应根取值。
+*
+* @param root 上游响应信封 `{ body, status, headers }`（不会被修改）
+* @param path R-1 绑定路径，如 `body.items[0].internalId` / `body.items[*].code` / `headers.x-total`
+* @param expectedType 可选目标类型（`string` / `number` / `boolean` / `object` / `array` / `null`，也接受 `array<T>`）
+*/
+function resolveBinding(root, path, expectedType) {
+	const matched = fieldSegments(path).join(".");
+	const fail = (code, message) => ({
+		ok: false,
+		code,
+		message,
+		path
+	});
+	if (typeof path !== "string" || path.trim().length === 0) return fail("path-not-found", "绑定路径为空");
+	const parsed = parsePath(path);
+	if (!parsed) return fail("path-not-found", `绑定路径「${path}」无法解析：只支持字段名与 [n] / [*] / [] 下标`);
+	let segments = parsed.segments;
+	let current;
+	if (parsed.envelope === "status") current = root.status;
+	else if (parsed.envelope === "headers") {
+		current = root.headers;
+		if (segments.length > 0) {
+			const [first] = segments;
+			if (first && first.name.length > 0 && first.indexes.length === 0) segments = [{
+				...first,
+				name: first.name.toLowerCase()
+			}, ...segments.slice(1)];
+			current = lowerCaseHeaders(root.headers);
+		}
+	} else current = root.body;
+	const evaluated = evalSegments(current, segments, 0, path);
+	if (!evaluated.ok) return fail(evaluated.failure.code, evaluated.failure.message);
+	let value = evaluated.value;
+	let unwrapped = false;
+	if (segments.some((segment) => segment.indexes.includes("wildcard"))) {
+		if (!Array.isArray(value)) return fail("path-not-found", `绑定路径「${path}」的通配未产出数组`);
+		if (value.length === 0) return fail("empty-wildcard", `绑定路径「${path}」的通配（[*]）未匹配到任何元素；通常是上游查询为空，先确认上游请求参数`);
+		const arrayTarget = expectedType !== void 0 && expectedType.trim().length > 0 && isArrayType(expectedType);
+		if (value.length === 1 && !arrayTarget) {
+			value = value[0];
+			unwrapped = true;
+		} else if (value.length > 1 && expectedType !== void 0 && expectedType.trim().length > 0 && !arrayTarget) return fail("type-mismatch", `绑定路径「${path}」期望类型 ${expectedType}，但通配展开得到 ${value.length} 个元素的数组（实际类型 array）；请改用 [0] 或把目标声明成数组`);
+	}
+	if (expectedType !== void 0 && expectedType.trim().length > 0) {
+		const checked = matchType(value, expectedType);
+		if (!checked.ok) return fail("type-mismatch", `绑定路径「${path}」期望类型 ${expectedType}，实际类型 ${checked.actual}`);
+	}
+	return unwrapped ? {
+		ok: true,
+		value,
+		matched,
+		unwrapped: true
+	} : {
+		ok: true,
+		value,
+		matched
+	};
+}
+
+//#endregion
+//#region src/execute/request.ts
+const JSON_CONTENT_TYPE = "application/json";
+function hasOwn(record, key) {
+	return record !== void 0 && Object.prototype.hasOwnProperty.call(record, key) && record[key] !== void 0;
+}
+/**
+* 把卡入参逐个解析出值：绑定优先，其次节点常量（含 `$inputs.x` 槽位引用）。
+*
+* 没解析出值的字段不在这里报错——`plan.buildPlan` 已经做过静态缺参判定，
+* 走到这里还缺就是运行期漏传，由 {@link buildRequest} 统一报 `param-missing`。
+*/
+function resolveFields(input) {
+	const provided = input.provided ?? {};
+	const inputs = input.inputs ?? {};
+	const constants = input.node.constants ?? {};
+	const constantKeys = Object.keys(constants);
+	const fields = [];
+	const missing = [];
+	for (const field of input.card.inputs ?? []) {
+		if (field.role === "credential") continue;
+		const key = normalizePath(field.path);
+		if (hasOwn(provided, key)) {
+			fields.push({
+				path: field.path,
+				type: field.type,
+				value: provided[key]
+			});
+			continue;
+		}
+		const constantKey = constantKeys.find((candidate) => normalizePath(candidate) === key);
+		if (constantKey !== void 0) {
+			const raw = constants[constantKey];
+			const slot = typeof raw === "string" ? inputSlotNameOf(raw) : void 0;
+			if (slot === void 0) {
+				fields.push({
+					path: field.path,
+					type: field.type,
+					value: raw
+				});
+				continue;
+			}
+			if (hasOwn(inputs, slot)) {
+				fields.push({
+					path: field.path,
+					type: field.type,
+					value: inputs[slot]
+				});
+				continue;
+			}
+		}
+		missing.push({
+			path: field.path,
+			type: field.type,
+			value: void 0
+		});
+	}
+	return {
+		fields,
+		missing
+	};
+}
+/** 值 → 字符串（URL/请求头/路径参数只接受标量；对象/数组在这里是错的用法）。 */
+function scalarText(field) {
+	const value = field.value;
+	if (typeof value === "string") return value;
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	if (value === null) return void 0;
+}
+function parseBodyPath(path) {
+	const segments = [];
+	const pattern = /([^.[\]]+)|\[(\d+|\*)\]/g;
+	let match;
+	while ((match = pattern.exec(path)) !== null) {
+		if (match[1] !== void 0) {
+			segments.push({
+				kind: "prop",
+				name: match[1]
+			});
+			continue;
+		}
+		const raw = match[2] ?? "";
+		segments.push(raw === "*" ? {
+			kind: "index",
+			index: 0,
+			wildcard: true
+		} : {
+			kind: "index",
+			index: Number(raw),
+			wildcard: false
+		});
+	}
+	return segments;
+}
+/** 往请求体骨架里写一个值（中途按下一段是属性还是下标决定建对象还是建数组）。 */
+function assignBody(root, path, value) {
+	const segments = parseBodyPath(path);
+	if (segments.length === 0) return `空的 body 字段路径`;
+	let cursor = root;
+	for (let i = 0; i < segments.length; i += 1) {
+		const segment = segments[i];
+		const isLast = i === segments.length - 1;
+		const next = segments[i + 1];
+		if (isLast) {
+			if (segment.kind === "index") return `body 字段路径不能以下标结尾：${path}`;
+			if (Array.isArray(value) && path.includes("[*]")) return `字段 ${path} 是通配行（[*]），不能直接喂数组：请在链上写显式下标（如 body.lines[0].materialId）`;
+			cursor[segment.name] = value;
+			return;
+		}
+		const wantsArray = next !== void 0 && next.kind === "index";
+		if (segment.kind === "prop") {
+			const holder = cursor;
+			if (holder[segment.name] === void 0) holder[segment.name] = wantsArray ? [] : {};
+			cursor = holder[segment.name];
+			continue;
+		}
+		const holder = cursor;
+		const index = segment.wildcard ? 0 : segment.index;
+		if (holder[index] === void 0) holder[index] = wantsArray ? [] : {};
+		cursor = holder[index];
+	}
+}
+/** 模板 query 段 → 有序键值对（值为空表示裸键）。 */
+function parseTemplateQuery(query) {
+	if (query === "") return [];
+	return query.split("&").filter((pair) => pair !== "").map((pair) => {
+		const at = pair.indexOf("=");
+		return at === -1 ? [pair, ""] : [pair.slice(0, at), pair.slice(at + 1)];
+	});
+}
+function serializeQuery(pairs) {
+	return pairs.map(([name, value]) => value === "" ? name : `${name}=${encodeURIComponent(value)}`).join("&");
+}
+/**
+* 构造一条请求。
+*
+* 失败一律带 `path`（能指到具体字段就指），让回执能直接告诉 agent 该改链上的哪个位置。
+*/
+function buildRequest(input) {
+	const { fields, missing } = resolveFields(input);
+	const notices = [];
+	if (missing.length > 0) {
+		const first = missing[0];
+		return {
+			ok: false,
+			code: "param-missing",
+			message: `节点 ${input.node.nodeId} 缺入参：${missing.map((field) => `${field.path}（${field.type}）`).join("、")}`,
+			path: first.path
+		};
+	}
+	const template = input.card.identity.urlTemplate;
+	const mark = template.indexOf("?");
+	const rawPath = mark === -1 ? template : template.slice(0, mark);
+	const rawQuery = mark === -1 ? "" : template.slice(mark + 1);
+	const pathValues = /* @__PURE__ */ new Map();
+	const queryPairs = parseTemplateQuery(rawQuery);
+	const headers = {};
+	const body = {};
+	let hasBodyField = false;
+	for (const field of fields) {
+		const at = field.path.indexOf(".");
+		const location = at === -1 ? field.path : field.path.slice(0, at);
+		const rest = at === -1 ? "" : field.path.slice(at + 1);
+		if (location === "path") {
+			const text = scalarText(field);
+			if (text === void 0) return {
+				ok: false,
+				code: "param-type-mismatch",
+				message: `path 参数 ${field.path} 必须是标量`,
+				path: field.path
+			};
+			pathValues.set(rest, text);
+			continue;
+		}
+		if (location === "header") {
+			const text = scalarText(field);
+			if (text === void 0) return {
+				ok: false,
+				code: "param-type-mismatch",
+				message: `请求头 ${field.path} 必须是标量`,
+				path: field.path
+			};
+			headers[rest] = text;
+			continue;
+		}
+		if (location === "body") {
+			const failure = assignBody(body, rest, field.value);
+			if (failure !== void 0) return {
+				ok: false,
+				code: "param-type-mismatch",
+				message: failure,
+				path: field.path
+			};
+			hasBodyField = true;
+			continue;
+		}
+		if (location === "query") {
+			const text = scalarText(field);
+			if (text === void 0) return {
+				ok: false,
+				code: "param-type-mismatch",
+				message: `query 参数 ${field.path} 必须是标量`,
+				path: field.path
+			};
+			const hit = queryPairs.find(([name]) => name === rest);
+			if (hit === void 0) queryPairs.push([rest, text]);
+			else hit[1] = text;
+			continue;
+		}
+		notices.push(`未知的入参位置前缀「${location}」（字段 ${field.path}），已忽略`);
+	}
+	let anonymousSeen = 0;
+	let missingPlaceholder;
+	const resolvedPath = rawPath.replace(/\{([A-Za-z0-9_]+)\}/g, (_match, name) => {
+		const anonymous = name === "p";
+		const key = anonymous ? `p${anonymousSeen += 1}` : name;
+		const value = pathValues.get(key);
+		if (value === void 0) {
+			missingPlaceholder = missingPlaceholder ?? {
+				key,
+				anonymous
+			};
+			return "";
+		}
+		return encodeURIComponent(value);
+	});
+	if (missingPlaceholder !== void 0) return {
+		ok: false,
+		code: "param-missing",
+		message: `URL 模板占位符 {${missingPlaceholder.anonymous ? "p" : missingPlaceholder.key}} 没有值：在链上给 path.${missingPlaceholder.key} 常量或绑定（匿名 {p} 按次序对应 path.p1、path.p2…）`,
+		path: `path.${missingPlaceholder.key}`
+	};
+	const leftover = queryPairs.find(([, value]) => /^\{[A-Za-z0-9_]+\}$/.test(value));
+	if (leftover !== void 0) {
+		const name = leftover[1].slice(1, -1);
+		return {
+			ok: false,
+			code: "param-missing",
+			message: `query 模板占位符 {${name}} 没有值：在链上给 query.${name} 常量或绑定`,
+			path: `query.${name}`
+		};
+	}
+	const base = input.baseUrl.replace(/\/+$/, "");
+	const query = serializeQuery(queryPairs);
+	const url = query === "" ? `${base}${resolvedPath}` : `${base}${resolvedPath}?${query}`;
+	try {
+		new URL(url);
+	} catch {
+		return {
+			ok: false,
+			code: "bad-url-template",
+			message: `拼出来的 URL 不合法：${url}`
+		};
+	}
+	const method = input.node.method.toUpperCase();
+	const sendsBody = method !== "GET" && method !== "HEAD" && hasBodyField;
+	if (sendsBody) {
+		if (!Object.keys(headers).some((name) => name.toLowerCase() === "content-type")) headers["content-type"] = JSON_CONTENT_TYPE;
+	}
+	return {
+		ok: true,
+		request: {
+			method,
+			url,
+			headers,
+			...sendsBody ? { body: JSON.stringify(body) } : {}
+		},
+		notices
+	};
+}
+
+//#endregion
+//#region src/execute/http.ts
+/** 默认正文上限 2 MiB（对齐设计的 `chainResponseLimitBytes` 缺省）。 */
+const DEFAULT_RESPONSE_LIMIT_BYTES = 2097152;
+/** 默认单次超时 30s。 */
+const DEFAULT_TIMEOUT_MS = 3e4;
+/** 默认重定向跳数上限。 */
+const DEFAULT_MAX_REDIRECTS = 5;
+/** 留痕时必须脱敏的头名（小写）。 */
+const SECRET_HEADERS = /* @__PURE__ */ new Set([
+	"cookie",
+	"set-cookie",
+	"authorization",
+	"proxy-authorization",
+	"x-api-key",
+	"x-auth-token",
+	"x-csrf-token"
+]);
+/** 跨 origin 重定向时绝不带过去的头。 */
+const AUTH_HEADERS = /* @__PURE__ */ new Set([
+	"authorization",
+	"proxy-authorization",
+	"cookie",
+	"x-api-key"
+]);
+/**
+* 头脱敏：凭证类头名只留名字，值替换成 `***`。
+*
+* 进 `events.ndjson` 的请求/响应头都要过这一道——运行留痕是要长期保存、可能被导出的资产。
+*/
+function redactHeaders(headers) {
+	const out = {};
+	for (const [name, value] of Object.entries(headers ?? {})) out[name] = SECRET_HEADERS.has(name.toLowerCase()) ? "***" : value;
+	return out;
+}
+/** 小写化响应头（同名多值按 `, ` 合并）。 */
+function normalizeHeaders(headers) {
+	const out = {};
+	headers.forEach((value, name) => {
+		const key = name.toLowerCase();
+		const existing = out[key];
+		out[key] = existing === void 0 ? value : `${existing}, ${value}`;
+	});
+	return out;
+}
+function isRedirect(status) {
+	return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+function isRetryableStatus(status) {
+	return status === 429 || status >= 500 && status <= 599;
+}
+function parseUrlOrUndefined(raw) {
+	try {
+		const url = new URL(raw);
+		return url.protocol === "http:" || url.protocol === "https:" ? url : void 0;
+	} catch {
+		return;
+	}
+}
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+/**
+* 发一次请求（含重定向跟随）。
+*
+* `redirect: 'manual'` 是有意的：`fetch` 自带的自动跟随没有跳数上限，也管不住跨 origin
+* 时是否把鉴权头带过去。这里每一跳都自己判一遍。
+*/
+async function attemptOnce(spec, headers) {
+	const timeoutMs = spec.timeoutMs ?? 3e4;
+	const maxRedirects = spec.maxRedirects ?? 5;
+	let currentUrl = spec.url;
+	for (let hop = 0; hop <= maxRedirects; hop += 1) {
+		const target = parseUrlOrUndefined(currentUrl);
+		if (target === void 0) return {
+			kind: "failure",
+			code: "bad-url",
+			message: `不是合法的 http(s) URL：${currentUrl}`
+		};
+		const controller = new AbortController();
+		let timedOut = false;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			controller.abort();
+		}, timeoutMs);
+		const onCallerAbort = () => controller.abort();
+		spec.signal?.addEventListener("abort", onCallerAbort, { once: true });
+		let response;
+		try {
+			response = await fetch(currentUrl, {
+				method: spec.method,
+				headers,
+				...spec.body === void 0 ? {} : { body: spec.body },
+				redirect: "manual",
+				credentials: "omit",
+				signal: controller.signal
+			});
+		} catch (err) {
+			if (spec.signal?.aborted === true) return {
+				kind: "failure",
+				code: "aborted",
+				message: "调用方已取消"
+			};
+			if (timedOut) return {
+				kind: "failure",
+				code: "timeout",
+				message: `请求超时（${timeoutMs}ms）`
+			};
+			return {
+				kind: "failure",
+				code: "network-error",
+				message: err instanceof Error ? err.message : String(err)
+			};
+		} finally {
+			clearTimeout(timer);
+			spec.signal?.removeEventListener("abort", onCallerAbort);
+		}
+		const location = response.headers.get("location");
+		if (!isRedirect(response.status) || location === null) return {
+			kind: "response",
+			response,
+			finalUrl: currentUrl
+		};
+		await response.body?.cancel().catch(() => void 0);
+		const next = parseUrlOrUndefined(new URL(location, currentUrl).href);
+		if (next === void 0) return {
+			kind: "failure",
+			code: "bad-url",
+			message: `重定向目标不是合法的 http(s) URL：${location}`
+		};
+		if (next.origin !== target.origin) {
+			for (const name of Object.keys(headers)) if (AUTH_HEADERS.has(name.toLowerCase())) delete headers[name];
+		}
+		if (response.status === 303) spec = {
+			...spec,
+			method: "GET",
+			body: void 0
+		};
+		currentUrl = next.href;
+	}
+	return {
+		kind: "failure",
+		code: "redirect-limit",
+		message: `重定向超过 ${maxRedirects} 跳，已中止（疑似循环跳转）`
+	};
+}
+/**
+* 按上限流式读正文。
+*
+* 不用 `response.text()`：那会把整个响应先读进内存再让你截断，上限就形同虚设。
+* 顺便 `reader.cancel()` 尽早断开，不给服务端继续灌数据的机会。
+*/
+async function readBodyLimited(response, limitBytes) {
+	const body = response.body;
+	if (body === null) return {
+		text: "",
+		bytes: 0,
+		truncated: false
+	};
+	const reader = body.getReader();
+	const chunks = [];
+	let bytes = 0;
+	let truncated = false;
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (value === void 0) continue;
+			const room = limitBytes - bytes;
+			if (value.byteLength >= room) {
+				if (room > 0) chunks.push(value.subarray(0, room));
+				bytes += Math.max(0, room);
+				truncated = true;
+				await reader.cancel().catch(() => void 0);
+				break;
+			}
+			chunks.push(value);
+			bytes += value.byteLength;
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	const merged = new Uint8Array(bytes);
+	let offset = 0;
+	for (const chunk of chunks) {
+		merged.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return {
+		text: new TextDecoder("utf-8").decode(merged),
+		bytes,
+		truncated
+	};
+}
+function parseJson(text) {
+	const trimmed = text.trim();
+	if (trimmed === "" || trimmed.startsWith("{") === false && trimmed.startsWith("[") === false) return void 0;
+	try {
+		return JSON.parse(trimmed);
+	} catch {
+		return;
+	}
+}
+/**
+* 发请求并返回分类后的结果。
+*
+* 重试只发生在**没有拿到可用响应**的情形：网络错、超时、以及 429/5xx。
+* 4xx（除 429）不重试——那是定义问题，重试只是把同一个错误多打几遍。
+* 调用方取消后立即停止重试。
+*/
+async function httpRequest(spec) {
+	const started = Date.now();
+	const retry = Math.max(0, spec.retry ?? 0);
+	const limitBytes = spec.limitBytes ?? 2097152;
+	const headers = { ...spec.headers ?? {} };
+	let attempts = 0;
+	let last;
+	for (let attempt = 0; attempt <= retry; attempt += 1) {
+		attempts = attempt + 1;
+		if (spec.signal?.aborted === true) return {
+			ok: false,
+			code: "aborted",
+			message: "调用方已取消",
+			attempts,
+			elapsedMs: Date.now() - started
+		};
+		const outcome = await attemptOnce(spec, headers);
+		if (outcome.kind === "failure") {
+			last = {
+				code: outcome.code,
+				message: outcome.message
+			};
+			if (outcome.code === "aborted" || outcome.code === "bad-url" || outcome.code === "redirect-limit") break;
+		} else {
+			const { response, finalUrl } = outcome;
+			if (!isRetryableStatus(response.status) || attempt === retry) {
+				const read = await readBodyLimited(response, limitBytes);
+				const json = parseJson(read.text);
+				return {
+					ok: true,
+					response: {
+						status: response.status,
+						headers: normalizeHeaders(response.headers),
+						bodyText: read.text,
+						...json === void 0 ? {} : { json },
+						bytes: read.bytes,
+						truncated: read.truncated,
+						attempts,
+						elapsedMs: Date.now() - started,
+						finalUrl
+					}
+				};
+			}
+			await response.body?.cancel().catch(() => void 0);
+			last = {
+				code: "network-error",
+				message: `HTTP ${response.status}`
+			};
+		}
+		if (attempt < retry) await sleep(120 * (attempt + 1));
+	}
+	return {
+		ok: false,
+		code: last?.code ?? "network-error",
+		message: last?.message ?? "请求失败（无细节）",
+		attempts,
+		elapsedMs: Date.now() - started
+	};
+}
+
+//#endregion
+//#region src/execute/run.ts
+/**
+* 执行调度器（IF-3）：一条 interface-chain + 一份执行计划 → 一条 runs 事件流。
+*
+* 职责边界（刻意收窄）：
+*   - 只认 `buildPlan()` 的产物，不自己算拓扑或覆盖判定（`topoOrder` / `dependencyPairs`
+*     只有一份，见 `chains/validate.ts`）；
+*   - 只依赖 `chains/*`、`runs/store.ts` 与 `execute/*`，**不**依赖 capture/ library/ client/；
+*   - 闸门（预检、确认、执行开关、后台 job 装配）全在 `orchestration/application.ts`，
+*     这里只回答一个问题：按计划把请求发出去，并把发生的事如实写进事件流。
+*
+* 调度规则：
+*   - 就绪队列 = indegree 0 的节点；indegree 由 `dependencyPairs(doc)` 统计，且只保留两端
+*     都在节点集合里的 pair（与 `topoOrder` 内部的 `indegree.has` 同源，不引第二套规则）；
+*   - 就绪节点按节点 ID 字典序取，同等输入下调度顺序可复现；
+*   - 某节点成功后才对其下游 `indegree-1`（失败/取消不再放行任何新节点）；
+*   - 并发上限 `concurrency`（默认 4，硬上限 16）。
+*
+* 事件不变量：
+*   - 每个实际启动的节点恰好一条 `step(status:start)` + 一条终态（`done` | `error`）；
+*   - 因中止而没启动的节点**不发** `step`，只在 `result.businessData` 里标 `skipped`
+*     ——否则会被 `foldSummary` 误算成失败节点；
+*   - `start` 先于请求；`terminal` / `result` 只在全部在飞节点落定后写。
+*
+* 错误码是契约：`ChainRunErrorCode` 只增不改名（工具回执、运行记录、面板都按它分支）。
+* 三处映射在这里显式写明，不打哑谜：
+*   - HTTP `aborted` → `cancelled`；`timeout` → `node-timeout`；
+*   - HTTP `bad-url` → `bad-url-template`；`redirect-limit` → `node-network-error`（带原文）；
+*   - `buildRequest` 的运行期 `param-missing` → `param-missing`（静态缺参已在 `buildPlan`
+*     拦过，走到这里是防御：例如模板里有 `{p2}` 但卡只声明了 `path.p1`）。
+*
+* @module dsh-dataforge/execute/run
+*/
+/** 摘要正文上限：请求/响应各留前 4 KiB（隐私面与可诊断面的平衡点）。 */
+const DIGEST_PREVIEW_BYTES = 4096;
+const DEFAULT_CONCURRENCY = 4;
+const MAX_CONCURRENCY = 16;
+/** 节点级重试硬上限（与 IF-4 的 retry 上限一致）。 */
+const MAX_NODE_RETRY = 5;
+/** 幂等方法：只有它们才吃 `node.retry`（写方法重试 = 重放写请求，绝不默认）。 */
+const IDEMPOTENT_METHODS = /* @__PURE__ */ new Set([
+	"GET",
+	"HEAD",
+	"OPTIONS"
+]);
+/**
+* 执行能力探测：不按 Node 版本号硬判，只看实际能力。
+*
+* 这样 `package.json` 的 `engines` 不必为执行模块单独收紧；能力缺席时诚实报
+* `execution-unavailable`，不做 polyfill（polyfill 会让「能跑」变成不确定行为）。
+*/
+function chainExecutionUnavailableReason() {
+	if (typeof fetch !== "function") return "当前运行时没有全局 fetch（需要 Node 22+）：执行不可用";
+	if (typeof AbortSignal.timeout !== "function") return "当前运行时没有 AbortSignal.timeout：执行不可用";
+}
+/**
+* 生成唯一 runId：`chain-<流程 slug>-<毫秒>`，撞名加 `-2`/`-3`。
+*
+* 目录名必须安全（会当目录用），所以走 `slugOf`；流程名是用户词汇，中日韩字符保留。
+*/
+function newChainRunId(dataRoot, flow, now) {
+	const base = `chain-${slugOf(flow) || "flow"}-${now}`;
+	let candidate = base;
+	let suffix = 2;
+	while (existsSync(join(runsRoot(dataRoot), candidate))) {
+		candidate = `${base}-${suffix}`;
+		suffix += 1;
+	}
+	return candidate;
+}
+/** 归一并发：非法值退回默认值，越界夹到 [1, 16]。 */
+function clampConcurrency(value, fallback = DEFAULT_CONCURRENCY) {
+	return Math.max(1, Math.min(MAX_CONCURRENCY, typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback));
+}
+/**
+* 写运行起点：run.json（写入一次）+ `meta` 事件。
+*
+* **同步**完成是刻意的：调用方（后台 job 路径）必须在启动 job 之前拿到 runId/runDir，
+* 而 `run.json` 又必须早于第一个请求——只有一个同步入口能同时满足这两条。
+*/
+function prepareChainRun(deps, input) {
+	const now = Date.now();
+	const runId = input.runId ?? newChainRunId(deps.dataRoot, input.doc.meta.flow, now);
+	const concurrency = clampConcurrency(input.concurrency, deps.config.concurrency);
+	const chain = {
+		site: input.doc.meta.site,
+		flow: input.doc.meta.flow,
+		version: input.doc.meta.version,
+		...input.chainPath === void 0 ? {} : { path: input.chainPath },
+		apiVersion: input.doc.apiVersion
+	};
+	const meta = {
+		kind: "chain-run",
+		flow: input.doc.meta.flow,
+		flowName: input.doc.meta.flow,
+		chain,
+		params: { ...input.inputs ?? {} },
+		baseUrl: input.plan.baseUrl,
+		dryRun: input.dryRun === true,
+		planned: [...input.plan.order],
+		concurrency,
+		startedAt: now
+	};
+	const runDir = startRunRecord(deps.dataRoot, runId, meta);
+	appendEvent(deps.dataRoot, runId, {
+		event: "meta",
+		flow: meta.flow,
+		name: meta.flowName,
+		steps: meta.planned,
+		dryRun: meta.dryRun,
+		chain
+	});
+	return {
+		runId,
+		runDir,
+		meta
+	};
+}
+/**
+* 跑完一条链（预检已过、计划已定）。
+*
+* 返回 `ok: false` 只可能是**预检**级别的问题（当前实现里只有「计划为空」这类防御分支）；
+* 运行期失败走 `ok: true` + `summary.status='failed'` + `failedNode`——因为留痕已经写下了，
+* 调用方不该把它当成「没开始」。
+*/
+async function executeChainRun(deps, prepared, input) {
+	const { doc, cards, plan } = input;
+	const { runId, runDir } = prepared;
+	const inputs = input.inputs ?? {};
+	const concurrency = clampConcurrency(input.concurrency, deps.config.concurrency);
+	const fallbackTimeoutMs = Math.max(1, Math.floor(deps.config.nodeTimeoutSeconds)) * 1e3;
+	const limitBytes = Math.max(1, Math.floor(deps.config.responseLimitBytes));
+	const events = loadRunEvents(deps.dataRoot, runId) ?? [];
+	const emit = (event) => {
+		appendEvent(deps.dataRoot, runId, event);
+		events.push({
+			...event,
+			ts: Date.now()
+		});
+	};
+	const nodeById = /* @__PURE__ */ new Map();
+	for (const node of doc.nodes) nodeById.set(node.id, node);
+	const planById = /* @__PURE__ */ new Map();
+	for (const node of plan.nodes) planById.set(node.nodeId, node);
+	if (input.dryRun === true) {
+		emit({
+			event: "terminal",
+			success: true,
+			cancelled: false,
+			message: `dry-run：计划 ${plan.order.length} 个节点，未发送任何请求`
+		});
+		emit({
+			event: "result",
+			success: true,
+			businessData: businessDataOf(doc, [])
+		});
+		return {
+			ok: true,
+			runId,
+			runDir,
+			summary: foldSummary(runId, loadRunEvents(deps.dataRoot, runId) ?? events),
+			nodes: [],
+			cancelled: false
+		};
+	}
+	const idSet = new Set(plan.order);
+	const indegree = /* @__PURE__ */ new Map();
+	for (const id of plan.order) indegree.set(id, 0);
+	const downstream = /* @__PURE__ */ new Map();
+	for (const pair of dependencyPairs(doc)) {
+		if (!idSet.has(pair.from) || !idSet.has(pair.to)) continue;
+		indegree.set(pair.to, (indegree.get(pair.to) ?? 0) + 1);
+		const list = downstream.get(pair.from) ?? [];
+		if (!list.includes(pair.to)) list.push(pair.to);
+		downstream.set(pair.from, list);
+	}
+	const ready = plan.order.filter((id) => (indegree.get(id) ?? 0) === 0);
+	const sortReady = () => {
+		ready.sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+	};
+	sortReady();
+	const controller = new AbortController();
+	const onAbort = () => controller.abort();
+	if (input.signal?.aborted === true) controller.abort();
+	else input.signal?.addEventListener("abort", onAbort, { once: true });
+	const roots = /* @__PURE__ */ new Map();
+	const results = /* @__PURE__ */ new Map();
+	let failure;
+	let cancelled = false;
+	let cancelledMessage;
+	const markSkipped = (nodeId) => {
+		const planNode = planById.get(nodeId);
+		if (results.has(nodeId)) return;
+		results.set(nodeId, {
+			nodeId,
+			cardId: planNode.cardId,
+			method: planNode.method.toUpperCase(),
+			url: planNode.urlTemplate,
+			status: "skipped",
+			attempts: 0,
+			elapsedMs: 0,
+			requestDigest: {
+				method: planNode.method.toUpperCase(),
+				url: planNode.urlTemplate,
+				headers: {}
+			},
+			bindings: []
+		});
+	};
+	async function runNode(nodeId) {
+		const planNode = planById.get(nodeId);
+		const card = cards.get(planNode.cardId);
+		const node = nodeById.get(nodeId);
+		const method = planNode.method.toUpperCase();
+		const startedAt = Date.now();
+		const bindings = [];
+		const result = {
+			nodeId,
+			cardId: planNode.cardId,
+			method,
+			url: planNode.urlTemplate,
+			status: "error",
+			attempts: 0,
+			elapsedMs: 0,
+			requestDigest: {
+				method,
+				url: planNode.urlTemplate,
+				headers: {}
+			},
+			bindings
+		};
+		const provided = {};
+		for (const edge of doc.edges) {
+			const to = splitBindingPath(edge.to);
+			if (!to || to.nodeId !== nodeId) continue;
+			if (isInputSlotRef(edge.from)) continue;
+			const from = splitBindingPath(edge.from);
+			if (!from) {
+				const message = `绑定边 ${edge.from} → ${edge.to} 的 from 不是合法路径`;
+				bindings.push({
+					from: edge.from,
+					to: edge.to,
+					code: "binding-path-not-found",
+					error: message
+				});
+				return failPreRequest(bindings, "binding-path-not-found", message);
+			}
+			const root = roots.get(from.nodeId);
+			if (root === void 0) {
+				const message = `绑定边 ${edge.from} → ${edge.to} 的上游节点 ${from.nodeId} 没有可用响应`;
+				bindings.push({
+					from: edge.from,
+					to: edge.to,
+					code: "binding-path-not-found",
+					error: message
+				});
+				return failPreRequest(bindings, "binding-path-not-found", message);
+			}
+			const bound = resolveBinding(root, from.fieldPath, edgeTargetType(card, to.fieldPath));
+			if (!bound.ok) {
+				const code = bindingCodeOf(bound.code);
+				const message = `绑定边 ${edge.from} → ${edge.to} 求值失败：${bound.message}`;
+				bindings.push({
+					from: edge.from,
+					to: edge.to,
+					code,
+					error: bound.message
+				});
+				return failPreRequest(bindings, code, message);
+			}
+			provided[normalizePath(to.fieldPath)] = bound.value;
+			bindings.push({
+				from: edge.from,
+				to: edge.to,
+				valuePreview: previewValue(bound.value)
+			});
+		}
+		const built = buildRequest({
+			node: planNode,
+			card,
+			baseUrl: plan.baseUrl,
+			provided,
+			inputs
+		});
+		if (!built.ok) {
+			const message = built.message;
+			emit({
+				event: "step",
+				id: nodeId,
+				action: `${method} ${planNode.urlTemplate}`,
+				status: "start",
+				data: { card: planNode.cardId }
+			});
+			return failAfterStart(bindings, built.code, message);
+		}
+		const request = built.request;
+		const requestDigest = {
+			method: request.method,
+			url: request.url,
+			headers: redactHeaders(request.headers),
+			...request.body === void 0 ? {} : { bodyPreview: previewText(request.body) }
+		};
+		result.requestDigest = requestDigest;
+		result.url = request.url;
+		emit({
+			event: "step",
+			id: nodeId,
+			action: `${request.method} ${request.url}`,
+			status: "start",
+			data: {
+				card: planNode.cardId,
+				attempt: 1,
+				request: requestDigest
+			}
+		});
+		input.onProgress?.(`▶ ${nodeId}：${request.method} ${request.url}`);
+		const outcome = await httpRequest({
+			method: request.method,
+			url: request.url,
+			headers: request.headers,
+			...request.body === void 0 ? {} : { body: request.body },
+			timeoutMs: timeoutOf(node, fallbackTimeoutMs),
+			retry: retryOf(node, method),
+			limitBytes,
+			signal: controller.signal
+		});
+		result.attempts = outcome.ok ? outcome.response.attempts : outcome.attempts;
+		if (!outcome.ok) {
+			if (outcome.code === "aborted" || controller.signal.aborted) {
+				result.status = "cancelled";
+				result.errorCode = "cancelled";
+				result.error = "已取消：请求在飞行途中被中止";
+				result.elapsedMs = Date.now() - startedAt;
+				results.set(nodeId, result);
+				emit({
+					event: "step",
+					id: nodeId,
+					status: "error",
+					elapsed: result.elapsedMs,
+					error: result.error,
+					data: { code: "cancelled" }
+				});
+				return {
+					kind: "cancelled",
+					message: result.error
+				};
+			}
+			const code = outcome.code === "timeout" ? "node-timeout" : outcome.code === "bad-url" ? "bad-url-template" : "node-network-error";
+			result.errorCode = code;
+			result.error = outcome.message;
+			result.elapsedMs = Date.now() - startedAt;
+			results.set(nodeId, result);
+			emit({
+				event: "step",
+				id: nodeId,
+				status: "error",
+				elapsed: result.elapsedMs,
+				error: outcome.message,
+				data: {
+					code,
+					attempts: outcome.attempts
+				}
+			});
+			return {
+				kind: "failed",
+				code,
+				message: `节点 ${nodeId}：${outcome.message}`
+			};
+		}
+		const response = outcome.response;
+		const responseDigest = {
+			status: response.status,
+			bytes: response.bytes,
+			truncated: response.truncated,
+			bodyPreview: previewText(response.bodyText)
+		};
+		result.httpStatus = response.status;
+		result.responseDigest = responseDigest;
+		if (response.truncated) result.truncated = true;
+		result.elapsedMs = Date.now() - startedAt;
+		if (response.status < 200 || response.status >= 300) {
+			const code = response.status === 401 || response.status === 403 ? authRequired(card) ? "node-auth-required" : "node-http-error" : "node-http-error";
+			const hint = code === "node-auth-required" ? `HTTP ${response.status}：该卡声明了鉴权（${card.auth}），凭证注入是 R-4 的事；引擎不换票、不重试` : `HTTP ${response.status}`;
+			result.errorCode = code;
+			result.error = hint;
+			results.set(nodeId, result);
+			emit({
+				event: "step",
+				id: nodeId,
+				status: "error",
+				elapsed: result.elapsedMs,
+				error: hint,
+				data: {
+					code,
+					response: responseDigest
+				}
+			});
+			return {
+				kind: "failed",
+				code,
+				message: `节点 ${nodeId}：${hint}`
+			};
+		}
+		if (response.truncated && needsBody(doc, nodeId)) {
+			result.errorCode = "response-too-large";
+			result.error = `响应正文超过 ${limitBytes} 字节上限（已截断），下游要读 body：拒绝拿半截正文解析`;
+			results.set(nodeId, result);
+			emit({
+				event: "step",
+				id: nodeId,
+				status: "error",
+				elapsed: result.elapsedMs,
+				error: result.error,
+				data: {
+					code: "response-too-large",
+					response: responseDigest
+				}
+			});
+			return {
+				kind: "failed",
+				code: "response-too-large",
+				message: `节点 ${nodeId}：${result.error}`
+			};
+		}
+		roots.set(nodeId, {
+			body: response.json ?? response.bodyText,
+			status: response.status,
+			headers: response.headers
+		});
+		const emitted = collectEmitted(doc, cards, nodeId, roots.get(nodeId));
+		result.status = "done";
+		results.set(nodeId, result);
+		emit({
+			event: "step",
+			id: nodeId,
+			status: "done",
+			elapsed: result.elapsedMs,
+			data: {
+				response: responseDigest,
+				emitted
+			}
+		});
+		input.onProgress?.(`✔ ${nodeId}：HTTP ${response.status}，${result.elapsedMs}ms`);
+		return { kind: "done" };
+		function failPreRequest(records, code, message) {
+			emit({
+				event: "step",
+				id: nodeId,
+				action: `${method} ${planNode.urlTemplate}`,
+				status: "start",
+				data: { card: planNode.cardId }
+			});
+			return failAfterStart(records, code, message);
+		}
+		function failAfterStart(records, code, message) {
+			result.status = "error";
+			result.errorCode = code;
+			result.error = message;
+			result.elapsedMs = Date.now() - startedAt;
+			result.bindings = records;
+			results.set(nodeId, result);
+			emit({
+				event: "step",
+				id: nodeId,
+				status: "error",
+				elapsed: result.elapsedMs,
+				error: message,
+				data: { code }
+			});
+			return {
+				kind: "failed",
+				code,
+				message: `节点 ${nodeId}：${message}`
+			};
+		}
+	}
+	const inFlight = /* @__PURE__ */ new Set();
+	for (;;) {
+		while (failure === void 0 && !controller.signal.aborted && ready.length > 0 && inFlight.size < concurrency) {
+			const nodeId = ready.shift();
+			const task = runNode(nodeId).then((outcome) => {
+				if (outcome.kind === "done") {
+					for (const next of downstream.get(nodeId) ?? []) {
+						const left = (indegree.get(next) ?? 0) - 1;
+						indegree.set(next, left);
+						if (left === 0 && !results.has(next)) {
+							ready.push(next);
+							sortReady();
+						}
+					}
+					return;
+				}
+				if (outcome.kind === "cancelled") {
+					cancelled = true;
+					cancelledMessage = outcome.message;
+					return;
+				}
+				if (failure === void 0) failure = {
+					nodeId,
+					code: outcome.code,
+					message: outcome.message
+				};
+			}).finally(() => {
+				inFlight.delete(task);
+			});
+			inFlight.add(task);
+		}
+		if (inFlight.size === 0) break;
+		await Promise.race(inFlight);
+	}
+	if (controller.signal.aborted && !cancelled && results.size < plan.order.length) {
+		cancelled = true;
+		cancelledMessage = cancelledMessage ?? "已取消：调度在节点边界停止";
+	}
+	for (const nodeId of plan.order) if (!results.has(nodeId)) markSkipped(nodeId);
+	if (failure === void 0 && !cancelled) {
+		const stranded = plan.order.filter((nodeId) => results.get(nodeId)?.status === "skipped");
+		if (stranded.length > 0) failure = {
+			nodeId: stranded[0],
+			code: "cycle",
+			message: `调度器没有放行 ${stranded.join("、")}：依赖永远满足不了（拓扑序与依赖表不一致，链可能被绕过工具手改）`
+		};
+	}
+	const ordered = plan.order.map((nodeId) => results.get(nodeId));
+	const success = failure === void 0 && !cancelled;
+	const failedNode = failure?.nodeId;
+	const message = terminalMessage(doc, plan, failure, cancelled, cancelledMessage, ordered);
+	emit({
+		event: "terminal",
+		success,
+		cancelled,
+		message
+	});
+	emit({
+		event: "result",
+		success,
+		businessData: businessDataOf(doc, ordered, {
+			failedNode,
+			cancelled
+		})
+	});
+	input.signal?.removeEventListener("abort", onAbort);
+	const finalEvents = loadRunEvents(deps.dataRoot, runId) ?? events;
+	return {
+		ok: true,
+		runId,
+		runDir,
+		summary: foldSummary(runId, finalEvents),
+		nodes: ordered,
+		...failedNode === void 0 ? {} : { failedNode },
+		cancelled
+	};
+}
+/** 结果段的业务视图：只放小字段，NodeResult 的摘要留在 step 事件里。 */
+function businessDataOf(doc, nodes, extra = {}) {
+	const completed = nodes.filter((node) => node.status === "done").map((node) => node.nodeId);
+	return {
+		chain: {
+			site: doc.meta.site,
+			flow: doc.meta.flow,
+			version: doc.meta.version
+		},
+		...extra.failedNode === void 0 ? {} : { failedNode: extra.failedNode },
+		...extra.cancelled === true ? { cancelled: true } : {},
+		completed,
+		nodes: nodes.map((node) => ({
+			nodeId: node.nodeId,
+			status: node.status,
+			attempts: node.attempts,
+			elapsedMs: node.elapsedMs,
+			...node.httpStatus === void 0 ? {} : { httpStatus: node.httpStatus },
+			...node.errorCode === void 0 ? {} : { errorCode: node.errorCode }
+		}))
+	};
+}
+/** 终态消息：成功/失败/取消三种叙述，失败时必须指到节点与第几步。 */
+function terminalMessage(doc, plan, failure, cancelled, cancelledMessage, nodes) {
+	const doneCount = nodes.filter((node) => node.status === "done").length;
+	if (failure !== void 0) {
+		const step = plan.order.indexOf(failure.nodeId) + 1;
+		return `链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} 在第 ${step} 步「${failure.nodeId}」失败（${failure.code}）：${failure.message}`;
+	}
+	if (cancelled) return `链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} 已取消：${doneCount}/${plan.order.length} 个节点完成${cancelledMessage === void 0 ? "" : `（${cancelledMessage}）`}`;
+	return `链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} 执行完成：${plan.order.length} 个节点全绿`;
+}
+function bindingCodeOf(code) {
+	if (code === "type-mismatch") return "binding-type-mismatch";
+	if (code === "null-value") return "binding-null";
+	if (code === "empty-wildcard") return "empty-wildcard";
+	return "binding-path-not-found";
+}
+/** 一个节点的下游绑定目标字段声明类型（决定 `[*]` 解包还是保数组）。 */
+function edgeTargetType(card, fieldPath) {
+	const key = normalizePath(fieldPath);
+	return (card.inputs ?? []).find((field) => normalizePath(field.path) === key)?.type;
+}
+/** 节点出参探测：把能取到的绑定值报进 `emitted`；取不到的不报错（由消费节点报）。 */
+function collectEmitted(doc, cards, nodeId, root) {
+	const emitted = {};
+	for (const edge of doc.edges) {
+		if (isInputSlotRef(edge.from)) continue;
+		const from = splitBindingPath(edge.from);
+		if (!from || from.nodeId !== nodeId) continue;
+		const to = splitBindingPath(edge.to);
+		const card = to === void 0 ? void 0 : cards.get(cardOfNode(doc, to.nodeId));
+		const bound = resolveBinding(root, from.fieldPath, to === void 0 || card === void 0 ? void 0 : edgeTargetType(card, to.fieldPath));
+		if (bound.ok) emitted[edge.from] = bound.value;
+	}
+	return emitted;
+}
+function cardOfNode(doc, nodeId) {
+	return doc.nodes.find((node) => node.id === nodeId)?.card ?? "";
+}
+/** 下游是否有绑定读 `body.*`（决定「截断能否忍」）。 */
+function needsBody(doc, nodeId) {
+	for (const edge of doc.edges) {
+		if (isInputSlotRef(edge.from)) continue;
+		const from = splitBindingPath(edge.from);
+		if (!from || from.nodeId !== nodeId) continue;
+		const path = from.fieldPath;
+		if (path === "body" || path.startsWith("body.") || path.startsWith("body[")) return true;
+	}
+	return false;
+}
+/** 卡声明了鉴权（非 `none`）才有资格报 `node-auth-required`。 */
+function authRequired(card) {
+	return typeof card.auth === "string" && card.auth.length > 0 && card.auth !== "none";
+}
+/** 节点级超时优先（R-1 预留位），否则用全局缺省。 */
+function timeoutOf(node, fallbackMs) {
+	const seconds = node.timeoutSeconds;
+	return typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) * 1e3 : fallbackMs;
+}
+/** 只有幂等方法才吃节点级 retry：写方法重试就是重放写请求。 */
+function retryOf(node, method) {
+	if (!IDEMPOTENT_METHODS.has(method)) return 0;
+	const raw = node.retry;
+	if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
+	return Math.max(0, Math.min(MAX_NODE_RETRY, Math.floor(raw)));
+}
+/** 正文预览：按字节截前 4 KiB（多字节字符被切断时留替换符，比超限更可接受）。 */
+function previewText(text) {
+	const buffer = Buffer.from(text ?? "", "utf8");
+	if (buffer.byteLength <= DIGEST_PREVIEW_BYTES) return text ?? "";
+	return buffer.subarray(0, DIGEST_PREVIEW_BYTES).toString("utf8");
+}
+/** 绑定值预览：标量原样，对象/数组序列化后截断（事件流不做数据仓库）。 */
+function previewValue(value) {
+	if (typeof value === "string") return value.length <= 512 ? value : `${value.slice(0, 512)}…`;
+	if (value === null) return "null";
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	try {
+		const text = JSON.stringify(value);
+		return text.length <= 512 ? text : `${text.slice(0, 512)}…`;
+	} catch {
+		return "[不可序列化]";
+	}
+}
+
+//#endregion
 //#region src/orchestration/application.ts
 /**
 * 编排域的应用层：把 IF-1/2/3 的判定与错误折叠收在一处，工具壳（`src/tools.ts`）
@@ -4339,6 +6151,392 @@ async function getChainForTool(deps, exec, args) {
 		path: loaded.path,
 		versions: listChainVersions(workspaceRoot, args.site, args.flow)
 	};
+}
+/** 链执行节点的卡：逐 cardId 解析（默认解析器直读接口库，单次调用内缓存）。 */
+function cardsForChain(workspaceRoot, doc) {
+	const resolve = defaultCardResolver(workspaceRoot);
+	const cards = /* @__PURE__ */ new Map();
+	for (const node of doc.nodes) {
+		if (typeof node.card !== "string" || node.card.length === 0) continue;
+		if (cards.has(node.card)) continue;
+		const card = resolve(node.card);
+		if (card !== void 0) cards.set(node.card, card);
+	}
+	return cards;
+}
+/**
+* 槽位入参校验（`inputs-invalid`）：键必须是链文件声明过的槽位，值要符合声明类型。
+*
+* 与 `missing-params` 分工明确——这里管「你给了不该给的值」，`buildPlan` 管
+* 「该给的值没给」。两者都在第一个请求之前，不会发半截请求出去。
+*/
+function validateChainInputs(doc, inputs) {
+	if (inputs === void 0) return { ok: true };
+	const declared = new Map(doc.inputs.map((input) => [input.name, input]));
+	for (const [name, value] of Object.entries(inputs)) {
+		const slot = declared.get(name);
+		if (slot === void 0) {
+			const known = doc.inputs.map((input) => input.name);
+			return {
+				ok: false,
+				message: `未知槽位「${name}」：本链只声明了 ${known.length === 0 ? "（没有槽位）" : known.join("、")}；槽位必须先写进链文件的 inputs 段`
+			};
+		}
+		const problem = checkValueType(name, slot.type, value);
+		if (problem !== void 0) return {
+			ok: false,
+			message: `槽位值不符合声明类型：${problem}`
+		};
+	}
+	return { ok: true };
+}
+/**
+* baseUrl 候选解析：工具入参 > 卡 `sources[].pages[]` 的 origin。
+*
+* 卡的 `identity.urlTemplate` 是采集期归一化后的相对路径，不含 origin，所以这一步
+* 不能省；多来源跨 origin 视为冲突（宁可拒跑也不打到错站点）。
+* 一个候选都没有时不在这里报错——交给 `buildPlan` 统一给 `base-url-unresolved`。
+*/
+function resolveChainBaseUrl(doc, cards, explicit) {
+	const raw = typeof explicit === "string" ? explicit.trim() : "";
+	if (raw.length > 0) return {
+		ok: true,
+		baseUrl: raw
+	};
+	const origins = /* @__PURE__ */ new Set();
+	for (const node of doc.nodes) {
+		const card = typeof node.card === "string" ? cards.get(node.card) : void 0;
+		for (const source of card?.sources ?? []) for (const page of source.pages ?? []) {
+			const origin = originOf(page);
+			if (origin !== void 0) origins.add(origin);
+		}
+	}
+	if (origins.size === 0) return { ok: true };
+	if (origins.size > 1) return {
+		ok: false,
+		message: `卡来源跨多个 origin（${[...origins].join("、")}）：显式传 baseUrl 指定目标站点，不让引擎猜`
+	};
+	return {
+		ok: true,
+		baseUrl: [...origins][0]
+	};
+}
+function originOf(page) {
+	try {
+		const url = new URL(page);
+		return url.protocol === "http:" || url.protocol === "https:" ? url.origin : void 0;
+	} catch {
+		return;
+	}
+}
+function hostOf(baseUrl) {
+	try {
+		return new URL(baseUrl).host;
+	} catch {
+		return baseUrl;
+	}
+}
+function planValueOf(plan, notices) {
+	return {
+		order: [...plan.order],
+		totalNodes: plan.totalNodes,
+		baseUrl: plan.baseUrl,
+		host: hostOf(plan.baseUrl),
+		writeNodes: [...plan.writeNodes],
+		nodes: plan.nodes.map((node) => ({
+			nodeId: node.nodeId,
+			method: node.method,
+			url: node.urlTemplate,
+			dependsOn: [...node.dependsOn],
+			writes: plan.writeNodes.includes(node.nodeId)
+		})),
+		notices: [...notices]
+	};
+}
+/** 确认卡：拓扑序 + 每节点方法/URL 骨架 + 写方法清单 + 目标 host。 */
+function chainConfirmationCard(doc, plan, notices) {
+	const lines = plan.order.map((nodeId, index) => {
+		const node = plan.nodes.find((candidate) => candidate.nodeId === nodeId);
+		const write = plan.writeNodes.includes(nodeId) ? " ✍️写" : "";
+		return `${index + 1}. ${nodeId}${write}：${node.method} ${node.urlTemplate}`;
+	});
+	const writes = plan.writeNodes.length === 0 ? "写类节点：无（整链只读）" : `写类节点：${plan.writeNodes.join("、")}（已发出的写请求无法撤销）`;
+	const note = notices.length === 0 ? "" : `\n提醒：${notices.join("；")}`;
+	return [
+		`🧭 执行计划（${doc.meta.site} / ${doc.meta.flow} v${doc.meta.version}）→ ${hostOf(plan.baseUrl)}`,
+		...lines,
+		writes,
+		`确认后带 confirm=true 重调即真跑；只想留档用 dry_run=true（永不发请求）。${note}`
+	].join("\n");
+}
+/** 链文件路径：工作区内用相对路径（便于回看与迁移），越界则保留绝对路径。 */
+function chainPathForRecord(workspaceRoot, absolutePath) {
+	const base = workspaceRoot.replace(/\/+$/, "");
+	return absolutePath.startsWith(`${base}/`) ? absolutePath.slice(base.length + 1) : absolutePath;
+}
+function compactNodes(nodes) {
+	return nodes.map((node) => ({
+		nodeId: node.nodeId,
+		status: node.status,
+		method: node.method,
+		url: node.url,
+		...node.httpStatus === void 0 ? {} : { httpStatus: node.httpStatus },
+		attempts: node.attempts,
+		elapsedMs: node.elapsedMs,
+		...node.errorCode === void 0 ? {} : { errorCode: node.errorCode },
+		...node.error === void 0 ? {} : { error: node.error }
+	}));
+}
+function jobStatusOf(result, cancelled) {
+	if (!result.ok) return "failed";
+	if (cancelled || result.cancelled) return "killed";
+	return result.summary.status === "completed" ? "completed" : "failed";
+}
+function jobDetailOf(result) {
+	if (!result.ok) return `${result.code}：${result.message}`;
+	return result.summary.message ?? `${result.summary.stepsDone}/${result.summary.totalSteps} 步`;
+}
+/**
+* 唯一的执行入口（IF-1）。
+*
+* 顺序是设计的一部分：开关 → 载链 → 卡 → 槽位值 → baseUrl 候选 → 执行计划 →
+* 确认闸 → 能力探测 → 真跑。**前七步一个请求都不发**；缺参、环、坏 URL 全在
+* 第一个请求之前被拒，回执逐条指到「节点 · 字段 · 类型」。
+*/
+async function chainRunForTool(deps, exec, args) {
+	if (deps.chain.enabled !== true) return {
+		ok: false,
+		accepted: false,
+		gate: "blocked",
+		code: "execution-disabled",
+		message: "执行开关已关闭（config.chainRunEnabled=false）：链读写与历史回看照常，执行一律拒绝"
+	};
+	let workspaceRoot;
+	try {
+		workspaceRoot = await deps.resolveWorkspaceRoot(exec) ?? process.cwd();
+	} catch (error) {
+		return {
+			ok: false,
+			accepted: false,
+			gate: "blocked",
+			code: "invalid-chain",
+			message: `解析工作区根失败：${messageOf(error)}`
+		};
+	}
+	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
+	if (!loaded.ok) {
+		if (loaded.code === "chain-not-found") return {
+			ok: false,
+			accepted: false,
+			code: "chain-not-found",
+			message: loaded.message,
+			versions: loaded.availableVersions
+		};
+		return {
+			ok: false,
+			accepted: false,
+			code: "invalid-chain",
+			message: loaded.message,
+			issues: toChainIssues(loaded.issues),
+			versions: loaded.availableVersions
+		};
+	}
+	const doc = loaded.doc;
+	const cards = cardsForChain(workspaceRoot, doc);
+	const inputCheck = validateChainInputs(doc, args.inputs);
+	if (!inputCheck.ok) return {
+		ok: false,
+		accepted: false,
+		code: "inputs-invalid",
+		message: inputCheck.message
+	};
+	const base = resolveChainBaseUrl(doc, cards, args.baseUrl);
+	const planned = buildPlan(doc, cards, args.inputs ?? {}, base.ok ? base.baseUrl : void 0);
+	if (!planned.ok) return {
+		ok: false,
+		accepted: false,
+		code: planned.code,
+		message: planned.code === "base-url-unresolved" && !base.ok ? base.message : planned.message,
+		gaps: planned.gaps,
+		cycle: planned.cycle
+	};
+	const plan = planned.plan;
+	const planValue = planValueOf(plan, planned.notices);
+	if (args.dryRun !== true && args.confirm !== true) return {
+		ok: true,
+		accepted: false,
+		gate: "confirm-required",
+		code: "confirm-required",
+		message: `计划已编译（${plan.totalNodes} 个节点，写类 ${plan.writeNodes.length} 个，目标 ${planValue.host}）：确认后带 confirm=true 重调`,
+		plan: planValue,
+		card: chainConfirmationCard(doc, plan, planned.notices)
+	};
+	if (args.dryRun !== true) {
+		const reason = chainExecutionUnavailableReason();
+		if (reason !== void 0) return {
+			ok: false,
+			accepted: false,
+			gate: "blocked",
+			code: "execution-unavailable",
+			message: reason,
+			plan: planValue
+		};
+	}
+	const chainDeps = {
+		dataRoot: deps.dataRoot,
+		config: deps.chain
+	};
+	const runInput = {
+		doc,
+		cards,
+		plan,
+		inputs: args.inputs ?? {},
+		baseUrl: plan.baseUrl,
+		...args.concurrency === void 0 ? {} : { concurrency: args.concurrency },
+		chainPath: chainPathForRecord(workspaceRoot, loaded.path),
+		...args.dryRun === true ? { dryRun: true } : {}
+	};
+	if (args.dryRun === true) {
+		const prepared = prepareChainRun(chainDeps, runInput);
+		const run = await executeChainRun(chainDeps, prepared, runInput);
+		return {
+			ok: true,
+			accepted: true,
+			gate: "started",
+			kind: "dry-run",
+			runId: prepared.runId,
+			runDir: prepared.runDir,
+			plan: planValue,
+			...run.ok ? { summary: run.summary } : { message: run.message }
+		};
+	}
+	const prepared = prepareChainRun(chainDeps, runInput);
+	const jobs = deps.resolveJobs();
+	if (jobs !== void 0 && typeof jobs.start === "function") {
+		const controller = new AbortController();
+		const spec = {
+			kind: "dataforge-chain",
+			label: `${doc.meta.flow} v${doc.meta.version}`,
+			owner: ownerOf(exec),
+			outputLimitBytes: 65536,
+			run(job) {
+				const task = executeChainRun(chainDeps, prepared, {
+					...runInput,
+					signal: controller.signal,
+					onProgress: (line) => job.updateProgress(line)
+				});
+				job.append(`链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} → ${planValue.host}（${plan.totalNodes} 节点）`);
+				return {
+					cancel: (reason) => controller.abort(reason),
+					done: task.then((result) => ({
+						status: jobStatusOf(result, controller.signal.aborted),
+						detail: jobDetailOf(result),
+						...result.ok ? { result: JSON.stringify(result.summary) } : {}
+					}))
+				};
+			}
+		};
+		const jobId = extractJobId(jobs.start(spec));
+		return {
+			ok: true,
+			accepted: true,
+			gate: "started",
+			kind: "background",
+			...jobId === void 0 ? {} : { jobId },
+			runId: prepared.runId,
+			runDir: prepared.runDir,
+			plan: planValue
+		};
+	}
+	const controller = new AbortController();
+	const watchdog = setTimeout(() => controller.abort("foreground-timeout"), Math.max(1, deps.chain.foregroundTimeoutSeconds) * 1e3);
+	watchdog.unref?.();
+	try {
+		const run = await executeChainRun(chainDeps, prepared, {
+			...runInput,
+			signal: controller.signal
+		});
+		return {
+			ok: true,
+			accepted: true,
+			gate: "started",
+			kind: "foreground",
+			runId: prepared.runId,
+			runDir: prepared.runDir,
+			plan: planValue,
+			degradedNotice: "宿主未装配 dsh-jobs：本次前台执行（长链会占用对话，且不可 job_kill；建议部署 @deepseek-ai/dsh-jobs + @deepseek-ai/dsh-tool-jobs）",
+			...run.ok ? {
+				summary: run.summary,
+				nodes: compactNodes(run.nodes),
+				...run.failedNode === void 0 ? {} : { failedNode: run.failedNode }
+			} : { message: run.message }
+		};
+	} finally {
+		clearTimeout(watchdog);
+	}
+}
+/**
+* 链维度运行列表（IF-2）：扫描 `runs/` 读 `run.json` 的 `chain` 段过滤。
+*
+* 没有链维度索引是有意的：单项目几十到几百条运行，全量扫描可接受；量级上来再加索引。
+* 运行留痕与链文件解耦——链被删/改名，历史运行仍能列出（`chain` 段是写入时快照）。
+*/
+function listChainRunsForTool(deps, args) {
+	const limit = Math.max(1, Math.min(200, Math.floor(args.limit ?? 20)));
+	const siteSlug = slugOf(args.site);
+	const flowSlug = slugOf(args.flow);
+	const rows = [];
+	let damaged = 0;
+	for (const runId of listRunIds(deps.dataRoot, 200)) {
+		const record = readRunRecord(deps.dataRoot, runId);
+		if (record === void 0) {
+			damaged += 1;
+			continue;
+		}
+		const chain = plainRecordOf(record["chain"]);
+		if (chain === void 0) continue;
+		const site = typeof chain["site"] === "string" ? chain["site"] : "";
+		const flow = typeof chain["flow"] === "string" ? chain["flow"] : "";
+		const sameSite = site === args.site || slugOf(site) === siteSlug;
+		const sameFlow = flow === args.flow || slugOf(flow) === flowSlug;
+		if (!sameSite || !sameFlow) continue;
+		const version = typeof chain["version"] === "number" ? chain["version"] : void 0;
+		if (args.version !== void 0 && version !== args.version) continue;
+		const events = loadRunEvents(deps.dataRoot, runId);
+		if (events === void 0 || events.length === 0) continue;
+		const summary = foldSummary(runId, events);
+		rows.push({
+			runId,
+			status: summary.status,
+			startedAt: summary.startedAt,
+			updatedAt: summary.updatedAt,
+			dryRun: summary.dryRun,
+			stepsDone: summary.stepsDone,
+			totalSteps: summary.totalSteps,
+			...version === void 0 ? {} : { version },
+			...summary.chain?.failedNode === void 0 ? {} : { failedNode: summary.chain.failedNode },
+			flow: summary.flow,
+			flowName: summary.flowName,
+			...summary.message === void 0 ? {} : { message: summary.message }
+		});
+	}
+	rows.sort((left, right) => right.startedAt - left.startedAt || (left.runId < right.runId ? 1 : left.runId > right.runId ? -1 : 0));
+	const damagedNote = damaged > 0 ? `另有 ${damaged} 条运行记录读不出来已跳过` : void 0;
+	const runs = rows.slice(0, limit);
+	if (runs.length === 0) return {
+		ok: true,
+		runs,
+		notice: ["该链暂无运行留痕", damagedNote].filter(Boolean).join("；")
+	};
+	return {
+		ok: true,
+		runs,
+		...damagedNote === void 0 ? {} : { notice: damagedNote }
+	};
+}
+/** 非 plain object（数组/缺失）一律 undefined。 */
+function plainRecordOf(value) {
+	if (value !== null && typeof value === "object" && !Array.isArray(value)) return value;
 }
 
 //#endregion
@@ -4546,7 +6744,11 @@ function renderStatus(value) {
 	if (value.run !== void 0) return summarizeRunFull(value.run);
 	if (value.runs === void 0) return value.notice ?? "查询无结果";
 	if (value.runs.length === 0) return value.notice ?? "暂无运行留痕";
-	return `🗂 最近运行：\n${value.runs.map((r) => `- ${r.runId}：${r.status} ${r.stepsDone}/${r.totalSteps} 步${r.businessData?.poNo === void 0 ? "" : ` PO=${String(r.businessData.poNo)}`}`).join("\n")}`;
+	return `🗂 最近运行：\n${value.runs.map((r) => {
+		const chain = r.chain === void 0 ? "" : ` 链 ${r.chain.site}/${r.chain.flow} v${r.chain.version}`;
+		const failed = r.chain?.failedNode === void 0 ? "" : `，断在 ${r.chain.failedNode}`;
+		return `- ${r.runId}：${r.status} ${r.stepsDone}/${r.totalSteps} 步${chain}${failed}${r.businessData?.poNo === void 0 ? "" : ` PO=${String(r.businessData.poNo)}`}`;
+	}).join("\n")}`;
 }
 function summarizeRunFull(run) {
 	const icon = run.status === "completed" ? "✅" : run.status === "running" ? "⏳" : run.status === "killed" ? "🛑" : "❌";
@@ -4554,6 +6756,7 @@ function summarizeRunFull(run) {
 	return [
 		`${icon} ${run.runId}（${run.flowName || run.flow}）— ${run.status}${run.dryRun ? "（dry-run）" : ""}`,
 		`进度：${run.stepsDone}/${run.totalSteps} 步${run.lastStepId === void 0 ? "" : `，最后一步 ${run.lastStepId}`}`,
+		...run.chain === void 0 ? [] : [`链：${run.chain.site} / ${run.chain.flow} v${run.chain.version}${run.chain.failedNode === void 0 ? "" : `，断在 ${run.chain.failedNode}`}${(run.chain.completedNodes ?? []).length === 0 ? "" : `，已完成 ${(run.chain.completedNodes ?? []).join("、")}`}`],
 		...run.message === void 0 ? [] : [`信息：${run.message}`],
 		...run.lastError === void 0 ? [] : [`错误：${run.lastError}`],
 		...biz.length === 0 ? [] : [`业务字段：${biz.join("  ")}`]
@@ -5298,6 +7501,337 @@ function defineChainGetTool(deps) {
 				flow: args.flow,
 				...args.version === void 0 ? {} : { version: args.version },
 				...args.export === void 0 ? {} : { export: args.export }
+			}));
+		}
+	});
+}
+/** 计划卡的人话版：目标 host + 拓扑序 + 写类节点（这三样是确认的前提）。 */
+function renderPlan(plan) {
+	if (plan === void 0) return "";
+	const lines = plan.nodes.map((node) => {
+		const write = node.writes ? " ✍️写" : "";
+		const deps = node.dependsOn.length === 0 ? "" : `（等 ${node.dependsOn.join("、")}）`;
+		return `- ${node.nodeId}${write}：${node.method} ${node.url}${deps}`;
+	});
+	const writes = plan.writeNodes.length === 0 ? "无（整链只读）" : `${plan.writeNodes.join("、")}（已发出无法撤销）`;
+	return [
+		`🎯 目标：${plan.host}`,
+		...lines,
+		`写类节点：${writes}`,
+		...plan.notices.length === 0 ? [] : [`提醒：${plan.notices.join("；")}`]
+	].join("\n");
+}
+function renderChainRun(value) {
+	if (value.accepted !== true) {
+		if (value.gate === "confirm-required") return `${value.card ?? value.message ?? "确认后带 confirm=true 重调"}\n\n${renderPlan(value.plan)}`;
+		const gaps = (value.gaps ?? []).length === 0 ? "" : `\n缺参（链定义要改，重试同一份链没用）：\n${(value.gaps ?? []).map((gap) => `- ${gap.nodeId} · ${gap.path} · ${gap.type}`).join("\n")}`;
+		const cycle = (value.cycle ?? []).length === 0 ? "" : `\n成环节点：${(value.cycle ?? []).join(" → ")}`;
+		const versions = (value.versions ?? []).length === 0 ? "" : `\n可用版本：${(value.versions ?? []).map((version) => `v${version}`).join(" / ")}`;
+		return `❌ 未执行（${value.code ?? "unknown"}）：${value.message ?? ""}${gaps}${cycle}${versions}${renderChainIssues(value.issues)}`;
+	}
+	if (value.kind === "dry-run") return `🧪 dry-run 已留痕（runId ${value.runId ?? "?"}）：${value.summary?.totalSteps ?? 0} 个节点，未发送任何请求\n${renderPlan(value.plan)}`;
+	if (value.kind === "background") return `🚀 链已启动（jobId ${value.jobId ?? "?"}，runId ${value.runId ?? "?"}）：用 dataforge_status 轮询节点级进度，job_kill 可取消\n${renderPlan(value.plan)}`;
+	const lines = (value.nodes ?? []).map((node) => {
+		const http = node.httpStatus === void 0 ? "" : ` HTTP ${node.httpStatus}`;
+		const error = node.errorCode === void 0 ? "" : ` ${node.errorCode}：${node.error ?? ""}`;
+		return `- ${node.nodeId}：${node.status}${http}（${node.elapsedMs}ms）${error}`;
+	});
+	const degraded = value.degradedNotice === void 0 ? "" : `\n⚠ ${value.degradedNotice}`;
+	return [
+		`🏁 链已跑完（前台）：${value.summary?.status ?? "unknown"} ${value.summary?.stepsDone ?? 0}/${value.summary?.totalSteps ?? 0} 步`,
+		...lines,
+		...value.failedNode === void 0 ? [] : [`断在：${value.failedNode}`],
+		degraded
+	].join("\n");
+}
+function defineChainRunTool(deps) {
+	return defineTool({
+		name: "dataforge_chain_run",
+		description: `执行一条接口链（唯一执行入口）：按拓扑序发真实 HTTP 请求，节点出参经绑定边进入下游入参。
+
+只接受 kind: interface-chain。page-chain 必须先在 R-1 侧编译成 interface-chain 草稿、经 dataforge_chain_upsert 落盘，否则一律 not-executable。
+
+三道闸（缺一道都不发请求）：
+- 闸1 计划：首次调用不带 confirm 时返回**计划卡**（拓扑序 + 每节点方法/URL 骨架 + 写类节点 + 目标 host），不发任何请求、不建运行；
+- 闸2 确认：向用户转述计划卡，得到确认后带 confirm=true 重调才真跑；
+- 闸3 dry-run 优先：只想留档或先验证连接参数时用 dry_run=true——同一份计划、永不发请求，但会落一条 dryRun 留痕。
+
+缺参判据不看卡的 required：卡模板里出现的入参，只要有常量或绑定边覆盖就不缺，否则预检直接 missing-params（回执逐条「节点 · 字段 · 类型」），整链不执行。
+
+失败时（一个请求都不会发）：
+- missing-params → 补 constants 或绑定边后 upsert 新版本，别重试同一份链；
+- chain-not-found → 回执带 availableVersions，先 dataforge_chain_get 核对；
+- invalid-chain → 文件坏或校验不过，issues 是 R-1 原文；
+- base-url-unresolved → 显式传 baseUrl（卡的来源页面跨多个 origin 时只能人来定）；
+- inputs-invalid → inputs 的键必须是链文件声明过的槽位；
+- execution-disabled → 执行开关关着，链读写与历史回看照常。
+
+运行期失败（binding-* / node-* / response-too-large / cancelled）不自动重试：链已中止，错误进运行记录，修好后用新 run 重跑（绝不自动重放写请求）。
+
+幂等性：**不幂等**。同一参数重复调用就是新 run、新请求。长链走宿主后台 job，用 dataforge_status 轮询、job_kill 取消。`,
+		parameters: {
+			site: {
+				type: "string",
+				required: true,
+				description: "站点名（链的 meta.site）"
+			},
+			flow: {
+				type: "string",
+				required: true,
+				description: "流程名（链的 meta.flow）"
+			},
+			version: {
+				type: "number",
+				description: "链版本；缺省最新"
+			},
+			inputs: {
+				type: "object",
+				additionalProperties: true,
+				description: "链级槽位运行值（键必须已在链文件 inputs 里声明）"
+			},
+			baseUrl: {
+				type: "string",
+				description: "目标站点源（缺省从卡的来源页面 origin 推断；跨 origin 必须显式给）"
+			},
+			concurrency: {
+				type: "number",
+				description: "运行期并发上限（缺省 4，硬上限 16）"
+			},
+			dry_run: {
+				type: "boolean",
+				description: "只编译计划并落留痕，永不发请求"
+			},
+			confirm: {
+				type: "boolean",
+				description: "闸2：用户确认后才允许 true；缺省 = 只出计划卡"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					accepted: { type: "boolean" },
+					gate: {
+						type: "string",
+						description: "started / confirm-required / blocked"
+					},
+					code: {
+						type: "string",
+						description: "missing-params / chain-not-found / invalid-chain / base-url-unresolved / inputs-invalid / not-executable / cycle / execution-disabled / execution-unavailable"
+					},
+					message: { type: "string" },
+					kind: {
+						type: "string",
+						description: "background / foreground / dry-run"
+					},
+					jobId: { type: "string" },
+					runId: { type: "string" },
+					runDir: { type: "string" },
+					degradedNotice: { type: "string" },
+					card: { type: "string" },
+					plan: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							order: {
+								type: "array",
+								items: { type: "string" }
+							},
+							totalNodes: { type: "number" },
+							baseUrl: { type: "string" },
+							host: { type: "string" },
+							writeNodes: {
+								type: "array",
+								items: { type: "string" }
+							},
+							nodes: {
+								type: "array",
+								items: {
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										nodeId: { type: "string" },
+										method: { type: "string" },
+										url: { type: "string" },
+										dependsOn: {
+											type: "array",
+											items: { type: "string" }
+										},
+										writes: { type: "boolean" }
+									}
+								}
+							},
+							notices: {
+								type: "array",
+								items: { type: "string" }
+							}
+						}
+					},
+					gaps: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								nodeId: { type: "string" },
+								path: { type: "string" },
+								type: { type: "string" },
+								target: { type: "string" }
+							}
+						}
+					},
+					cycle: {
+						type: "array",
+						items: { type: "string" }
+					},
+					versions: {
+						type: "array",
+						items: { type: "number" }
+					},
+					issues: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								target: { type: "string" },
+								code: { type: "string" },
+								reason: { type: "string" }
+							}
+						}
+					},
+					nodes: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								nodeId: { type: "string" },
+								status: { type: "string" },
+								method: { type: "string" },
+								url: { type: "string" },
+								httpStatus: { type: "number" },
+								attempts: { type: "number" },
+								elapsedMs: { type: "number" },
+								errorCode: { type: "string" },
+								error: { type: "string" }
+							}
+						}
+					},
+					failedNode: { type: "string" },
+					summary: {
+						type: "object",
+						additionalProperties: true,
+						description: "运行摘要（前台/dry-run）"
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderChainRun(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(await chainRunForTool(deps, exec, {
+				site: args.site,
+				flow: args.flow,
+				...args.version === void 0 ? {} : { version: args.version },
+				...args.inputs === void 0 ? {} : { inputs: args.inputs },
+				...args.baseUrl === void 0 ? {} : { baseUrl: args.baseUrl },
+				...args.concurrency === void 0 ? {} : { concurrency: args.concurrency },
+				...args.dry_run === void 0 ? {} : { dryRun: args.dry_run },
+				...args.confirm === void 0 ? {} : { confirm: args.confirm }
+			}));
+		}
+	});
+}
+function renderChainRuns(value) {
+	if (value.notice !== void 0 && (value.runs ?? []).length === 0) return `📭 ${value.notice}`;
+	const lines = (value.runs ?? []).map((run) => {
+		const version = run.version === void 0 ? "" : ` v${run.version}`;
+		const failed = run.failedNode === void 0 ? "" : `，断在 ${run.failedNode}`;
+		const dry = run.dryRun ? "（dry-run）" : "";
+		return `- ${run.runId}${version}${dry}：${run.status} ${run.stepsDone}/${run.totalSteps} 步${failed}`;
+	});
+	const notice = value.notice === void 0 ? "" : `\n⚠ ${value.notice}`;
+	return `🗂 链运行留痕 ${(value.runs ?? []).length} 条：\n${lines.join("\n")}${notice}`;
+}
+function defineChainRunsTool(deps) {
+	return defineTool({
+		name: "dataforge_chain_runs",
+		description: `按链列运行留痕（链详情·运行 tab 的数据面）。
+
+读 run.json 的 chain 段过滤（写入时快照）：链被改名/删掉，历史运行仍能列出。
+状态现折叠（与 dataforge_status 同一套投影），所以运行中的链也能看到节点级进度。
+
+失败时：
+- 没有任何匹配运行 → ok:true + notice「该链暂无运行留痕」（空态是常态，不是错误）；
+- 某条 run.json 损坏 → 跳过并在 notice 里计数，不阻断整批。
+
+只读，天然幂等。要节点级细节（失败原因、请求摘要）用 dataforge_status(run_id)。`,
+		parameters: {
+			site: {
+				type: "string",
+				required: true,
+				description: "站点名（链的 meta.site）"
+			},
+			flow: {
+				type: "string",
+				required: true,
+				description: "流程名（链的 meta.flow）"
+			},
+			version: {
+				type: "number",
+				description: "只列这个链版本的运行；缺省 = 该链全部版本"
+			},
+			limit: {
+				type: "number",
+				description: "返回条数上限（缺省 20，上限 200）"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					notice: { type: "string" },
+					runs: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								runId: { type: "string" },
+								status: { type: "string" },
+								startedAt: { type: "number" },
+								updatedAt: { type: "number" },
+								dryRun: { type: "boolean" },
+								stepsDone: { type: "number" },
+								totalSteps: { type: "number" },
+								version: { type: "number" },
+								failedNode: { type: "string" },
+								flow: { type: "string" },
+								flowName: { type: "string" },
+								message: { type: "string" }
+							}
+						}
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderChainRuns(tighten(value))
+			}]
+		},
+		async execute(args) {
+			return lossless(listChainRunsForTool(deps, {
+				site: args.site,
+				flow: args.flow,
+				...args.version === void 0 ? {} : { version: args.version },
+				...args.limit === void 0 ? {} : { limit: args.limit }
 			}));
 		}
 	});
@@ -6552,6 +9086,18 @@ function apply(ctx, rawConfig) {
 		captureDbPath: join(config.dataRoot, "capture", "capture.sqlite"),
 		resolveWorkspaceRoot
 	};
+	const chainRunDeps = {
+		...orchestrationDeps,
+		dataRoot: config.dataRoot,
+		chain: {
+			enabled: config.chainRunEnabled,
+			nodeTimeoutSeconds: config.chainNodeTimeoutSeconds,
+			concurrency: config.chainConcurrency,
+			responseLimitBytes: config.chainResponseLimitBytes,
+			foregroundTimeoutSeconds: config.timeoutSeconds
+		},
+		resolveJobs: () => jobsService
+	};
 	anyCtx.inject?.(["webServer"], (webSvc) => {
 		const effect = webSvc["effect"];
 		const webServer = webSvc["webServer"];
@@ -6589,9 +9135,12 @@ function apply(ctx, rawConfig) {
 			defineBrowserCloseTool(captureDeps),
 			defineLibraryImportTool(orchestrationDeps),
 			defineChainUpsertTool(orchestrationDeps),
-			defineChainGetTool(orchestrationDeps)
+			defineChainGetTool(orchestrationDeps),
+			defineChainRunTool(chainRunDeps),
+			defineChainRunsTool(chainRunDeps)
 		]) tools.register(tool);
-		logger?.info?.(`已注册 14 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
+		logger?.info?.(`已注册 16 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_run/chain_runs（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
+		if (!config.chainRunEnabled) logger?.info?.("执行开关 chainRunEnabled=false：dataforge_chain_run 一律 execution-disabled");
 	});
 	if (config.injectPolicy) try {
 		const policy = loadPolicyText(config.engineRoot);

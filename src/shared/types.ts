@@ -53,6 +53,22 @@ export interface BridgeEvent {
 /** JSON 可序列化叶子（循环安全版 JsonValue）：businessData 只装业务标量/嵌套 JSON。 */
 export type JsonLike = string | number | boolean | null | JsonLike[] | { [key: string]: JsonLike }
 
+/**
+ * 链运行的身份与结果（IF-6）：只有 `kind: 'chain-run'` 的 run 才有，旧 run 缺席。
+ *
+ * `site/flow/version` 取自 `run.json` 的 `chain` 段（写入时的快照），所以链被改名或
+ * 删掉之后历史运行仍对得上「当时跑的哪一版」。
+ */
+export type ChainRunSummary = {
+  site: string
+  flow: string
+  version: number
+  /** 中止链的节点（只有失败的链运行才有）。 */
+  failedNode?: string
+  /** 已成功完成的节点 ID（按计划序）。 */
+  completedNodes?: string[]
+}
+
 /** dataforge_status 的投影：把事件流折成一张运行摘要。type 别名 == 有隐式索引签名（工具 schema 推断要求 Record 兼容；interface 会断言失败，勿改回）。 */
 export type RunSummary = {
   runId: string
@@ -71,6 +87,8 @@ export type RunSummary = {
   businessData?: Record<string, JsonLike>
   /** 结束消息（terminal.message）。 */
   message?: string
+  /** 链运行的身份与节点级结果（IF-6；旧流程运行没有这一段）。 */
+  chain?: ChainRunSummary
 }
 
 /** 预检结果：引擎/python/桥是否可用。 */

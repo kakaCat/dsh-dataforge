@@ -29,6 +29,14 @@ export interface Config {
   captureBodyLimitBytes: number
   /** 采集：Chrome 通道（缺省 'chrome' = 本机系统 Chrome，免下载浏览器）。 */
   captureChromeChannel: string
+  /** 执行开关：关闭后 dataforge_chain_run 直接 execution-disabled（不影响链读写与历史回看）。 */
+  chainRunEnabled: boolean
+  /** 执行：单节点请求超时（秒）；节点 `timeoutSeconds` 优先。 */
+  chainNodeTimeoutSeconds: number
+  /** 执行：默认并发（就绪节点同时发出的上限，硬上限 16）。 */
+  chainConcurrency: number
+  /** 执行：单响应正文读取上限（字节），超过即截断并如实标注。 */
+  chainResponseLimitBytes: number
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -42,6 +50,10 @@ export const Config: Schema<Config> = Schema.object({
   captureStabilityWindowMs: Schema.number().default(1500),
   captureBodyLimitBytes: Schema.number().default(262_144),
   captureChromeChannel: Schema.string().default('chrome'),
+  chainRunEnabled: Schema.boolean().default(true),
+  chainNodeTimeoutSeconds: Schema.number().default(30),
+  chainConcurrency: Schema.number().default(4),
+  chainResponseLimitBytes: Schema.number().default(2_097_152),
 })
 
 /** 归一化（相对路径 → 绝对；~ 展开）。 */
@@ -58,5 +70,9 @@ export function normalizeConfig(raw: Config): Required<Config> {
     captureStabilityWindowMs: raw.captureStabilityWindowMs,
     captureBodyLimitBytes: raw.captureBodyLimitBytes,
     captureChromeChannel: raw.captureChromeChannel,
+    chainRunEnabled: raw.chainRunEnabled,
+    chainNodeTimeoutSeconds: raw.chainNodeTimeoutSeconds,
+    chainConcurrency: raw.chainConcurrency,
+    chainResponseLimitBytes: raw.chainResponseLimitBytes,
   }
 }

@@ -15,6 +15,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
   └─ dataforge_capture* / dataforge_browser_*   浏览器只活在采集期：页面上的 XHR 成卡
   └─ dataforge_library_import                   采集卡 → 项目接口库（稳定 cardId、跨 run 归并）
   └─ dataforge_chain_upsert / dataforge_chain_get  接口链：版本快照、绑定即拓扑依赖
+  └─ dataforge_chain_run / dataforge_chain_runs    执行：拓扑调度 + 纯 HTTP 直调 + 运行留痕
         │
         ▼  编排/执行/复跑一律走「接口卡模板 + 凭证卡」＋纯 HTTP，不再开浏览器
 ```
@@ -30,7 +31,8 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | 运行留痕 | `src/runs/store.ts` | `dataRoot/runs/<runId>/`：`run.json` + `events.ndjson` |
 | 接口库 | `src/library/{import,store}.ts` | 采集 SQLite（只读）→ 卡文件；cardId 分配与归并 |
 | 接口链 | `src/chains/{schema,validate,store,compile}.ts` | 链 schema / 语义校验 / 版本快照 / page-chain 编译 |
-| 编排应用层 | `src/orchestration/application.ts` | IF-1/2/3 的错误码折叠与回执值 |
+| 执行引擎 | `src/execute/{plan,coverage,request,binding,http,run}.ts` | 计划编译 / 缺参覆盖 / 请求构造 / 绑定求值 / HTTP 出口 / 调度器 |
+| 编排应用层 | `src/orchestration/application.ts` | 链读写、执行闸门与 IF-1/2 的错误码折叠与回执值 |
 
 ## 三道闸（调用纪律，写进 dataforge_run 工具描述）
 
@@ -49,6 +51,10 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
     dataRoot: ~/.dsh/storages/dsh-dataforge
     timeoutSeconds: 600
     injectPolicy: true
+    chainRunEnabled: true          # 执行开关：关掉只拒跑，链读写与历史回看照常
+    chainNodeTimeoutSeconds: 30
+    chainConcurrency: 4            # 硬上限 16
+    chainResponseLimitBytes: 2097152
 ```
 
 | 字段 | 说明 | 缺省 |
@@ -58,6 +64,10 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | `dataRoot` | 插件数据根：留痕 + 全局三方包（`<dataRoot>/flows/`）| `~/.dsh/storages/dsh-dataforge` |
 | `timeoutSeconds` | 桥进程硬超时，超时即杀 | `600` |
 | `injectPolicy` | 是否注入 `policy.md` 常驻策略段 | `true` |
+| `chainRunEnabled` | 链执行开关；关闭后 `dataforge_chain_run` 一律 `execution-disabled` | `true` |
+| `chainNodeTimeoutSeconds` | 执行：单节点请求超时（秒）；节点 `timeoutSeconds` 优先 | `30` |
+| `chainConcurrency` | 执行：默认并发（就绪节点同时发出数），硬上限 16 | `4` |
+| `chainResponseLimitBytes` | 执行：单响应正文读取上限（字节），超过标 `truncated` | `2097152` |
 
 ## 流程包发现（后写赢）
 
@@ -110,13 +120,44 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | `<workspace>/.dsh/dataforge/library/cards/<cardId>.yaml` | 一张接口卡一个文件；`index.yaml` 是 cardId → 文件/归并键/站点的指针 |
 | `<workspace>/.dsh/dataforge/chains/<site>/<flow>/v<n>.yaml` | 一个版本一个文件，**版本即不可变快照**，目录即历史 |
 
-### 三个工具
+### 五个工具
 
 | 工具 | 干什么 | 失败门 |
 |---|---|---|
 | `dataforge_library_import` | 采集卡 → 项目接口库；同 `mergeKey` 跨 run 归并，分配稳定 cardId | `no-capture-data`（采集库没卡）；坏卡跳过不炸批 |
 | `dataforge_chain_upsert` | 唯一链写入口：schema + 语义校验全过才落盘为新版本 | `invalid-chain`（逐条指到 `nodes[i]`/`edges[j]`）、`card-not-imported` |
 | `dataforge_chain_get` | 回读链（缺省最新版本）；`export=true` 原文导出 | `chain-not-found`、`invalid-chain`（手改坏，可回读旧版本） |
+| `dataforge_chain_run` | **唯一执行入口**：预检 → 计划卡 → 确认 → 拓扑调度直调 HTTP | `missing-params` / `chain-not-found` / `invalid-chain` / `not-executable` / `cycle` / `base-url-unresolved` / `inputs-invalid` / `confirm-required` / `execution-disabled` / `execution-unavailable`（都不发请求） |
+| `dataforge_chain_runs` | 按链列运行留痕（读 `run.json` 的 `chain` 段过滤，状态现折叠） | 空态是 `ok:true` + `notice`；坏 `run.json` 跳过并计数 |
+
+### 执行（R-3：拓扑调度 + 纯 HTTP 直调）
+
+**唯一执行入口是 `dataforge_chain_run`**，且只接受 `interface-chain`：`page-chain` 必须先经 `compilePageChain` 编译成草稿、经 `dataforge_chain_upsert` 落盘。执行段**不开浏览器**，只用 Node 22 内置 `fetch`。
+
+三道闸与实际顺序（前七步一个请求都不发）：
+
+```text
+执行开关 → 载链（loadChain 重校验）→ 卡 → 槽位值校验 → baseUrl 候选 → buildPlan()
+   ├─ cycle / card-not-imported / missing-params / base-url-unresolved → 直接拒，回执指到节点与字段
+   ▼
+不带 confirm 且非 dry_run ──► 计划卡（拓扑序 + 方法/URL 骨架 + 写类节点 + 目标 host），不建运行
+   ▼ confirm=true（或 dry_run=true）
+dry_run ──► 同一份计划，永不发请求，但落一条 dryRun:true 留痕
+   ▼
+就绪队列调度（indegree 由 dependencyPairs 统计；就绪节点按 id 字典序；并发 ≤ chainConcurrency）
+   ↓ 每节点：绑定求值 → buildRequest → httpRequest → 解析 → 出参探测
+runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result）
+```
+
+**缺参判据（硬规则）**：`covered(node) = 常量键 ∪ 以该节点为终点的绑定边字段`，`missing = 卡入参.filter(角色≠credential 且 未被 covered)`。**卡的 `required` 不参与判据**——单样本卡几乎全是 `required: false`，拿它判会把必须给值的入参全部放行、进而静默发空值。静态缺参一次判完，整链不执行。
+
+**错误码是契约**（只增不改名）：预检 `missing-params` / `chain-not-found` / `invalid-chain` / `not-executable` / `cycle` / `base-url-unresolved` / `inputs-invalid` / `confirm-required` / `execution-disabled` / `execution-unavailable`；运行期 `binding-path-not-found` / `binding-type-mismatch` / `binding-null` / `empty-wildcard` / `param-missing` / `param-type-mismatch` / `bad-url-template` / `node-timeout` / `node-network-error` / `node-http-error` / `node-auth-required` / `response-too-large` / `cancelled`。
+
+**安全面**：`credentials: 'omit'`（不继承 cookie jar）、头名命中脱敏集合即打码、请求/响应正文摘要各留 4 KiB、响应读取上限 `chainResponseLimitBytes`、只允许 http(s)、`chainRunEnabled` 全局开关。**卡与链零凭证**；凭证注入与 401 换票归 R-4（本期 401 如实记 `node-auth-required`，不发空值、不重试）。
+
+**不幂等**：同一参数重复调用就是新 run、新请求；写类节点不做自动整链重试（节点级 `retry` 只对 GET/HEAD/OPTIONS 生效）。取消后重跑必须重新确认。
+
+**长跑**：`jobs` 在场则以 `kind: 'dataforge-chain'` 起后台 job（`job_output` 看进度、`job_kill` 取消，终态 `killed`）；`jobs` 不在场则前台降级并在回执标 `degradedNotice`。
 
 ### 编排页签（面板内可视化编辑）
 
@@ -207,7 +248,7 @@ edges:                       # from 可为「节点.出参」或 $inputs.槽位�
 ```bash
 pnpm typecheck   # tsc --noEmit
 pnpm test        # vitest：全量用例（含真引擎 dry-run 集成；python3 + engineRoot 存在时自动启用）
-pnpm build       # tsdown → dist/ + lib/client.js（含画布，约 325 KB）
+pnpm build       # tsdown → dist/ + lib/client.js（含画布，约 331 KB）
 ```
 
 直接 CLI 冒烟：

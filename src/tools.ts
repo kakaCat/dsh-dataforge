@@ -22,8 +22,9 @@ import type {
 } from './shared/capture-types.js'
 import type { RunSummary } from './shared/types.js'
 import {
-  getChainForTool, importLibraryForTool, upsertChainForTool,
-  type ChainGetToolValue, type ChainUpsertToolValue, type ImportLibraryToolValue, type OrchestrationDeps,
+  chainRunForTool, getChainForTool, importLibraryForTool, listChainRunsForTool, upsertChainForTool,
+  type ChainGetToolValue, type ChainRunPlanValue, type ChainRunsToolValue, type ChainRunToolDeps,
+  type ChainRunToolValue, type ChainUpsertToolValue, type ImportLibraryToolValue, type OrchestrationDeps,
 } from './orchestration/application.js'
 
 /** 渲染边界单向收紧：进 render 的值已被 defineTool 按 schema 运行时校验，只是 TS 推断偏松。 */
@@ -209,8 +210,11 @@ function renderStatus(value: StatusValue): string {
   if (value.run !== undefined) return summarizeRunFull(value.run)
   if (value.runs === undefined) return value.notice ?? '查询无结果'
   if (value.runs.length === 0) return value.notice ?? '暂无运行留痕'
-  const lines = value.runs.map((r) =>
-    `- ${r.runId}：${r.status} ${r.stepsDone}/${r.totalSteps} 步${r.businessData?.poNo === undefined ? '' : ` PO=${String(r.businessData.poNo)}`}`)
+  const lines = value.runs.map((r) => {
+    const chain = r.chain === undefined ? '' : ` 链 ${r.chain.site}/${r.chain.flow} v${r.chain.version}`
+    const failed = r.chain?.failedNode === undefined ? '' : `，断在 ${r.chain.failedNode}`
+    return `- ${r.runId}：${r.status} ${r.stepsDone}/${r.totalSteps} 步${chain}${failed}${r.businessData?.poNo === undefined ? '' : ` PO=${String(r.businessData.poNo)}`}`
+  })
   return `🗂 最近运行：\n${lines.join('\n')}`
 }
 
@@ -222,6 +226,9 @@ function summarizeRunFull(run: RunSummary): string {
   return [
     `${icon} ${run.runId}（${run.flowName || run.flow}）— ${run.status}${run.dryRun ? '（dry-run）' : ''}`,
     `进度：${run.stepsDone}/${run.totalSteps} 步${run.lastStepId === undefined ? '' : `，最后一步 ${run.lastStepId}`}`,
+    ...(run.chain === undefined
+      ? []
+      : [`链：${run.chain.site} / ${run.chain.flow} v${run.chain.version}${run.chain.failedNode === undefined ? '' : `，断在 ${run.chain.failedNode}`}${(run.chain.completedNodes ?? []).length === 0 ? '' : `，已完成 ${(run.chain.completedNodes ?? []).join('、')}`}`]),
     ...(run.message === undefined ? [] : [`信息：${run.message}`]),
     ...(run.lastError === undefined ? [] : [`错误：${run.lastError}`]),
     ...(biz.length === 0 ? [] : [`业务字段：${biz.join('  ')}`]),
@@ -845,6 +852,282 @@ export function defineChainGetTool(deps: OrchestrationDeps) {
         flow: args.flow,
         ...(args.version === undefined ? {} : { version: args.version }),
         ...(args.export === undefined ? {} : { export: args.export }),
+      }))
+    },
+  })
+}
+
+// ────────────────────────────────────────────────
+// 执行两件套：dataforge_chain_run / dataforge_chain_runs
+// ────────────────────────────────────────────────
+
+/** 计划卡的人话版：目标 host + 拓扑序 + 写类节点（这三样是确认的前提）。 */
+function renderPlan(plan: ChainRunPlanValue | undefined): string {
+  if (plan === undefined) return ''
+  const lines = plan.nodes.map((node) => {
+    const write = node.writes ? ' ✍️写' : ''
+    const deps = node.dependsOn.length === 0 ? '' : `（等 ${node.dependsOn.join('、')}）`
+    return `- ${node.nodeId}${write}：${node.method} ${node.url}${deps}`
+  })
+  const writes = plan.writeNodes.length === 0 ? '无（整链只读）' : `${plan.writeNodes.join('、')}（已发出无法撤销）`
+  return [
+    `🎯 目标：${plan.host}`,
+    ...lines,
+    `写类节点：${writes}`,
+    ...(plan.notices.length === 0 ? [] : [`提醒：${plan.notices.join('；')}`]),
+  ].join('\n')
+}
+
+function renderChainRun(value: ChainRunToolValue): string {
+  if (value.accepted !== true) {
+    if (value.gate === 'confirm-required') {
+      return `${value.card ?? value.message ?? '确认后带 confirm=true 重调'}\n\n${renderPlan(value.plan)}`
+    }
+    const gaps = (value.gaps ?? []).length === 0
+      ? ''
+      : `\n缺参（链定义要改，重试同一份链没用）：\n${(value.gaps ?? []).map((gap) => `- ${gap.nodeId} · ${gap.path} · ${gap.type}`).join('\n')}`
+    const cycle = (value.cycle ?? []).length === 0 ? '' : `\n成环节点：${(value.cycle ?? []).join(' → ')}`
+    const versions = (value.versions ?? []).length === 0
+      ? ''
+      : `\n可用版本：${(value.versions ?? []).map((version) => `v${version}`).join(' / ')}`
+    return `❌ 未执行（${value.code ?? 'unknown'}）：${value.message ?? ''}${gaps}${cycle}${versions}${renderChainIssues(value.issues)}`
+  }
+
+  if (value.kind === 'dry-run') {
+    return `🧪 dry-run 已留痕（runId ${value.runId ?? '?'}）：${value.summary?.totalSteps ?? 0} 个节点，未发送任何请求\n${renderPlan(value.plan)}`
+  }
+
+  if (value.kind === 'background') {
+    return `🚀 链已启动（jobId ${value.jobId ?? '?'}，runId ${value.runId ?? '?'}）：用 dataforge_status 轮询节点级进度，job_kill 可取消\n${renderPlan(value.plan)}`
+  }
+
+  const nodes = value.nodes ?? []
+  const lines = nodes.map((node) => {
+    const http = node.httpStatus === undefined ? '' : ` HTTP ${node.httpStatus}`
+    const error = node.errorCode === undefined ? '' : ` ${node.errorCode}：${node.error ?? ''}`
+    return `- ${node.nodeId}：${node.status}${http}（${node.elapsedMs}ms）${error}`
+  })
+  const degraded = value.degradedNotice === undefined ? '' : `\n⚠ ${value.degradedNotice}`
+  return [
+    `🏁 链已跑完（前台）：${value.summary?.status ?? 'unknown'} ${value.summary?.stepsDone ?? 0}/${value.summary?.totalSteps ?? 0} 步`,
+    ...lines,
+    ...(value.failedNode === undefined ? [] : [`断在：${value.failedNode}`]),
+    degraded,
+  ].join('\n')
+}
+
+export function defineChainRunTool(deps: ChainRunToolDeps) {
+  return defineTool({
+    name: 'dataforge_chain_run',
+    description: `执行一条接口链（唯一执行入口）：按拓扑序发真实 HTTP 请求，节点出参经绑定边进入下游入参。
+
+只接受 kind: interface-chain。page-chain 必须先在 R-1 侧编译成 interface-chain 草稿、经 dataforge_chain_upsert 落盘，否则一律 not-executable。
+
+三道闸（缺一道都不发请求）：
+- 闸1 计划：首次调用不带 confirm 时返回**计划卡**（拓扑序 + 每节点方法/URL 骨架 + 写类节点 + 目标 host），不发任何请求、不建运行；
+- 闸2 确认：向用户转述计划卡，得到确认后带 confirm=true 重调才真跑；
+- 闸3 dry-run 优先：只想留档或先验证连接参数时用 dry_run=true——同一份计划、永不发请求，但会落一条 dryRun 留痕。
+
+缺参判据不看卡的 required：卡模板里出现的入参，只要有常量或绑定边覆盖就不缺，否则预检直接 missing-params（回执逐条「节点 · 字段 · 类型」），整链不执行。
+
+失败时（一个请求都不会发）：
+- missing-params → 补 constants 或绑定边后 upsert 新版本，别重试同一份链；
+- chain-not-found → 回执带 availableVersions，先 dataforge_chain_get 核对；
+- invalid-chain → 文件坏或校验不过，issues 是 R-1 原文；
+- base-url-unresolved → 显式传 baseUrl（卡的来源页面跨多个 origin 时只能人来定）；
+- inputs-invalid → inputs 的键必须是链文件声明过的槽位；
+- execution-disabled → 执行开关关着，链读写与历史回看照常。
+
+运行期失败（binding-* / node-* / response-too-large / cancelled）不自动重试：链已中止，错误进运行记录，修好后用新 run 重跑（绝不自动重放写请求）。
+
+幂等性：**不幂等**。同一参数重复调用就是新 run、新请求。长链走宿主后台 job，用 dataforge_status 轮询、job_kill 取消。`,
+    parameters: {
+      site: { type: 'string', required: true, description: '站点名（链的 meta.site）' },
+      flow: { type: 'string', required: true, description: '流程名（链的 meta.flow）' },
+      version: { type: 'number', description: '链版本；缺省最新' },
+      inputs: {
+        type: 'object',
+        additionalProperties: true,
+        description: '链级槽位运行值（键必须已在链文件 inputs 里声明）',
+      },
+      baseUrl: { type: 'string', description: '目标站点源（缺省从卡的来源页面 origin 推断；跨 origin 必须显式给）' },
+      concurrency: { type: 'number', description: '运行期并发上限（缺省 4，硬上限 16）' },
+      dry_run: { type: 'boolean', description: '只编译计划并落留痕，永不发请求' },
+      confirm: { type: 'boolean', description: '闸2：用户确认后才允许 true；缺省 = 只出计划卡' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          accepted: { type: 'boolean' },
+          gate: { type: 'string', description: 'started / confirm-required / blocked' },
+          code: { type: 'string', description: 'missing-params / chain-not-found / invalid-chain / base-url-unresolved / inputs-invalid / not-executable / cycle / execution-disabled / execution-unavailable' },
+          message: { type: 'string' },
+          kind: { type: 'string', description: 'background / foreground / dry-run' },
+          jobId: { type: 'string' },
+          runId: { type: 'string' },
+          runDir: { type: 'string' },
+          degradedNotice: { type: 'string' },
+          card: { type: 'string' },
+          plan: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              order: { type: 'array', items: { type: 'string' } },
+              totalNodes: { type: 'number' },
+              baseUrl: { type: 'string' },
+              host: { type: 'string' },
+              writeNodes: { type: 'array', items: { type: 'string' } },
+              nodes: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    nodeId: { type: 'string' },
+                    method: { type: 'string' },
+                    url: { type: 'string' },
+                    dependsOn: { type: 'array', items: { type: 'string' } },
+                    writes: { type: 'boolean' },
+                  },
+                },
+              },
+              notices: { type: 'array', items: { type: 'string' } },
+            },
+          },
+          gaps: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                nodeId: { type: 'string' },
+                path: { type: 'string' },
+                type: { type: 'string' },
+                target: { type: 'string' },
+              },
+            },
+          },
+          cycle: { type: 'array', items: { type: 'string' } },
+          versions: { type: 'array', items: { type: 'number' } },
+          issues: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { target: { type: 'string' }, code: { type: 'string' }, reason: { type: 'string' } },
+            },
+          },
+          nodes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                nodeId: { type: 'string' },
+                status: { type: 'string' },
+                method: { type: 'string' },
+                url: { type: 'string' },
+                httpStatus: { type: 'number' },
+                attempts: { type: 'number' },
+                elapsedMs: { type: 'number' },
+                errorCode: { type: 'string' },
+                error: { type: 'string' },
+              },
+            },
+          },
+          failedNode: { type: 'string' },
+          summary: { type: 'object', additionalProperties: true, description: '运行摘要（前台/dry-run）' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderChainRun(tighten<ChainRunToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<ChainRunToolValue> {
+      return lossless(await chainRunForTool(deps, exec, {
+        site: args.site,
+        flow: args.flow,
+        ...(args.version === undefined ? {} : { version: args.version }),
+        ...(args.inputs === undefined ? {} : { inputs: args.inputs }),
+        ...(args.baseUrl === undefined ? {} : { baseUrl: args.baseUrl }),
+        ...(args.concurrency === undefined ? {} : { concurrency: args.concurrency }),
+        ...(args.dry_run === undefined ? {} : { dryRun: args.dry_run }),
+        ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
+      }))
+    },
+  })
+}
+
+function renderChainRuns(value: ChainRunsToolValue): string {
+  if (value.notice !== undefined && (value.runs ?? []).length === 0) return `📭 ${value.notice}`
+  const lines = (value.runs ?? []).map((run) => {
+    const version = run.version === undefined ? '' : ` v${run.version}`
+    const failed = run.failedNode === undefined ? '' : `，断在 ${run.failedNode}`
+    const dry = run.dryRun ? '（dry-run）' : ''
+    return `- ${run.runId}${version}${dry}：${run.status} ${run.stepsDone}/${run.totalSteps} 步${failed}`
+  })
+  const notice = value.notice === undefined ? '' : `\n⚠ ${value.notice}`
+  return `🗂 链运行留痕 ${(value.runs ?? []).length} 条：\n${lines.join('\n')}${notice}`
+}
+
+export function defineChainRunsTool(deps: ChainRunToolDeps) {
+  return defineTool({
+    name: 'dataforge_chain_runs',
+    description: `按链列运行留痕（链详情·运行 tab 的数据面）。
+
+读 run.json 的 chain 段过滤（写入时快照）：链被改名/删掉，历史运行仍能列出。
+状态现折叠（与 dataforge_status 同一套投影），所以运行中的链也能看到节点级进度。
+
+失败时：
+- 没有任何匹配运行 → ok:true + notice「该链暂无运行留痕」（空态是常态，不是错误）；
+- 某条 run.json 损坏 → 跳过并在 notice 里计数，不阻断整批。
+
+只读，天然幂等。要节点级细节（失败原因、请求摘要）用 dataforge_status(run_id)。`,
+    parameters: {
+      site: { type: 'string', required: true, description: '站点名（链的 meta.site）' },
+      flow: { type: 'string', required: true, description: '流程名（链的 meta.flow）' },
+      version: { type: 'number', description: '只列这个链版本的运行；缺省 = 该链全部版本' },
+      limit: { type: 'number', description: '返回条数上限（缺省 20，上限 200）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          notice: { type: 'string' },
+          runs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                runId: { type: 'string' },
+                status: { type: 'string' },
+                startedAt: { type: 'number' },
+                updatedAt: { type: 'number' },
+                dryRun: { type: 'boolean' },
+                stepsDone: { type: 'number' },
+                totalSteps: { type: 'number' },
+                version: { type: 'number' },
+                failedNode: { type: 'string' },
+                flow: { type: 'string' },
+                flowName: { type: 'string' },
+                message: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderChainRuns(tighten<ChainRunsToolValue>(value)) }],
+    },
+    async execute(args): Promise<ChainRunsToolValue> {
+      return lossless(listChainRunsForTool(deps, {
+        site: args.site,
+        flow: args.flow,
+        ...(args.version === undefined ? {} : { version: args.version }),
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
       }))
     },
   })

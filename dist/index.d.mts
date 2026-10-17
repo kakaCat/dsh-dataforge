@@ -331,6 +331,14 @@ interface Config {
   captureBodyLimitBytes: number;
   /** 采集：Chrome 通道（缺省 'chrome' = 本机系统 Chrome，免下载浏览器）。 */
   captureChromeChannel: string;
+  /** 执行开关：关闭后 dataforge_chain_run 直接 execution-disabled（不影响链读写与历史回看）。 */
+  chainRunEnabled: boolean;
+  /** 执行：单节点请求超时（秒）；节点 `timeoutSeconds` 优先。 */
+  chainNodeTimeoutSeconds: number;
+  /** 执行：默认并发（就绪节点同时发出的上限，硬上限 16）。 */
+  chainConcurrency: number;
+  /** 执行：单响应正文读取上限（字节），超过即截断并如实标注。 */
+  chainResponseLimitBytes: number;
 }
 declare const Config: Schema<Config>;
 /** 归一化（相对路径 → 绝对；~ 展开）。 */
@@ -403,6 +411,21 @@ interface BridgeEvent {
 type JsonLike = string | number | boolean | null | JsonLike[] | {
   [key: string]: JsonLike;
 };
+/**
+ * 链运行的身份与结果（IF-6）：只有 `kind: 'chain-run'` 的 run 才有，旧 run 缺席。
+ *
+ * `site/flow/version` 取自 `run.json` 的 `chain` 段（写入时的快照），所以链被改名或
+ * 删掉之后历史运行仍对得上「当时跑的哪一版」。
+ */
+type ChainRunSummary = {
+  site: string;
+  flow: string;
+  version: number;
+  /** 中止链的节点（只有失败的链运行才有）。 */
+  failedNode?: string;
+  /** 已成功完成的节点 ID（按计划序）。 */
+  completedNodes?: string[];
+};
 /** dataforge_status 的投影：把事件流折成一张运行摘要。type 别名 == 有隐式索引签名（工具 schema 推断要求 Record 兼容；interface 会断言失败，勿改回）。 */
 type RunSummary = {
   runId: string;
@@ -421,6 +444,8 @@ type RunSummary = {
   businessData?: Record<string, JsonLike>;
   /** 结束消息（terminal.message）。 */
   message?: string;
+  /** 链运行的身份与节点级结果（IF-6；旧流程运行没有这一段）。 */
+  chain?: ChainRunSummary;
 };
 //#endregion
 //#region src/flows/discover.d.ts

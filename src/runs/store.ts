@@ -8,7 +8,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { BridgeEvent, RunSummary, JsonLike } from '../shared/types.js'
+import type { BridgeEvent, ChainRunSummary, RunSummary, JsonLike } from '../shared/types.js'
 
 /** 落盘侧事件：桥事件 + 写入时刻（fold 的排序与时延都靠它）。 */
 interface StoredEvent extends BridgeEvent {
@@ -68,6 +68,24 @@ export function listRunIds(dataRoot: string, limit = 20): string[] {
 }
 
 /**
+ * 读 `run.json` 元数据；目录/文件不存在或 JSON 坏掉一律返回 undefined。
+ *
+ * 读侧对未知键完全容忍（链路运行多出的 `chain` 段、未来新增键都不影响旧读者）。
+ * 返回 undefined 的语义是「这条记录读不出来」，由调用方决定跳过还是计数。
+ */
+export function readRunRecord(dataRoot: string, runId: string): Record<string, unknown> | undefined {
+  const path = join(runsRoot(dataRoot), runId, 'run.json')
+  if (!existsSync(path)) return undefined
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    return parsed as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * 把事件流折叠成了 → 一张摘要（唯一投影规则）：
  * - meta 定 flow/steps/dryRun
  * - step.start 计入 lastStep；step.done 计入 stepsDone；step.error 计入 lastError
@@ -82,6 +100,7 @@ export function foldSummary(runId: string, events: BridgeEvent[], overrideStatus
   let lastError: string | undefined
   let terminalMessage: string | undefined
   let terminalSuccess: boolean | undefined
+  let terminalCancelled = false
   let result: BridgeEvent | undefined
   for (const e of events) {
     if (e.event === 'step') {
@@ -94,6 +113,9 @@ export function foldSummary(runId: string, events: BridgeEvent[], overrideStatus
     } else if (e.event === 'terminal') {
       terminalMessage = e.message
       terminalSuccess = e.success
+      // 取消是独立的终态：`cancelled: true` 时 success 一定是 false，
+      // 但「失败了」和「被取消了」对用户是两件事，不能都折成 failed。
+      terminalCancelled = e.cancelled === true
     } else if (e.event === 'result') {
       result = e
     }
@@ -102,6 +124,8 @@ export function foldSummary(runId: string, events: BridgeEvent[], overrideStatus
   const success = result?.success ?? terminalSuccess
   let status: RunSummary['status']
   if (overrideStatus !== undefined) status = overrideStatus
+  // 取消分支优先于 success 判断（IF-6）：历史事件没有这个键，行为不变。
+  else if (terminalCancelled) status = 'killed'
   else if (result === undefined && terminalMessage === undefined) status = 'running'
   else if (success === true) status = 'completed'
   else status = 'failed'
@@ -126,6 +150,35 @@ export function foldSummary(runId: string, events: BridgeEvent[], overrideStatus
     ...(success === undefined ? {} : { success }),
     ...(bizData === undefined ? {} : { businessData: bizData }),
     ...(terminalMessage === undefined ? {} : { message: terminalMessage }),
+    ...chainSummaryOf(meta, bizData),
+  }
+}
+
+/**
+ * 链运行的身份与节点级结果（IF-6）：`meta.chain` 是写入时的快照，
+ * `result.businessData` 里的 `failedNode` / `completed` 是终态补充。
+ *
+ * 没有 `meta.chain` 的旧流程运行返回空对象——只增可选字段，旧 run 不受影响。
+ */
+function chainSummaryOf(
+  meta: BridgeEvent | undefined,
+  bizData: Record<string, JsonLike> | undefined,
+): { chain?: ChainRunSummary } {
+  const chainMeta = plainRecord(meta?.chain)
+  if (chainMeta === undefined) return {}
+  const failedNode = typeof bizData?.['failedNode'] === 'string' ? (bizData['failedNode'] as string) : undefined
+  const completedRaw = bizData?.['completed']
+  const completedNodes = Array.isArray(completedRaw)
+    ? completedRaw.filter((item): item is string => typeof item === 'string')
+    : undefined
+  return {
+    chain: {
+      site: typeof chainMeta['site'] === 'string' ? chainMeta['site'] : '',
+      flow: typeof chainMeta['flow'] === 'string' ? chainMeta['flow'] : '',
+      version: numOrUndefined(chainMeta['version']) ?? 0,
+      ...(failedNode === undefined ? {} : { failedNode }),
+      ...(completedNodes === undefined ? {} : { completedNodes }),
+    },
   }
 }
 

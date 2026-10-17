@@ -190,7 +190,7 @@ missing(node) = card.inputs.filter(f =>
 
 | 编号 | 接口 | 输入 | 输出 | 失败与错误 | 兼容性 |
 |---|---|---|---|---|---|
-| IF-1 | `dataforge_chain_run`（agent 工具，唯一执行入口） | `site`、`flow`、`version?`（缺省最新）、`inputs?`（槽位值）、`baseUrl?`、`concurrency?`、`dry_run?`、`confirm?` | `accepted`、`kind`（background/foreground）、`jobId?`、`runId`、`runDir`、`plan`（拓扑序/缺参/写方法清单/目标 host） | `missing-params` / `chain-not-found` / `invalid-chain` / `not-executable` / `cycle` / `base-url-unresolved` / `inputs-invalid` / `confirm-required` / `execution-disabled` | 新增工具；入参只增不改，`apiVersion: dataforge/v1` |
+| IF-1 | `dataforge_chain_run`（agent 工具，唯一执行入口） | `site`、`flow`、`version?`（缺省最新）、`inputs?`（槽位值）、`baseUrl?`、`concurrency?`、`dry_run?`、`confirm?` | `accepted`、`kind`（background/foreground/dry-run）、`jobId?`、`runId`、`runDir`、`plan`（拓扑序/缺参/写方法清单/目标 host） | `missing-params` / `chain-not-found` / `invalid-chain` / `card-not-imported` / `not-executable` / `cycle` / `base-url-unresolved` / `inputs-invalid` / `confirm-required` / `execution-disabled` / `execution-unavailable` | 新增工具；入参只增不改，`apiVersion: dataforge/v1` |
 | IF-2 | `dataforge_chain_runs`（agent 工具，链维度运行列表） | `site`、`flow`、`version?`、`limit?`（默认 20） | `runs[]`：`runId`、`status`、`startedAt`、`updatedAt`、`dryRun`、`stepsDone`、`totalSteps`、`failedNode?`、`version` | 无留痕 → `ok: true` + `notice`（空态不是错误）；参数缺失由工具 schema 拒绝 | 新增工具；读取时忽略 `run.json` 未知键 |
 | IF-3 | `runChain()`（application 层编排函数，工具与 dry-run 共用） | `deps`、`exec`、已加载的 `ChainDoc`、`inputs`、`baseUrl`、`concurrency`、`signal` | `ChainRunResult`（`runId`、`runDir`、`summary`、`nodes[]`、`failedNode?`、`degraded`） | 预检码同 IF-1；运行期 `binding-path-not-found` / `binding-type-mismatch` / `binding-null` / `param-type-mismatch` / `node-timeout` / `node-network-error` / `node-http-error` / `node-auth-required` / `response-too-large` / `cancelled` | 内部函数，无对外版本承诺；单测直接打它，不经过工具壳 |
 | IF-4 | `httpRequest()`（HTTP 直调客户端契约） | `method`、`url`、`headers`、`body`、`timeoutMs`、`retry`、`signal` | `status`、`headers`、`bodyText`、`json?`、`bytes`、`truncated`、`attempts`、`elapsedMs`、`finalUrl` | `timeout` / `network-error` / `aborted`；正文超限不算错误，标 `truncated: true` | 仅 Node 22 内置 fetch；不新增依赖，未来换实现不改签名 |
@@ -215,6 +215,8 @@ missing(node) = card.inputs.filter(f =>
 - `not-executable` → `kind: page-chain`，回执提示「先编译成 interface-chain 草稿并落盘」；
 - `cycle` → 兜底；R-1 的 upsert 已拒，出现即说明文件被绕过工具手改，直接拒绝执行；
 - `base-url-unresolved` / `inputs-invalid`（未知槽位、槽位值类型不符）/ `execution-disabled`（开关关闭）→ 均不发请求；
+- `card-not-imported` → 链引用的卡不在项目接口库（`loadChain` 会先拦成 `invalid-chain`，本条是防御兜底）；
+- `execution-unavailable` → 运行时缺 `fetch` 或 `AbortSignal.timeout`（能力探测，只看能力不看 Node 版本号）；dry-run 不触发它；
 - `confirm-required` → 首次调用或写类链未确认；按回执计划卡向用户转述后带 `confirm: true` 重调。
 - 运行期失败不在本接口回执里「重试」：链已中止，错误进运行记录，修复后用新 run 重跑（不自动整链重放写请求）。
 
@@ -257,7 +259,8 @@ application 层的执行编排，工具壳只负责参数与回执渲染（沿�
 **错误码**
 
 - 预检：同 IF-1 的全部码，全部在第一个请求之前返回；
-- 运行期：`binding-path-not-found`（上游响应里没有该路径，回执给「断在第几段」）、`binding-type-mismatch`（目标声明类型与值形状不符）、`binding-null`（上游值为 `null`，按缺值处理而不是塞 `null`）、`param-type-mismatch`（常量字符串无法转成卡声明类型）、`node-timeout`、`node-network-error`、`node-http-error`（4xx/5xx，带状态码与响应摘要）、`node-auth-required`（401/403 且 `card.auth !== 'none'`，提示 R-4）、`response-too-large`（正文超上限无法解析，宁可失败也不截断后硬解析）、`cancelled`（用户/宿主取消）。
+- 运行期：`binding-path-not-found`（上游响应里没有该路径，回执给「断在第几段」）、`binding-type-mismatch`（目标声明类型与值形状不符）、`binding-null`（上游值为 `null`，按缺值处理而不是塞 `null`）、`empty-wildcard`（`[*]` 一个元素都没匹配到，与 IF-5 同名）、`param-missing`（防御：静态缺参已拦过，例如 URL 模板有 `{p2}` 但卡只声明 `path.p1`）、`param-type-mismatch`（常量字符串无法转成卡声明类型）、`bad-url-template`（拼出来的 URL 不合法或不是 http(s)）、`node-timeout`、`node-network-error`、`node-http-error`（4xx/5xx，带状态码与响应摘要）、`node-auth-required`（401/403 且 `card.auth !== 'none'`，提示 R-4）、`response-too-large`（正文超上限无法解析，宁可失败也不截断后硬解析）、`cancelled`（用户/宿主取消）。
+- HTTP 出口码到运行期码的映射固定在三处，不散落：`aborted` → `cancelled`；`timeout` → `node-timeout`；`bad-url` → `bad-url-template`；`redirect-limit` → `node-network-error`（附原始原因）。
 - 所有运行期错误都会：停止调度、等在飞节点落定、写 `terminal(success: false)` 与 `result`，回执里给 `failedNode` 与已完节点清单。
 
 **兼容性**
@@ -447,3 +450,4 @@ application 层的执行编排，工具壳只负责参数与回执渲染（沿�
 - **代码事实来源**：`src/chains/validate.ts`（`topoOrder` / `dependencyPairs` / `scanCredentialConstants` 的导出面）、`src/chains/schema.ts`（`fieldSegments` / `isInputSlotRef` / `splitBindingPath`）、`src/chains/store.ts`（`loadChain` / `defaultCardResolver`）、`src/runs/store.ts`（`startRunRecord` / `appendEvent` / `foldSummary`）、`src/application.ts`（`JobsLike` / `resolveJobs` 装配）、`src/library/import.ts`（卡的 `query./body./header./path.` 入参前缀与 `role` 投影）。
 - **评审记录**：未评审。
 - **变更历史**：2026-10-17 初稿。已冻结的三条设计事实：执行只认 `interface-chain`；拓扑直接复用 `topoOrder`/`dependencyPairs`；缺参判据不看卡 `required`。
+- 2026-10-17 实现回填：IF-1 的 `kind` 增加 `dry-run`（dry-run 不建 job，用单独的 kind 比谎报 foreground 诚实）；错误码**只增不改名**地补了 `card-not-imported` / `execution-unavailable`（预检）与 `empty-wildcard` / `param-missing` / `bad-url-template`（运行期）——前两条原就写在 IF-1 正文与架构节，后三条在失败模式表与 `request.ts`/`binding.ts` 里已经存在，这里只是让码表与实现对齐。

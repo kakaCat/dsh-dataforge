@@ -333,12 +333,12 @@ async function startRunJob(
   }
 }
 
-function ownerOf(exec: unknown): string | undefined {
+export function ownerOf(exec: unknown): string | undefined {
   const id = (exec as { agent?: { id?: unknown } } | undefined)?.agent?.id
   return typeof id === 'string' && id.length > 0 ? id : undefined
 }
 
-function extractJobId(started: unknown): string | undefined {
+export function extractJobId(started: unknown): string | undefined {
   const id = (started as { id?: unknown } | null)?.id
   return typeof id === 'string' ? id : undefined
 }
