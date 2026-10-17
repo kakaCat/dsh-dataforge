@@ -34,7 +34,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { appendEvent, foldSummary, loadRunEvents, runsRoot, startRunRecord } from '../runs/store.js'
 import type { BridgeEvent, RunSummary } from '../shared/types.js'
-import type { ChainDoc, ChainNode, InterfaceCardDoc } from '../chains/schema.js'
+import type { ChainDoc, ChainEdgeTransform, ChainNode, InterfaceCardDoc } from '../chains/schema.js'
 import { isInputSlotRef, splitBindingPath } from '../chains/schema.js'
 import { slugOf } from '../chains/store.js'
 import { dependencyPairs } from '../chains/validate.js'
@@ -90,6 +90,7 @@ export type ChainRunErrorCode =
   | 'param-missing'
   | 'param-type-mismatch'
   | 'bad-url-template'
+  | 'body-type-unsupported'
   | 'node-timeout'
   | 'node-network-error'
   | 'node-http-error'
@@ -120,6 +121,8 @@ export type ResponseDigest = {
 export type BindingRecord = {
   /** 绑定边原文 `from`（`上游节点.出参路径`，或 `$inputs.<name>` 已在别处处理）。 */
   from: string
+  /** 绑定值转换（缺省不写）。 */
+  transform?: ChainEdgeTransform
   /** 绑定边原文 `to`（`下游节点.入参路径`）。 */
   to: string
   /** 求值成功时的值预览（≤ 512 字符）。 */
@@ -568,15 +571,25 @@ export async function executeChainRun(
         return failPreRequest(bindings, 'binding-path-not-found', message)
       }
       // `edge.from` 带节点前缀（`node.body.x`），求值只认字段路径部分。
-      const bound = resolveBinding(root, from.fieldPath, edgeTargetType(card, to.fieldPath))
+      const bound = resolveBinding(
+        root,
+        from.fieldPath,
+        edge.transform === undefined ? edgeTargetType(card, to.fieldPath) : undefined,
+      )
       if (!bound.ok) {
         const code = bindingCodeOf(bound.code)
         const message = `绑定边 ${edge.from} → ${edge.to} 求值失败：${bound.message}`
         bindings.push({ from: edge.from, to: edge.to, code, error: bound.message })
         return failPreRequest(bindings, code, message)
       }
-      provided[normalizePath(to.fieldPath)] = bound.value
-      bindings.push({ from: edge.from, to: edge.to, valuePreview: previewValue(bound.value) })
+      const transformed = edge.transform === undefined ? bound.value : applyEdgeTransform(bound.value, edge.transform)
+      provided[normalizePath(to.fieldPath)] = transformed
+      bindings.push({
+        from: edge.from,
+        to: edge.to,
+        ...(edge.transform === undefined ? {} : { transform: edge.transform }),
+        valuePreview: previewValue(transformed),
+      })
     }
 
     // 2) 构造请求（纯函数）：缺参/类型/模板问题都在这里，且发生在任何网络动作之前。
@@ -1011,6 +1024,13 @@ function terminalMessage(
 
 /* ================================================================== 小工具 */
 
+/** 绑定值转换：显式声明才做，绝不隐式改变类型。 */
+function applyEdgeTransform(value: unknown, transform: ChainEdgeTransform): unknown {
+  if (transform === 'string') return typeof value === 'string' ? value : String(value)
+  if (transform === 'json') return JSON.stringify(value)
+  return JSON.stringify(Array.isArray(value) ? value : [value])
+}
+
 function bindingCodeOf(code: string): ChainRunErrorCode {
   if (code === 'type-mismatch') return 'binding-type-mismatch'
   if (code === 'null-value') return 'binding-null'
@@ -1041,9 +1061,11 @@ function collectEmitted(
     const bound = resolveBinding(
       root,
       from.fieldPath,
-      to === undefined || card === undefined ? undefined : edgeTargetType(card, to.fieldPath),
+      edge.transform !== undefined || to === undefined || card === undefined
+        ? undefined
+        : edgeTargetType(card, to.fieldPath),
     )
-    if (bound.ok) emitted[edge.from] = bound.value
+    if (bound.ok) emitted[edge.from] = edge.transform === undefined ? bound.value : applyEdgeTransform(bound.value, edge.transform)
   }
   return emitted
 }

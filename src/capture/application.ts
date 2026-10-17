@@ -24,6 +24,7 @@ import {
 import { openCapturingPage, responseToRawSample, type WireSample } from './browser.js'
 import type { CaptureStore } from './store.js'
 import type { Config } from '../config.js'
+import type { Cookie } from 'playwright-core'
 import type {
   CardRow, CaptureRunRow, CaptureTaskType, CredentialRow, PageRow, SampleRow, Template,
 } from '../shared/capture-types.js'
@@ -46,6 +47,10 @@ export type StartCaptureArgs = {
   confirm?: boolean
   maxDepth?: number
   maxPages?: number
+  /** action 型：false = 可见 Chrome，用户手动登录；缺省无头。 */
+  headless?: boolean
+  /** 从指定 captureId 的 credential_events 读回 cookie，注入新浏览器上下文（恢复登录态）。 */
+  reuseCookiesFrom?: string
 }
 
 export type CaptureToolValue = {
@@ -53,6 +58,8 @@ export type CaptureToolValue = {
   gate: CaptureGate
   captureId?: string
   sessionId?: string
+  /** action 型：从旧 captureId 注入的 cookie 数。 */
+  cookiesReused?: number
   /** jobs 不可用（缺席或被拒绝）时的降级说明：采集仍在前台进行，只是过程中无法进度查询。 */
   degradedNotice?: string
   card?: string
@@ -205,6 +212,42 @@ function errText(err: unknown): string {
   return (typeof message === 'string' && message.length > 0 ? message : String(err)).slice(0, 200)
 }
 
+/** 从采集库的 credential_events 读回 cookie，转成 Playwright addCookies 的形状。 */
+export function cookiesFromCapture(store: CaptureStore, captureId: string): Cookie[] {
+  const cookies: Cookie[] = []
+  const now = Date.now() / 1000
+  for (const row of store.listCredentials(captureId, 500)) {
+    if (row.kind !== 'cookie' || row.valueJson === undefined) continue
+    let raw: unknown
+    try {
+      raw = JSON.parse(row.valueJson)
+    } catch {
+      continue
+    }
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue
+    const record = raw as Record<string, unknown>
+    const name = typeof record['name'] === 'string' ? record['name'] : row.name
+    const value = typeof record['value'] === 'string' ? record['value'] : ''
+    const domain = typeof record['domain'] === 'string' && record['domain'] !== '' ? record['domain'] : row.url
+    if (name === '' || domain === '') continue
+    const expires = typeof record['expires'] === 'number' && Number.isFinite(record['expires']) ? record['expires'] : -1
+    if (expires > 0 && expires < now) continue
+    const sameSiteRaw = typeof record['sameSite'] === 'string' ? record['sameSite'] : 'Lax'
+    const sameSite = (sameSiteRaw === 'Strict' || sameSiteRaw === 'Lax' || sameSiteRaw === 'None' ? sameSiteRaw : 'Lax') as Cookie['sameSite']
+    cookies.push({
+      name,
+      value,
+      domain,
+      path: typeof record['path'] === 'string' && record['path'] !== '' ? record['path'] : '/',
+      expires,
+      httpOnly: record['httpOnly'] === true,
+      secure: record['secure'] === true,
+      sameSite,
+    })
+  }
+  return cookies
+}
+
 export async function startCapture(deps: CaptureDeps, args: StartCaptureArgs): Promise<CaptureToolValue> {
   const { taskType, entryUrl } = args
   let entry: URL
@@ -224,9 +267,15 @@ export async function startCapture(deps: CaptureDeps, args: StartCaptureArgs): P
       id: captureId, taskType, entryUrl, status: 'running', startedAt: Date.now(),
       stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
     })
-    const { sessionId } = await deps.registry.open({ entryUrl, captureId })
+    const cookies = args.reuseCookiesFrom === undefined ? [] : cookiesFromCapture(deps.store, args.reuseCookiesFrom)
+    const { sessionId } = await deps.registry.open({
+      entryUrl,
+      captureId,
+      ...(args.headless === undefined ? {} : { headless: args.headless }),
+      ...(cookies.length === 0 ? {} : { cookies }),
+    })
     deps.registry.bindSink(sessionId, wireToStore(deps, captureId, new Map()))
-    return { accepted: true, gate: 'started', captureId, sessionId }
+    return { accepted: true, gate: 'started', captureId, sessionId, ...(cookies.length === 0 ? {} : { cookiesReused: cookies.length }) }
   }
 
   deps.store.upsertRun({

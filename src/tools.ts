@@ -12,7 +12,7 @@ import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { DataforgeDeps, FlowsValue, RunToolValue, StatusValue } from './application.js'
 import { listFlows, runFlow, runStatus } from './application.js'
 import {
-  startCapture, captureStatus, captureResult, captureCancel,
+  startCapture, captureStatus, captureResult, captureCancel, cookiesFromCapture,
   type CaptureDeps, type CaptureToolValue, type StartCaptureArgs,
 } from './capture/application.js'
 import type { ActSpec } from './capture/session.js'
@@ -282,7 +282,8 @@ type CaptureCancelValue = { ok: boolean; status?: string; notice?: string }
 function renderCapture(value: CaptureToolValue): string {
   if (!value.accepted) return value.card ?? '❌ 采集请求未被接受（缺细节）'
   if (value.sessionId !== undefined) {
-    return `✅ 已开会话 ${value.sessionId}（captureId ${value.captureId ?? '?'}）：用 dataforge_browser_snapshot 看 UI、dataforge_browser_act 交互；结束后 dataforge_browser_close 收 cookie。`
+    const reused = value.cookiesReused === undefined ? '' : `，已复用 ${value.cookiesReused} 个 cookie`
+    return `✅ 已开会话 ${value.sessionId}（captureId ${value.captureId ?? '?'}${reused}）：用 dataforge_browser_snapshot 看 UI、dataforge_browser_act 交互；结束后 dataforge_browser_close 收 cookie。`
   }
   const degraded = value.degradedNotice === undefined ? '' : `\n⚠ ${value.degradedNotice}`
   return `🚀 采集已启动（captureId ${value.captureId ?? '?'}）：site_crawl 是后台任务，用 dataforge_capture_status 轮询，完成后 dataforge_capture_result(scope=cards) 取卡。${degraded}`
@@ -362,6 +363,8 @@ export function defineCaptureTool(deps: CaptureDeps) {
       confirm: { type: 'boolean', description: '仅 action 需要：用户确认真实 UI 写操作后为 true' },
       max_depth: { type: 'number', description: 'site_crawl BFS 深度上限（缺省用配置）' },
       max_pages: { type: 'number', description: 'site_crawl BFS 页数上限（缺省用配置）' },
+      headless: { type: 'boolean', description: 'action 型：false = 可见 Chrome，供用户手动登录；缺省无头' },
+      reuse_cookies_from: { type: 'string', description: '从指定 captureId 的本地 cookie 恢复登录态，再注入新浏览器上下文' },
     },
     output: {
       schema: {
@@ -372,6 +375,7 @@ export function defineCaptureTool(deps: CaptureDeps) {
           gate: { type: 'string', description: 'started / bad-url / bad-task / action-confirm-required' },
           captureId: { type: 'string' },
           sessionId: { type: 'string', description: 'action 型：会话原语 id' },
+          cookiesReused: { type: 'number', description: 'action 型：从旧 captureId 注入的 cookie 数' },
           degradedNotice: { type: 'string', description: 'jobs 服务缺席时前台降级执行的说明' },
           card: { type: 'string' },
         },
@@ -389,6 +393,8 @@ export function defineCaptureTool(deps: CaptureDeps) {
         ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
         ...(args.max_depth === undefined ? {} : { maxDepth: args.max_depth }),
         ...(args.max_pages === undefined ? {} : { maxPages: args.max_pages }),
+        ...(args.headless === undefined ? {} : { headless: args.headless }),
+        ...(args.reuse_cookies_from === undefined ? {} : { reuseCookiesFrom: args.reuse_cookies_from }),
       } satisfies StartCaptureArgs))
     },
   })
@@ -506,6 +512,12 @@ function toActSpec(raw: unknown): ActSpec | undefined {
       return selector === undefined ? undefined : { kind: 'submit', selector }
     case 'fill':
       return selector === undefined || typeof r['value'] !== 'string' ? undefined : { kind: 'fill', selector, value: r['value'] }
+    case 'upload': {
+      const files = Array.isArray(r['files']) && r['files'].every((file) => typeof file === 'string') ? (r['files'] as string[]) : undefined
+      return selector === undefined || files === undefined || files.length === 0 ? undefined : { kind: 'upload', selector, files }
+    }
+    case 'eval':
+      return typeof r['script'] !== 'string' || r['script'].trim() === '' ? undefined : { kind: 'eval', script: r['script'] }
     case 'press':
       return typeof r['key'] !== 'string' ? undefined : { kind: 'press', key: r['key'] }
     case 'wait':
@@ -520,9 +532,11 @@ function toActSpec(raw: unknown): ActSpec | undefined {
 export function defineBrowserOpenTool(deps: CaptureDeps) {
   return defineTool({
     name: 'dataforge_browser_open',
-    description: `开一个无头 Chrome 采集会话（系统 Chrome，流经隐私侧通道）。entry_url 给出时直接导航过去。与 dataforge_capture(task_type=action) 配合使用：action 会话可自动开。`,
+    description: `开一个 Chrome 采集会话（系统 Chrome，流经隐私侧通道）。entry_url 给出时直接导航过去。headless=false 会打开可见窗口，供用户手动登录；与 dataforge_capture(task_type=action) 配合使用。`,
     parameters: {
       entry_url: { type: 'string', description: '打开后立刻导航的 URL' },
+      headless: { type: 'boolean', description: 'false = 可见 Chrome（用户手动登录）；缺省无头' },
+      reuse_cookies_from: { type: 'string', description: '从指定 captureId 的本地 cookie 恢复登录态' },
     },
     output: {
       schema: {
@@ -531,15 +545,23 @@ export function defineBrowserOpenTool(deps: CaptureDeps) {
         properties: {
           sessionId: { type: 'string' },
           pageUrl: { type: 'string' },
+          cookiesReused: { type: 'number' },
         },
       },
       render: (_args, value) => {
-        const v = tighten<{ sessionId: string; pageUrl: string }>(value)
-        return [{ type: 'text', text: `🖥 会话 ${v.sessionId} 已开（${v.pageUrl}）。下一步用 dataforge_browser_snapshot 看页面。` }]
+        const v = tighten<{ sessionId: string; pageUrl: string; cookiesReused?: number }>(value)
+        const reused = v.cookiesReused === undefined ? '' : `（复用 ${v.cookiesReused} 个 cookie）`
+        return [{ type: 'text', text: `🖥 会话 ${v.sessionId} 已开（${v.pageUrl}）${reused}。下一步用 dataforge_browser_snapshot 看页面。` }]
       },
     },
     async execute(args) {
-      return lossless(deps.registry.open(args.entry_url === undefined ? {} : { entryUrl: args.entry_url }))
+      const cookies = args.reuse_cookies_from === undefined ? [] : cookiesFromCapture(deps.store, args.reuse_cookies_from)
+      const opened = await deps.registry.open({
+        ...(args.entry_url === undefined ? {} : { entryUrl: args.entry_url }),
+        ...(args.headless === undefined ? {} : { headless: args.headless }),
+        ...(cookies.length === 0 ? {} : { cookies }),
+      })
+      return lossless({ ...opened, ...(cookies.length === 0 ? {} : { cookiesReused: cookies.length }) })
     },
   })
 }
@@ -547,7 +569,7 @@ export function defineBrowserOpenTool(deps: CaptureDeps) {
 export function defineBrowserActTool(deps: CaptureDeps) {
   return defineTool({
     name: 'dataforge_browser_act',
-    description: `对采集会话执行一次页面动作：click/fill/press/submit/wait/goto。⚠️ 此工具生成真实用户操作（含写）：生产站点填表/点击前先转述给用户确认；提交类只应出现在 dataforge_capture(task_type=action) 且用户 confirm 之后。`,
+    description: `对采集会话执行一次页面动作：click/fill/press/submit/wait/goto/upload/eval。⚠️ 此工具生成真实用户操作（含写/上传）：生产站点填表、上传、提交前先向用户确认；提交/上传类只应出现在 dataforge_capture(task_type=action) 且用户 confirm 之后。eval 只用于读 DOM/辅助定位，不执行外部脚本。`,
     parameters: {
       session_id: { type: 'string', required: true },
       act: {
@@ -566,8 +588,9 @@ export function defineBrowserActTool(deps: CaptureDeps) {
         },
       },
       render: (_args, value) => {
-        const v = tighten<BrowserActValue>(value)
-        return [{ type: 'text', text: v.ok ? `✅ 动作完成（当前页 ${v.pageUrl ?? '?'}）` : `❌ 动作失败：${v.error ?? '未知'}` }]
+        const v = tighten<BrowserActValue & { value?: unknown }>(value)
+        const extra = v.value === undefined ? '' : `\n${JSON.stringify(v.value).slice(0, 4000)}`
+        return [{ type: 'text', text: (v.ok ? `✅ 动作完成（当前页 ${v.pageUrl ?? '?'}）` : `❌ 动作失败：${v.error ?? '未知'}`) + extra }]
       },
     },
     async execute(args) {

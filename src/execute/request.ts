@@ -25,7 +25,7 @@ import { normalizePath } from './coverage.js'
 import type { PlanNode } from './plan.js'
 
 /** 构造失败的分类（都可指到具体字段路径）。 */
-export type RequestFailureCode = 'param-missing' | 'param-type-mismatch' | 'bad-url-template'
+export type RequestFailureCode = 'param-missing' | 'param-type-mismatch' | 'bad-url-template' | 'body-type-unsupported'
 
 export type BuiltRequest = {
   method: string
@@ -183,6 +183,18 @@ function serializeQuery(pairs: Array<[string, string]>): string {
   return pairs.map(([name, value]) => (value === '' ? name : `${name}=${encodeURIComponent(value)}`)).join('&')
 }
 
+/** 扁平 body → application/x-www-form-urlencoded；数组/对象按 JSON 字面量落值。 */
+function formBodyOf(body: Record<string, unknown>): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined) continue
+    if (typeof value === 'string') params.append(key, value)
+    else if (typeof value === 'object' && value !== null) params.append(key, JSON.stringify(value))
+    else params.append(key, String(value))
+  }
+  return params.toString()
+}
+
 /**
  * 构造一条请求。
  *
@@ -307,9 +319,24 @@ export function buildRequest(input: BuildRequestInput): RequestBuildResult {
 
   const method = input.node.method.toUpperCase()
   const sendsBody = method !== 'GET' && method !== 'HEAD' && hasBodyField
+  let bodyText: string | undefined
   if (sendsBody) {
-    const hasContentType = Object.keys(headers).some((name) => name.toLowerCase() === 'content-type')
-    if (!hasContentType) headers['content-type'] = JSON_CONTENT_TYPE
+    const contentTypeKey = Object.keys(headers).find((name) => name.toLowerCase() === 'content-type')
+    const contentType = contentTypeKey === undefined ? '' : headers[contentTypeKey].toLowerCase()
+    if (contentType === '') {
+      headers['content-type'] = JSON_CONTENT_TYPE
+      bodyText = JSON.stringify(body)
+    } else if (contentType.includes('application/x-www-form-urlencoded')) {
+      bodyText = formBodyOf(body)
+    } else if (contentType.includes('multipart/form-data')) {
+      return {
+        ok: false,
+        code: 'body-type-unsupported',
+        message: 'multipart/form-data 请求体暂不支持：需要文件分片/边界，当前执行引擎只支持 JSON 与 urlencoded（R-5 真实站点上传待补）',
+      }
+    } else {
+      bodyText = JSON.stringify(body)
+    }
   }
 
   return {
@@ -318,7 +345,7 @@ export function buildRequest(input: BuildRequestInput): RequestBuildResult {
       method,
       url,
       headers,
-      ...(sendsBody ? { body: JSON.stringify(body) } : {}),
+      ...(bodyText === undefined ? {} : { body: bodyText }),
     },
     notices,
   }

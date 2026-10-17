@@ -6,18 +6,21 @@
  *
  * @module dsh-dataforge/capture/session
  */
-import type { Browser, BrowserContext, Page } from 'playwright-core'
+import type { Browser, BrowserContext, Cookie, Page } from 'playwright-core'
+import type { JsonLike } from '../shared/types.js'
 import { openCapturingPage, type WireSample } from './browser.js'
 
 /** 得到一个会话的静默事件侧；页面采集样本经 sink 输出（调用方消费）。 */
 export type Sink = { onSample: (w: WireSample) => void }
 
-type OpenOptions = { entryUrl?: string; captureId?: string }
+type OpenOptions = { entryUrl?: string; captureId?: string; headless?: boolean; cookies?: Cookie[] }
 
 /** 会话原语点击/填单派发表——worker 不含智能，只服从 agent 指示。 */
 export type ActSpec =
   | { kind: 'click'; selector: string }
   | { kind: 'fill'; selector: string; value: string }
+  | { kind: 'upload'; selector: string; files: string[] }
+  | { kind: 'eval'; script: string }
   | { kind: 'press'; key: string }
   | { kind: 'submit'; selector: string }
   | { kind: 'wait'; ms: number }
@@ -39,6 +42,9 @@ export class SessionRegistry {
     const sessionId = `bs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
     const { browser, context, page } = await this.io.openCapturingPage('chrome', (w) => {
       this.sessions.get(sessionId)?.sink?.(w)
+    }, {
+      ...(o.headless === undefined ? {} : { headless: o.headless }),
+      ...(o.cookies === undefined ? {} : { cookies: o.cookies }),
     })
     this.sessions.set(sessionId, o.captureId === undefined ? { page, browser, context } : { page, browser, context, captureId: o.captureId })
     if (o.entryUrl !== undefined) await page.goto(o.entryUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => undefined)
@@ -50,12 +56,17 @@ export class SessionRegistry {
     if (s !== undefined) s.sink = sink
   }
 
-  async act(sessionId: string, spec: ActSpec): Promise<{ ok: boolean; pageUrl?: string; error?: string }> {
+  async act(sessionId: string, spec: ActSpec): Promise<{ ok: boolean; pageUrl?: string; error?: string; value?: JsonLike }> {
     const s = this.sessions.get(sessionId)
     if (s === undefined) return { ok: false, error: `session ${sessionId} 不存在` }
     try {
       if (spec.kind === 'click') await s.page.click(spec.selector, { timeout: 10_000 })
       else if (spec.kind === 'fill') await s.page.fill(spec.selector, spec.value, { timeout: 10_000 })
+      else if (spec.kind === 'upload') await s.page.setInputFiles(spec.selector, spec.files, { timeout: 20_000 })
+      else if (spec.kind === 'eval') {
+        const value = await s.page.evaluate(spec.script)
+        return { ok: true, pageUrl: s.page.url(), value: value as JsonLike }
+      }
       else if (spec.kind === 'press') await s.page.keyboard.press(spec.key)
       else if (spec.kind === 'submit') await s.page.click(spec.selector, { timeout: 10_000 })
       else if (spec.kind === 'wait') await s.page.waitForTimeout(Math.min(spec.ms, 10_000))

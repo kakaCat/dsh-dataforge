@@ -47,6 +47,16 @@ beforeAll(async () => {
         body: Buffer.concat(chunks).toString('utf8'),
         headers: req.headers,
       })
+      if (url.startsWith('/api/number')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{"id":42}')
+        return
+      }
+      if (url.startsWith('/api/transform')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ body: Buffer.concat(chunks).toString('utf8') }))
+        return
+      }
       if (url.startsWith('/api/cookie')) {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ cookie: req.headers.cookie ?? '' }))
@@ -162,6 +172,8 @@ const bigCard = cardOf('card_big', 'GET', '/api/big', [], [{ path: 'body.items[*
 const cookieCard: InterfaceCardDoc = { ...cardOf('card_cookie', 'GET', '/api/cookie', []), auth: 'cookie-session' }
 const authOnlyCard: InterfaceCardDoc = { ...cardOf('card_auth_only', 'GET', '/api/auth-only', []), auth: 'cookie-session' }
 const protectedCard: InterfaceCardDoc = { ...cardOf('card_protected', 'GET', '/api/protected', []), auth: 'cookie-session' }
+const numberCard = cardOf('card_number', 'GET', '/api/number', [], [{ path: 'body.id', type: 'number' }])
+const transformCard = cardOf('card_transform', 'POST', '/api/transform', [{ path: 'body.id', type: 'string' }])
 
 /** 测试用 provider：只回一份固定 cookie，摘要里不含值。 */
 function providerOf(cookie: string): CredentialProvider {
@@ -385,6 +397,33 @@ describe('主路径：拓扑执行 + 绑定传值', () => {
     await runChain(deps, { doc, cards, plan, baseUrl: base, concurrency: 1 })
 
     expect(seen.map((entry) => entry.url)).toEqual(['/api/slow-a', '/api/slow-b'])
+  })
+})
+
+describe('绑定值转换（R-5 真实站点适配）', () => {
+  it('array-json：上游数字 id → 下游字符串 "[42]"', async () => {
+    seen = []
+    const deps = depsOf()
+    const cards = cardsOf(numberCard, transformCard)
+    const doc = chainOf(
+      [
+        { id: 'number-node', card: 'card_number', constants: {} },
+        { id: 'transform-node', card: 'card_transform', constants: {} },
+      ],
+      [{ from: 'number-node.body.id', to: 'transform-node.body.id', transform: 'array-json' }],
+    )
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, { doc, cards, plan, baseUrl: base })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('completed')
+    const hit = seen.find((entry) => entry.url.startsWith('/api/transform'))
+    expect(JSON.parse(hit?.body ?? '{}')).toEqual({ id: '[42]' })
+    const binding = result.nodes.find((node) => node.nodeId === 'transform-node')?.bindings?.[0]
+    expect(binding?.transform).toBe('array-json')
+    expect(binding?.valuePreview).toBe('[42]')
   })
 })
 

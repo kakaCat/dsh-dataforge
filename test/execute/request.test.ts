@@ -237,6 +237,48 @@ describe('body 构造', () => {
     expect(result.request.headers['content-type']).toBeUndefined()
   })
 
+  it('content-type=application/x-www-form-urlencoded → 表单正文，而不是 JSON', () => {
+    const result = buildRequest({
+      node: node({ method: 'POST' }),
+      card: card({
+        urlTemplate: '/share/pset',
+        inputs: [
+          { path: 'header.content-type', type: 'string' },
+          { path: 'body.fid_list', type: 'string' },
+          { path: 'body.pwd', type: 'string' },
+        ],
+      }),
+      baseUrl: BASE,
+      provided: {
+        'header.content-type': 'application/x-www-form-urlencoded',
+        'body.fid_list': '[123]',
+        'body.pwd': 'feav',
+      },
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.request.headers['content-type']).toBe('application/x-www-form-urlencoded')
+    expect(result.request.body).toBe('fid_list=%5B123%5D&pwd=feav')
+  })
+
+  it('multipart/form-data → body-type-unsupported（真实上传待补）', () => {
+    const result = buildRequest({
+      node: node({ method: 'POST' }),
+      card: card({
+        urlTemplate: '/rest/2.0/pcs/superfile2',
+        inputs: [
+          { path: 'header.content-type', type: 'string' },
+          { path: 'body.file', type: 'string' },
+        ],
+      }),
+      baseUrl: BASE,
+      provided: { 'header.content-type': 'multipart/form-data; boundary=x', 'body.file': 'x' },
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('body-type-unsupported')
+  })
+
   it('卡上显式给了 content-type 就用它，不被覆盖', () => {
     const result = buildRequest({
       node: node({ method: 'POST' }),

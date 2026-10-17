@@ -60,6 +60,7 @@ export type ProbeErrorCode =
   | 'param-missing'
   | 'param-type-mismatch'
   | 'bad-url-template'
+  | 'body-type-unsupported'
   | 'node-timeout'
   | 'node-network-error'
   | 'node-http-error'

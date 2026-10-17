@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CaptureStore } from '../../src/capture/store.js'
-import { startCapture, captureStatus, captureResult, captureCancel } from '../../src/capture/application.js'
+import { startCapture, captureStatus, captureResult, captureCancel, cookiesFromCapture } from '../../src/capture/application.js'
 import type { CaptureDeps } from '../../src/capture/application.js'
 import type { WireSample } from '../../src/capture/browser.js'
 import type { Config } from '../../src/config.js'
@@ -108,6 +108,37 @@ it('action：未 confirm → gate=action-confirm-required 不启动；confirm=tr
   const c = await startCapture(f.deps, { taskType: 'action', entryUrl: 'https://x.test/', confirm: true })
   expect(c.accepted).toBe(true)
   expect(c.sessionId).toBe('bs_x')
+})
+
+it('action：reuseCookiesFrom 把旧 capture 的 cookie 注入新会话', async () => {
+  const f = fixture()
+  f.deps.store.upsertRun({
+    id: 'cap_old', taskType: 'action', entryUrl: 'https://x.test/', status: 'done', startedAt: 1,
+    stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  f.deps.store.upsertCredential('cap_old', 'cookie', '.x.test', 'BDUSS', 1, {
+    name: 'BDUSS', value: 'v', domain: '.x.test', path: '/',
+    expires: Math.floor(Date.now() / 1000) + 3600, httpOnly: true, secure: true, sameSite: 'Lax',
+  })
+  expect(cookiesFromCapture(f.deps.store, 'cap_old')).toEqual([
+    expect.objectContaining({ name: 'BDUSS', value: 'v', domain: '.x.test', path: '/', httpOnly: true, secure: true }),
+  ])
+
+  const c = await startCapture(f.deps, {
+    taskType: 'action', entryUrl: 'https://x.test/', confirm: true, reuseCookiesFrom: 'cap_old',
+  })
+  expect(c.cookiesReused).toBe(1)
+  const open = (f.deps.registry as unknown as { open: ReturnType<typeof vi.fn> }).open
+  expect(open).toHaveBeenCalledWith(expect.objectContaining({
+    cookies: expect.arrayContaining([expect.objectContaining({ name: 'BDUSS', value: 'v' })]),
+  }))
+})
+
+it('action：headless=false 透传到 registry.open（可见 Chrome，用户手动登录）', async () => {
+  const f = fixture()
+  await startCapture(f.deps, { taskType: 'action', entryUrl: 'https://x.test/', confirm: true, headless: false })
+  const open = (f.deps.registry as unknown as { open: ReturnType<typeof vi.fn> }).open
+  expect(open).toHaveBeenCalledWith(expect.objectContaining({ headless: false }))
 })
 
 it('action：open 后绑 sink，wire 样本经桥落库成卡（回归：会话样本曾静默丢弃）', async () => {

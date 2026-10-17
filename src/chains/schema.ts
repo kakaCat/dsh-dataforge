@@ -79,10 +79,20 @@ export type ChainNode = {
 }
 
 /** 边 = 绑定声明（FR-1.3）；`suggested: true` 只出现在编译草稿里。 */
+export type ChainEdgeTransform = 'string' | 'json' | 'array-json'
+
 export type ChainEdge = {
   from: string
   to: string
   suggested?: boolean
+  /**
+   * 绑定值在写入下游之前的转换：
+   * - string：String(value)；
+   * - json：JSON.stringify(value)；
+   * - array-json：JSON.stringify(Array.isArray(value) ? value : [value])（如 fs_id → "[123]"）。
+   * 缺省 = 原值（不做隐式转换）。
+   */
+  transform?: ChainEdgeTransform
 }
 
 export type ChainMeta = {
@@ -251,6 +261,11 @@ const EdgeSchema = Schema.object({
   from: Schema.string().required(),
   to: Schema.string().required(),
   suggested: Schema.boolean(),
+  transform: Schema.union([
+    Schema.const('string' as const),
+    Schema.const('json' as const),
+    Schema.const('array-json' as const),
+  ]),
 })
 
 const InputSchema = Schema.object({
@@ -464,6 +479,7 @@ function normalizeDoc(raw: unknown): ChainDoc {
       from: edge.from,
       to: edge.to,
       ...(edge.suggested === true ? { suggested: true } : {}),
+      ...(edge.transform === undefined ? {} : { transform: edge.transform }),
     })),
   }
 }

@@ -8,7 +8,7 @@
  *
  * @module dsh-dataforge/capture/browser
  */
-import type { Browser, BrowserContext, Page } from 'playwright-core'
+import type { Browser, BrowserContext, Cookie, Page } from 'playwright-core'
 
 /** browser 层 wire 类型（playwright 投影，归一化前的原始形状）。 */
 export type WireSample = {
@@ -56,6 +56,13 @@ export function responseToRawSample(wire: WireSample, bodyLimit: number): RawSam
   }
 }
 
+export type CapturingPageOptions = {
+  /** false = 可见 Chrome（用户手动登录）；缺省 true = 无头采集。 */
+  headless?: boolean
+  /** 开上下文后立刻注入的 cookie（从本地 credential_events 恢复登录态）。 */
+  cookies?: Cookie[]
+}
+
 export interface CapturingPage {
   browser: Browser
   context: BrowserContext
@@ -70,14 +77,18 @@ export interface CapturingPage {
 export async function openCapturingPage(
   channel: string,
   onWireSample: (wire: WireSample) => void,
+  options: CapturingPageOptions = {},
 ): Promise<CapturingPage> {
   const { chromium } = await import('playwright-core')
   const browser = await chromium.launch({
     channel,
-    headless: true,
+    headless: options.headless ?? true,
     args: ['--disable-blink-features=AutomationControlled'],
   })
   const context = await browser.newContext()
+  if (options.cookies !== undefined && options.cookies.length > 0) {
+    await context.addCookies(options.cookies).catch(() => undefined)
+  }
   const page = await context.newPage()
   page.on('response', (response) => {
     void (async () => {
