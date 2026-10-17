@@ -4496,6 +4496,197 @@ function safeDirs(dir) {
 		return [];
 	}
 }
+/** 读一个版本并生成改写后的文本；坏文件返回可读错误（整次改名拒绝）。 */
+function prepareVersionText(workspaceRoot, site, flow, version, patch) {
+	let parsed;
+	try {
+		parsed = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, version), "utf8"));
+	} catch (error) {
+		return {
+			ok: false,
+			message: `v${version} 读取失败：${error instanceof Error ? error.message : String(error)}`,
+			issues: []
+		};
+	}
+	if (!parsed.ok) return {
+		ok: false,
+		message: `v${version} 校验不过，先修好再改名`,
+		issues: parsed.issues
+	};
+	return {
+		ok: true,
+		text: chainToYaml(patch(parsed.doc))
+	};
+}
+/** 先写临时文件、再逐个 rename 覆盖：尽量把「写到一半」的窗口压到最小。 */
+function writePreparedVersions(dir, versions) {
+	const pending = [];
+	try {
+		for (const version of versions) {
+			const final = join(dir, `v${version.version}.yaml`);
+			const tmp = `${final}.tmp-${process.pid}-${Date.now()}`;
+			writeFileSync(tmp, version.text, "utf8");
+			pending.push({
+				tmp,
+				final
+			});
+		}
+		for (const file of pending) renameSync(file.tmp, file.final);
+	} catch (error) {
+		for (const file of pending) try {
+			unlinkSync(file.tmp);
+		} catch {}
+		throw error;
+	}
+}
+/** 流程改名：目录 + 每个版本的 meta.flow；同名（slug 相同）时只改展示名。 */
+function renameChainFlow(workspaceRoot, site, flow, newFlow) {
+	const trimmed = String(newFlow ?? "").trim();
+	if (trimmed === "" || slugOf(trimmed) === "") return {
+		ok: false,
+		code: "rename-invalid",
+		message: "流程名称不能为空（或只含路径分隔符）"
+	};
+	const oldDir = chainDir(workspaceRoot, site, flow);
+	if (!existsSync(oldDir)) return {
+		ok: false,
+		code: "rename-not-found",
+		message: `流程「${flow}」不存在`
+	};
+	const versions = listChainVersions(workspaceRoot, site, flow);
+	if (versions.length === 0) return {
+		ok: false,
+		code: "rename-not-found",
+		message: `流程「${flow}」没有可改名的版本`
+	};
+	const prepared = [];
+	for (const version of versions) {
+		const text = prepareVersionText(workspaceRoot, site, flow, version, (doc) => ({
+			...doc,
+			meta: {
+				...doc.meta,
+				flow: trimmed
+			}
+		}));
+		if (!text.ok) return {
+			ok: false,
+			code: "invalid-chain",
+			message: text.message,
+			issues: text.issues
+		};
+		prepared.push({
+			version,
+			text: text.text
+		});
+	}
+	slugOf(flow);
+	const newSlug = slugOf(trimmed);
+	const newDir = join(chainsRoot(workspaceRoot), slugOf(site), newSlug);
+	if (newDir !== oldDir && existsSync(newDir)) return {
+		ok: false,
+		code: "rename-conflict",
+		message: `目标流程目录已存在：${newSlug}`
+	};
+	let moved = false;
+	try {
+		if (newDir !== oldDir) {
+			renameSync(oldDir, newDir);
+			moved = true;
+		}
+		writePreparedVersions(newDir, prepared);
+	} catch (error) {
+		if (moved) try {
+			renameSync(newDir, oldDir);
+		} catch {}
+		throw error;
+	}
+	return {
+		ok: true,
+		site,
+		flow: trimmed,
+		updatedVersions: prepared.length
+	};
+}
+/**
+* 业务域改名：把该网站下「最新版 domain = old」的所有流程的所有版本里
+* `meta.domain === old` 的版本改写为新名字。
+*/
+function renameChainDomain(workspaceRoot, site, domain, newDomain) {
+	const oldName = String(domain ?? "").trim();
+	const trimmed = String(newDomain ?? "").trim();
+	if (oldName === "") return {
+		ok: false,
+		code: "rename-invalid",
+		message: "原业务域名称不能为空"
+	};
+	if (trimmed === "") return {
+		ok: false,
+		code: "rename-invalid",
+		message: "业务域名称不能为空"
+	};
+	if (trimmed === oldName) return {
+		ok: true,
+		site,
+		updatedFlows: 0,
+		updatedVersions: 0
+	};
+	const siteDir = join(chainsRoot(workspaceRoot), slugOf(site));
+	if (!existsSync(siteDir)) return {
+		ok: false,
+		code: "rename-not-found",
+		message: `网站「${site}」不存在`
+	};
+	let updatedFlows = 0;
+	let updatedVersions = 0;
+	for (const flow of safeDirs(siteDir)) {
+		const versions = listChainVersions(workspaceRoot, site, flow);
+		if (versions.length === 0) continue;
+		const latestVersion = versions[versions.length - 1];
+		let latestDoc;
+		try {
+			latestDoc = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, latestVersion), "utf8"));
+		} catch {
+			continue;
+		}
+		if (!latestDoc.ok || latestDoc.doc.meta.domain !== oldName) continue;
+		const prepared = [];
+		for (const version of versions) {
+			const candidate = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, version), "utf8"));
+			if (!candidate.ok) return {
+				ok: false,
+				code: "invalid-chain",
+				message: `流程「${flow}」的 v${version} 校验不过，先修好再改名`,
+				issues: candidate.issues
+			};
+			if (candidate.doc.meta.domain !== oldName) continue;
+			prepared.push({
+				version,
+				text: chainToYaml({
+					...candidate.doc,
+					meta: {
+						...candidate.doc.meta,
+						domain: trimmed
+					}
+				})
+			});
+		}
+		if (prepared.length === 0) continue;
+		writePreparedVersions(chainDir(workspaceRoot, site, flow), prepared);
+		updatedFlows += 1;
+		updatedVersions += prepared.length;
+	}
+	if (updatedFlows === 0) return {
+		ok: false,
+		code: "rename-not-found",
+		message: `没有业务域「${oldName}」可改名`
+	};
+	return {
+		ok: true,
+		site,
+		updatedFlows,
+		updatedVersions
+	};
+}
 /** 读某个版本（缺省最新）；文件被手改坏也如实报 invalid-chain。 */
 function loadChain(workspaceRoot, site, flow, options = {}) {
 	const availableVersions = listChainVersions(workspaceRoot, site, flow);
@@ -13468,7 +13659,11 @@ async function handle(deps, req, res) {
 				await handleSave(deps, req, res, url);
 				return;
 			}
-			fail(res, 405, `编排路由不支持 POST ${suffix}（写入口仅 POST /orchestration/graph）`, "method-not-allowed");
+			if (suffix === "/rename") {
+				await handleRename(deps, req, res, url);
+				return;
+			}
+			fail(res, 405, `编排路由不支持 POST ${suffix}（写入口仅 /graph 与 /rename）`, "method-not-allowed");
 			return;
 		}
 		if (method !== "GET") {
@@ -13709,6 +13904,73 @@ async function handleSave(deps, req, res, url) {
 		path: saved.path,
 		warnings: toIssues(saved.warnings)
 	});
+}
+/**
+* POST /orchestration/rename
+*
+* body：{ kind: 'flow'|'domain', site, flow?, domain?, newName }
+* 改名语义与「不改内容、不改版本号」的边界见 `chains/store.ts` 的 renameChainFlow / renameChainDomain。
+*/
+async function handleRename(deps, req, res, url) {
+	const body = await readBody(req);
+	if (body === void 0) {
+		fail(res, 413, `请求体超过 ${MAX_SAVE_BODY_BYTES} 字节`, "too-large");
+		return;
+	}
+	let parsed;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		fail(res, 400, "请求体不是合法 JSON", "bad-json");
+		return;
+	}
+	const site = typeof parsed.site === "string" ? parsed.site.trim() : "";
+	const newName = typeof parsed.newName === "string" ? parsed.newName.trim() : "";
+	if (site === "" || newName === "") {
+		fail(res, 400, "site 与 newName 必须是非空字符串", "bad-param");
+		return;
+	}
+	const workspaceRoot = await resolveRoot(deps, url);
+	if (parsed.kind === "flow") {
+		const flow = typeof parsed.flow === "string" ? parsed.flow.trim() : "";
+		if (flow === "") {
+			fail(res, 400, "kind=flow 时必须给 flow", "bad-param");
+			return;
+		}
+		const result = renameChainFlow(workspaceRoot, site, flow, newName);
+		if (!result.ok) {
+			failRename(res, result);
+			return;
+		}
+		ok(res, result);
+		return;
+	}
+	if (parsed.kind === "domain") {
+		const domain = typeof parsed.domain === "string" ? parsed.domain.trim() : "";
+		if (domain === "") {
+			fail(res, 400, "kind=domain 时必须给 domain", "bad-param");
+			return;
+		}
+		const result = renameChainDomain(workspaceRoot, site, domain, newName);
+		if (!result.ok) {
+			failRename(res, result);
+			return;
+		}
+		ok(res, result);
+		return;
+	}
+	fail(res, 400, `kind 只接受 flow / domain，收到 ${String(parsed.kind)}`, "bad-param");
+}
+/** 改名失败码 → HTTP 状态（错误的可读消息原样透出给面板）。 */
+function failRename(res, result) {
+	const status = result.code === "rename-not-found" ? 404 : result.code === "rename-conflict" ? 409 : 400;
+	res.writeHead(status);
+	res.end(JSON.stringify({
+		success: false,
+		error: result.message,
+		code: result.code,
+		...result.issues === void 0 ? {} : { issues: toIssues(result.issues) }
+	}));
 }
 function toIssues(issues) {
 	return issues.map((issue) => ({
