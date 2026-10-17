@@ -12,9 +12,7 @@ export const PANEL_ID = 'dataforge'
 export const PANEL_LABEL = '数据采集'
 export const PANEL_ORDER = 120
 
-/** 面板内标签页身份（tab key / aria 用，不进 DSH 侧栏）。 */
-export const RUNS_TAB_ID = 'dataforge-capture'
-export const RUNS_TAB_LABEL = '采集运行'
+/** 面板内标签页身份（tab key / aria 用，不进 DSH 侧栏）。页签集合与原型一致（4 个）。 */
 export const CAPTURE_TAB_ID = 'dataforge-new-capture'
 export const CAPTURE_TAB_LABEL = '快速采集'
 export const CARDS_TAB_ID = 'dataforge-interfaces'

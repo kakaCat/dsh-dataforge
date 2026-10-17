@@ -1,5 +1,5 @@
 /**
- * dsh-dataforge client half —— DSH 侧栏单入口页（顶级标签页：采集运行 / 快速采集 / 接口库 / 采集网站）。
+ * dsh-dataforge client half —— DSH 侧栏单入口页（顶级标签页：快速采集 / 接口库 / 采集网站 / 编排）。
  *
  * DSH dual-half contract：package.json 声明 dsh.client + exports["./client"]；
  * shell 在 /plugins/??dsh-dataforge/client.js 提供本模块（wrap-client 产物）。

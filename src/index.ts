@@ -122,6 +122,27 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
     jobsService = svc['jobs']
   })
 
+  /**
+   * 面板工作区的服务端兜底（R-2 编排页「白板」修复）。
+   *
+   * 面板请求没有 session 上下文；客户端会尽量带 `?workspace=`，但工作区快照到达前
+   * （或宿主未注入 useWorkspaces 时）会缺参。此时不能回落到 DSH 进程 cwd（那是
+   * profile 目录，永远没有链），而是取工作区注册表里最近更新的那个。
+   */
+  let workspaceRegistryService: { list?: () => Array<{ path?: unknown; updatedAt?: unknown }> } | undefined
+  anyCtx.inject?.(['workspaceRegistry'], (svc) => {
+    workspaceRegistryService = svc['workspaceRegistry'] as typeof workspaceRegistryService
+  })
+  const latestWorkspacePath = (): string | undefined => {
+    const rows = workspaceRegistryService?.list?.()
+    if (!Array.isArray(rows) || rows.length === 0) return undefined
+    const valid = rows.filter((row) => typeof row?.path === 'string' && row.path !== '')
+    if (valid.length === 0) return undefined
+    // 最近更新的排前面：用户刚用过的那个通常就是当前工作区。
+    valid.sort((left, right) => String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')))
+    return typeof valid[0]?.path === 'string' ? valid[0].path : undefined
+  }
+
   const dataforgeDeps: DataforgeDeps = buildDataforgeDeps({
     config,
     resolveJobs: () => jobsService,
@@ -189,8 +210,9 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       startCapture: (args) => startCapture(captureDeps, args),
       // 编排子路由：同一前缀下由采集 handler 分派（见 CapturePanelDeps.orchestration 的说明）。
       orchestration: createOrchestrationPanelHandler({
-        // 面板请求没有 exec 上下文：以注册时的工作区为准（面板本就属于当前工作区）。
-        resolveWorkspaceRoot: async () => (await resolveWorkspaceRoot(undefined)) ?? process.cwd(),
+        // 面板请求没有 exec 上下文：优先用工作区注册表里最近的活跃工作区；
+        // 注册表缺席才回落到宿主 cwd（诚实但可能是 profile 目录）。
+        resolveWorkspaceRoot: async () => latestWorkspacePath() ?? (await resolveWorkspaceRoot(undefined)) ?? process.cwd(),
       }),
     })
     if (typeof effect === 'function') {

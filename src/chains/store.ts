@@ -146,6 +146,11 @@ export type ChainRef = {
   updatedAt?: string
   nodeCount?: number
   edgeCount?: number
+  /**
+   * 最新版本里节点引用的卡/页面所属 host（去重、保序）。
+   * 只给面板「网站卡」展示用：host 属于卡/页面的采集来源，不是链的语义字段。
+   */
+  hosts?: string[]
   /** 最新版本文件读不出来时的中文原因（列表照常展示，不因一份坏文件整页空白）。 */
   unreadable?: string
 }
@@ -182,13 +187,14 @@ function summarize(
   site: string,
   flow: string,
   version: number,
-): Pick<ChainRef, 'kind' | 'domain' | 'note' | 'updatedAt' | 'nodeCount' | 'edgeCount' | 'unreadable'> {
+): Pick<ChainRef, 'kind' | 'domain' | 'note' | 'updatedAt' | 'nodeCount' | 'edgeCount' | 'hosts' | 'unreadable'> {
   try {
     const doc = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, version), 'utf8'))
     if (!doc.ok) {
       return { unreadable: doc.issues.map((issue) => `${issue.target}：${issue.reason}`).join('；') }
     }
     const { meta, nodes, edges } = doc.doc
+    const hosts = hostsOfDoc(workspaceRoot, doc.doc)
     return {
       kind: doc.doc.kind,
       ...(meta.domain === undefined ? {} : { domain: meta.domain }),
@@ -196,10 +202,40 @@ function summarize(
       ...(meta.created === undefined ? {} : { updatedAt: meta.created }),
       nodeCount: nodes.length,
       edgeCount: edges.length,
+      ...(hosts.length === 0 ? {} : { hosts }),
     }
   } catch (error) {
     return { unreadable: `读取失败：${error instanceof Error ? error.message : String(error)}` }
   }
+}
+
+/**
+ * 链节点引用的卡/页面的 host（去重、保序）。
+ *
+ * 用途只限面板「网站卡」展示（原型的新增字段）：host 不在链 schema 里，
+ * 它是卡的采集来源；卡/页面缺失时静默跳过，不因展示信息失败影响列表。
+ */
+function hostsOfDoc(workspaceRoot: string, doc: ChainDoc): string[] {
+  const hosts = new Set<string>()
+  const addUrl = (url: unknown): void => {
+    if (typeof url !== 'string' || url === '') return
+    try {
+      const parsed = new URL(url, 'http://placeholder.invalid')
+      if (parsed.host !== '' && parsed.host !== 'placeholder.invalid') hosts.add(parsed.host)
+    } catch {
+      // 不是 URL 就跳过：展示信息不值得为坏数据报错。
+    }
+  }
+  for (const node of doc.nodes ?? []) {
+    if (typeof node.card === 'string' && node.card !== '') {
+      const card = readCard(workspaceRoot, node.card)
+      for (const source of card?.sources ?? []) {
+        for (const page of source.pages ?? []) addUrl(page)
+      }
+    }
+    addUrl(node.page)
+  }
+  return [...hosts]
 }
 
 function safeDirs(dir: string): string[] {

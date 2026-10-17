@@ -155,6 +155,16 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
       .filter(([, list]) => list.length > 0)
   }, [domains, pagedFlows])
 
+  /** 每个业务域的**全量**流程数（分页后域头仍显示域内总数，原型语义）。 */
+  const domainTotals = useMemo(() => {
+    const totals = new Map<string, number>()
+    for (const item of filteredFlows) {
+      const domain = item.domain ?? '未分组'
+      totals.set(domain, (totals.get(domain) ?? 0) + 1)
+    }
+    return totals
+  }, [filteredFlows])
+
   const siteRows = overview?.sites ?? []
   const pagedSites = useMemo(() => {
     const start = (sitesPage - 1) * sitesPageSize
@@ -217,6 +227,16 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
     }
     return result
   }, [reload])
+
+  /** 导出某个版本的链 YAML（列表行直接导出，不必先开画布）。 */
+  const exportVersion = async (target: OrchestrationFlow, version: number): Promise<void> => {
+    try {
+      const loaded = await fetchChainGraph(target.site, target.flow, version)
+      downloadText(`${target.flow}-v${version}.yaml`, loaded.chainYaml)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
 
   /** 新建流程：内存草稿 + 直接进画布（不落盘空白链）。 */
   const createDraft = (draft: { flow: string; kind: KindTab; domain: string; note: string }): void => {
@@ -301,6 +321,7 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
           kind={kind}
           search={search}
           domains={pagedDomains}
+          domainTotals={domainTotals}
           total={filteredFlows.length}
           page={flowsPage}
           pageSize={flowsPageSize}
@@ -352,6 +373,7 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
           onPage={setGraphsPage}
           onBack={() => { setView('flows') }}
           onOpenCanvas={(version) => { void openCanvas(flow, version) }}
+          onExportVersion={(version) => { void exportVersion(flow, version) }}
         />
       )}
 
@@ -378,7 +400,7 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
 
 function SitesView(props: {
   loading: boolean
-  sites: Array<{ site: string; pageFlows: number; apiFlows: number; flows: number; updatedAt?: string; domains: string[] }>
+  sites: Array<{ site: string; pageFlows: number; apiFlows: number; flows: number; updatedAt?: string; domains: string[]; hosts: string[] }>
   total: number
   totalFlows: number
   page: number
@@ -411,12 +433,12 @@ function SitesView(props: {
               <span className="dsh-df-lv dsh-df-lv-1">网站</span>
               <b>{row.site}</b>
             </div>
-            <div className="dsh-df-host">
-              {row.domains.length === 0 ? '业务域：未分组' : `业务域：${row.domains.join(' / ')}`}
-            </div>
+            {/* 原型 .host 行：展示链引用的卡/页面域名；没有页面来源时如实标「未关联页面」。 */}
+            <div className="dsh-df-host">{row.hosts.length === 0 ? '未关联页面' : row.hosts.join(' · ')}</div>
             <div className="dsh-df-stats">
               <span>页面编排 <b>{row.pageFlows}</b></span>
               <span>接口编排 <b>{row.apiFlows}</b></span>
+              <span>业务域 <b>{row.domains.length}</b></span>
             </div>
             <div className="dsh-df-foot">
               <span>最近更新 {formatTime(row.updatedAt)}</span>
@@ -447,6 +469,8 @@ function FlowsView(props: {
   kind: KindTab
   search: string
   domains: ReadonlyArray<readonly [string, OrchestrationFlow[]]>
+  /** 每个业务域的流程总数（分页时域头仍给域内总数）。 */
+  domainTotals: ReadonlyMap<string, number>
   total: number
   page: number
   pageSize: number
@@ -468,7 +492,7 @@ function FlowsView(props: {
   onImported: (notice: string) => void
 }): ReactNode {
   const {
-    siteName, kind, search, domains, total, page, pageSize, sizeOptions, collapsedDomains, collapsedFlows, otherKindCount,
+    siteName, kind, search, domains, domainTotals, total, page, pageSize, sizeOptions, collapsedDomains, collapsedFlows, otherKindCount,
     onKind, onSearch, onToggleDomain, onToggleFlow, onPage, onPageSize, onBack, onOpenGraphs, onOpenCanvas,
     onCreated, onImported,
   } = props
@@ -569,7 +593,7 @@ function FlowsView(props: {
             <button type="button" className="dsh-df-domain-head" onClick={() => { onToggleDomain(domain) }}>
               <span className="dsh-df-lv dsh-df-lv-1">业务域</span>
               <span className="dsh-df-dname">{domain}</span>
-              <span className="dsh-df-meta">{list.length} 条流程</span>
+              <span className="dsh-df-meta">{domainTotals.get(domain) ?? list.length} 条流程</span>
               <span className="dsh-df-caret">▼</span>
             </button>
             <div className="dsh-df-domain-body">
@@ -601,7 +625,10 @@ function FlowsView(props: {
                               v{version.version}{current ? ' · 当前' : ''}
                             </span>
                             <span className="dsh-df-vmeta">
-                              {formatTime(version.created)} · 由 {sourceLabel(version.source)} · {version.nodeCount ?? 0} 节点
+                              {formatTime(version.created)} · 由 {sourceLabel(version.source)}
+                              {version.note === undefined || version.note === ''
+                                ? ` · ${version.nodeCount ?? 0} 节点`
+                                : ` · ${version.note}`}
                               {version.unreadable === undefined ? '' : ` · 读不出来：${version.unreadable}`}
                             </span>
                             <button
@@ -705,6 +732,32 @@ function NewFlowModal(props: {
 
 /* ───────────────────────── ③ 编排图列表 ───────────────────────── */
 
+/** 行首缩略图：按节点/边数量画两种构图（原型每行一张小图，不是固定图）。 */
+function GraphThumb({ nodeCount, edgeCount }: { nodeCount: number; edgeCount: number }): ReactNode {
+  const fanout = edgeCount >= 3
+  return (
+    <svg className="dsh-df-thumb" viewBox="0 0 132 64" aria-hidden="true">
+      {fanout ? (
+        <>
+          <rect x="6" y="24" width="22" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
+          <rect x="46" y="10" width="26" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
+          <rect x="46" y="40" width="26" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
+          <rect x="92" y="24" width="28" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
+          <path d="M28 31 L46 17 M28 31 L46 47 M72 17 L92 29 M72 47 L92 33" stroke="#86909c" fill="none" />
+        </>
+      ) : (
+        <>
+          <rect x="6" y="24" width="22" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
+          <rect x="52" y="24" width="26" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
+          <rect x="98" y="24" width="26" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
+          <path d="M28 31 L52 31 M78 31 L98 31" stroke="#86909c" fill="none" />
+        </>
+      )}
+      {nodeCount === 0 ? <text x="66" y="12" textAnchor="middle" fontSize="8" fill="#86909c">空链</text> : null}
+    </svg>
+  )
+}
+
 function GraphsView(props: {
   flow: OrchestrationFlow
   versions: OrchestrationVersion[]
@@ -717,8 +770,10 @@ function GraphsView(props: {
   onPageSize: (size: number) => void
   onBack: () => void
   onOpenCanvas: (version: number) => void
+  /** 导出某个版本的链 YAML（列表行直接导出，不必先开画布）。 */
+  onExportVersion: (version: number) => void
 }): ReactNode {
-  const { flow, versions, total, page, pageSize, sizeOptions, busy, onPage, onPageSize, onBack, onOpenCanvas } = props
+  const { flow, versions, total, page, pageSize, sizeOptions, busy, onPage, onPageSize, onBack, onOpenCanvas, onExportVersion } = props
   const pages = Math.max(1, Math.ceil(total / pageSize))
   return (
     <>
@@ -734,22 +789,16 @@ function GraphsView(props: {
       <div className="dsh-df-view-head">
         <h1>
           编排图
-          <span className="dsh-df-lv dsh-df-lv-2">{KIND_LABELS[flow.kind ?? ''] ?? '未标注类型'}</span>
+          <span className="dsh-df-lv dsh-df-lv-accent">{KIND_LABELS[flow.kind ?? ''] ?? '未标注类型'}</span>
         </h1>
-        <span className="dsh-df-sub">该流程各版本的编排图 · 点「打开画布」进入编辑</span>
+        <span className="dsh-df-sub">该流程版本下的编排图 · 分页列表 · 点「打开画布」进入编辑</span>
       </div>
 
       {versions.map((version) => {
         const current = version.version === flow.latest
         return (
           <div key={version.version} className="dsh-df-graph">
-            <svg className="dsh-df-thumb" viewBox="0 0 132 64" aria-hidden="true">
-              <rect x="6" y="24" width="22" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
-              <rect x="46" y="10" width="26" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
-              <rect x="46" y="40" width="26" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
-              <rect x="92" y="24" width="28" height="14" rx="4" fill="#fff" stroke="#3b6ef0" />
-              <path d="M28 31 L46 17 M28 31 L46 47 M72 17 L92 29 M72 47 L92 33" stroke="#86909c" fill="none" />
-            </svg>
+            <GraphThumb nodeCount={version.nodeCount ?? 0} edgeCount={version.edgeCount ?? 0} />
             <div className="dsh-df-info">
               <div className="dsh-df-gname">
                 {flow.flow}
@@ -762,12 +811,21 @@ function GraphsView(props: {
                 <span>边 <b>{version.edgeCount ?? 0}</b></span>
                 <span>更新于 <b>{formatTime(version.created)}</b></span>
                 <span>来源 <b>{sourceLabel(version.source)}</b></span>
+                {version.note === undefined || version.note === '' ? null : <span>{version.note}</span>}
                 {current ? null : <span>已被 v{flow.latest} 取代</span>}
                 {version.unreadable === undefined ? null : <span>读不出来：{version.unreadable}</span>}
               </div>
             </div>
             <div className="dsh-df-gops">
-              <button type="button" className="dsh-df-btn" disabled={busy} onClick={() => { onOpenCanvas(version.version) }}>
+              <button type="button" className="dsh-df-btn" disabled={busy} onClick={() => { onExportVersion(version.version) }}>
+                导出 YAML
+              </button>
+              <button
+                type="button"
+                className={current ? 'dsh-df-btn-primary' : 'dsh-df-btn'}
+                disabled={busy}
+                onClick={() => { onOpenCanvas(version.version) }}
+              >
                 打开画布
               </button>
             </div>
@@ -867,4 +925,15 @@ export function pageNumbers(page: number, pages: number): number[] {
   if (pages <= 7) return Array.from({ length: pages }, (_, index) => index + 1)
   const set = new Set<number>([1, pages, page, page - 1, page + 1])
   return [...set].filter((value) => value >= 1 && value <= pages).sort((left, right) => left - right)
+}
+
+/** 下载文本文件（导出版本 YAML 用）。只在点击回调里碰 DOM，SSR 安全。 */
+function downloadText(filename: string, text: string): void {
+  const blob = new Blob([text], { type: 'text/yaml;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  setTimeout(() => { URL.revokeObjectURL(url) }, 0)
 }

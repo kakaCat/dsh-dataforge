@@ -112,7 +112,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 |---|---|---|
 | `dataforge_capture(task_type=action)` + `dataforge_browser_*` | agent 驱动真实交互（搜索/翻页/提交） | 写操作先经用户确认；会话期间遇到的 XHR 全部成卡；`headless:false` 可开可见 Chrome 供用户手动登录 |
 | `dataforge_capture(task_type=single_page)` | 单页静止期采集 | 走后台 job；jobs 不可用时**前台降级**执行（回执带 `degradedNotice`） |
-| 侧栏「数据采集」面板 | 单入口三标签：采集运行 / 快速采集 / 接口库 | 快速采集只发起 single_page（FR-7.6），2 秒轮询进度，收口后按「页面 → 接口 → 形态」出文档 |
+| 侧栏「数据采集」面板 | 单入口四标签：快速采集 / 接口库 / 采集网站 / 编排（与原型页一致；原「采集运行」页已移除，运行进度在快速采集页内联展示、历史在采集网站页聚合） | 快速采集只发起 single_page（FR-7.6），2 秒轮询进度，收口后按「页面 → 接口 → 形态」出文档 |
 
 **手动登录（可见 Chrome）**：需要用户亲自登录（验证码/扫码/双因素）时，用可见模式开会话：
 
@@ -360,7 +360,7 @@ dataforge_chain_compare(run_ids: [首跑 runId, 复跑 runId])
 
 ### 编排页签（面板内可视化编辑）
 
-面板第 5 个页签「编排」是链文件的图形前端（原型 `docs/prototypes/orchestration.html`）：
+面板第 4 个页签「编排」是链文件的图形前端（原型 `docs/prototypes/orchestration.html`）：
 
 ```text
 网站选择 → 流程列表（页面编排 / 接口编排 × 业务域 → 流程 → 版本，带检索与分页）

@@ -39,7 +39,7 @@ const CSS = `
 
 /* ── 顶栏（brand + tabs，原型 .topbar） ── */
 .dsh-df-topbar { background: var(--dsh-df-card); border-bottom: 1px solid var(--dsh-df-line);
-  padding: 0 24px; display: flex; align-items: center; gap: 24px; height: 52px;
+  padding: 0 28px; display: flex; align-items: center; gap: 28px; height: 52px;
   position: sticky; top: 0; z-index: 10; }
 .dsh-df-brand { font-weight: 700; font-size: 14px; white-space: nowrap; }
 .dsh-df-brand em { font-style: normal; color: var(--dsh-df-accent); }
@@ -54,7 +54,7 @@ const CSS = `
 .dsh-df-tabpane[hidden] { display: none; }
 
 /* ── 页面容器（原型 .page） ── */
-.dsh-df-page { max-width: 1080px; margin: 0 auto; padding: 22px 24px 56px; }
+.dsh-df-page { max-width: 1180px; margin: 0 auto; padding: 24px 28px 64px; }
 .dsh-df-page-spl { max-width: 1280px; margin: 0 auto; padding: 22px 24px 56px;
   display: grid; grid-template-columns: 360px 1fr; gap: 20px; align-items: start; }
 @media (max-width: 980px) { .dsh-df-page-spl { grid-template-columns: 1fr; } }
@@ -88,9 +88,10 @@ const CSS = `
 .dsh-df-method.dsh-df-method-other { background: #f1f2f4; color: var(--dsh-df-ink-3); }
 .dsh-df-lv { font-size: 10px; font-weight: 700; letter-spacing: .05em; border-radius: 4px;
   padding: 1px 6px; white-space: nowrap; }
-.dsh-df-lv1 { background: #eef2ff; color: #4f46e5; }
-.dsh-df-lv2 { background: #ecfdf5; color: #059669; }
-.dsh-df-lv3 { background: #fff7ed; color: #ea580c; }
+.dsh-df-lv1, .dsh-df-lv-1 { background: #eef2ff; color: #4f46e5; }
+.dsh-df-lv2, .dsh-df-lv-2 { background: #ecfdf5; color: #059669; }
+.dsh-df-lv3, .dsh-df-lv-3 { background: #fff7ed; color: #ea580c; }
+.dsh-df-lv-accent { background: var(--dsh-df-accent-soft); color: var(--dsh-df-accent); }
 .dsh-df-auto-tag { font-size: 10px; color: var(--dsh-df-warn); background: var(--dsh-df-warn-soft);
   border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
 .dsh-df-mono { font-family: var(--dsh-df-mono); font-size: 11.5px; word-break: break-all; }
@@ -309,27 +310,10 @@ const CSS = `
 .dsh-df-state { text-align: center; padding: 20px 0; color: var(--dsh-df-ink-3); font-size: 12px; }
 .dsh-df-state.err { color: var(--dsh-df-err); }
 
-/* ── 采集运行页（命令式 board-runs）沿用类：只换皮不改 DOM ── */
-.dsh-df-runs { padding: 22px 24px 56px; max-width: 1080px; margin: 0 auto; }
-.dsh-df-item { background: var(--dsh-df-card); border: 1px dashed var(--dsh-df-line);
-  border-radius: 10px; padding: 10px 14px; margin-bottom: 10px; cursor: pointer; }
-.dsh-df-item:hover { border-color: #b8c3d9; }
-.dsh-df-item.open { border: 1px dashed var(--dsh-df-accent); }
-.dsh-df-row { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+/* ── 跨页共用小件（采集页/接口库/网站页） ── */
 .dsh-df-grow { flex: 1; min-width: 0; }
 .dsh-df-cap { color: var(--dsh-df-ink-3); font-size: 11px; }
-.dsh-df-chips { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--dsh-df-ink-3); }
-.dsh-df-detail { display: none; margin-top: 10px; border-left: 2px solid var(--dsh-df-accent);
-  background: #fdfdff; border-radius: 0 8px 8px 0; padding: 2px 0 2px 14px; }
-.dsh-df-item.open > .dsh-df-detail { display: block; }
-.dsh-df-block { margin: 10px 0; }
-.dsh-df-block h3 { font-size: 12px; font-weight: 600; margin: 0 0 6px; color: var(--dsh-df-ink-2); }
 .dsh-df-list { display: flex; flex-direction: column; gap: 2px; }
-.dsh-df-line { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; min-width: 0; }
-.dsh-df-sample { cursor: pointer; }
-.dsh-df-pre { font: 11px var(--dsh-df-mono); background: #f7f8fa; border: 1px solid var(--dsh-df-line);
-  border-radius: 8px; padding: 8px 10px; margin: 4px 0 10px; white-space: pre-wrap;
-  word-break: break-all; max-height: 220px; overflow: auto; }
 
 /* ── 编排：视图头 / 面包屑 / 工具条（原型 .view-head .crumb .ob-toolbar） ── */
 .dsh-df-view-head { display: flex; align-items: baseline; justify-content: space-between;
@@ -340,6 +324,7 @@ const CSS = `
   font-size: 12.5px; color: var(--dsh-df-ink-3); flex-wrap: wrap; }
 .dsh-df-crumb button { border: none; background: none; padding: 0; cursor: pointer;
   color: var(--dsh-df-accent); font-weight: 600; font-size: 12.5px; }
+.dsh-df-crumb b { color: var(--dsh-df-ink); font-weight: 600; }
 .dsh-df-ob-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .dsh-df-ob-toolbar .dsh-df-search { flex: 1; min-width: 220px; max-width: 380px;
   border: 1px solid #d4d8df; border-radius: 8px; padding: 7px 12px; font-size: 13px;
@@ -399,9 +384,10 @@ const CSS = `
 .dsh-df-flow-body { padding: 8px 0 2px; }
 .dsh-df-ver { margin-left: 26px; padding: 7px 0 7px 16px; border-left: 2px dashed #ead9c2;
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.dsh-df-ver .dsh-df-vtag { font: 700 11px var(--dsh-df-mono); background: #f2f4f7;
+/* vtag 是通用版本 chip：版本行与编排图列表行共用（原型 .vtag）。 */
+.dsh-df-vtag { font: 700 11px var(--dsh-df-mono); background: #f2f4f7;
   border-radius: 5px; padding: 1px 8px; }
-.dsh-df-ver .dsh-df-vtag.dsh-df-cur { background: var(--dsh-df-ok-soft); color: var(--dsh-df-ok); }
+.dsh-df-vtag.dsh-df-cur { background: var(--dsh-df-ok-soft); color: var(--dsh-df-ok); }
 .dsh-df-ver .dsh-df-vmeta { font-size: 11px; color: var(--dsh-df-ink-3); flex: 1; min-width: 160px; }
 
 /* ── 编排：编排图行（原型 .graph） ── */
@@ -409,7 +395,8 @@ const CSS = `
   border-radius: var(--dsh-df-radius); margin-bottom: 10px; display: flex; align-items: center;
   gap: 16px; padding: 12px 16px; transition: border-color .15s; }
 .dsh-df-graph:hover { border-color: #b8c3d9; }
-.dsh-df-graph .dsh-df-thumb { width: 132px; height: 64px; flex-shrink: 0; }
+.dsh-df-graph .dsh-df-thumb { width: 132px; height: 64px; flex-shrink: 0;
+  border: 1px solid var(--dsh-df-line); border-radius: 8px; background: #fafbfd; }
 .dsh-df-graph .dsh-df-info { flex: 1; min-width: 0; }
 .dsh-df-graph .dsh-df-gname { font-weight: 700; font-size: 13.5px; display: flex;
   align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -468,13 +455,17 @@ const CSS = `
 .dsh-df-rf-close { border: none; background: none; cursor: pointer; color: var(--dsh-df-ink-3);
   font-size: 13px; padding: 0; }
 .dsh-df-rf-panel label { display: block; font-size: 11px; color: var(--dsh-df-ink-3); margin: 8px 0 3px; }
-.dsh-df-rf-panel input, .dsh-df-rf-panel textarea { width: 100%; border: 1px solid #d4d8df;
-  border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; box-sizing: border-box; }
-.dsh-df-rf-panel input:focus, .dsh-df-rf-panel textarea:focus { outline: none;
-  border-color: var(--dsh-df-accent); }
+.dsh-df-rf-panel input, .dsh-df-rf-panel textarea, .dsh-df-rf-panel select { width: 100%;
+  border: 1px solid #d4d8df; border-radius: 6px; padding: 5px 8px; font-size: 12px;
+  font-family: inherit; box-sizing: border-box; background: #fff; color: var(--dsh-df-ink); }
+.dsh-df-rf-panel input:focus, .dsh-df-rf-panel textarea:focus, .dsh-df-rf-panel select:focus {
+  outline: none; border-color: var(--dsh-df-accent); }
 .dsh-df-rf-panel input[readonly] { background: #f7f8fa; color: var(--dsh-df-ink-3); }
-.dsh-df-rf-row { display: flex; gap: 8px; }
+.dsh-df-rf-row { display: flex; gap: 8px; margin-top: 12px; }
 .dsh-df-rf-row > div { flex: 1; min-width: 0; }
+.dsh-df-btn-danger { border: 1px solid #f3c2c2; background: #fff; color: #dc2626; border-radius: 6px;
+  padding: 3px 10px; font-size: 12px; cursor: pointer; font-family: inherit; }
+.dsh-df-btn-danger:hover { background: #fdecec; }
 
 /* ── 编排：新建流程弹窗（原型 .modal） ── */
 .dsh-df-modal-mask { position: fixed; inset: 0; background: rgba(20,28,45,.38);

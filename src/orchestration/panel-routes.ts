@@ -62,6 +62,8 @@ export type SiteRow = {
   /** 该网站下最新的更新时间（ISO）。 */
   updatedAt?: string
   domains: string[]
+  /** 该网站下链引用的卡/页面 host（去重保序；原型网站卡的 host 行）。 */
+  hosts: string[]
 }
 
 /** 版本行：编排页三级列表。 */
@@ -69,6 +71,8 @@ export type VersionRow = {
   version: number
   created?: string
   source?: ChainSource
+  /** 该版本的 meta.note（版本说明）。 */
+  note?: string
   nodeCount?: number
   edgeCount?: number
   /** 是否被更新的版本取代（非最新版）。 */
@@ -87,6 +91,8 @@ export type FlowRow = {
   updatedAt?: string
   nodeCount?: number
   edgeCount?: number
+  /** 该流程最新版本引用到的 host（去重保序）。 */
+  hosts?: string[]
   versions: VersionRow[]
   unreadable?: string
 }
@@ -223,11 +229,13 @@ async function buildOverview(deps: OrchestrationPanelDeps, url: URL): Promise<Ov
       ...(chain.updatedAt === undefined ? {} : { updatedAt: chain.updatedAt }),
       ...(chain.nodeCount === undefined ? {} : { nodeCount: chain.nodeCount }),
       ...(chain.edgeCount === undefined ? {} : { edgeCount: chain.edgeCount }),
+      ...(chain.hosts === undefined ? {} : { hosts: chain.hosts }),
       ...(chain.unreadable === undefined ? {} : { unreadable: chain.unreadable }),
       versions: infos.map((info) => ({
         version: info.version,
         ...(info.created === undefined ? {} : { created: info.created }),
         ...(info.source === undefined ? {} : { source: info.source }),
+        ...(info.note === undefined ? {} : { note: info.note }),
         ...(info.nodeCount === undefined ? {} : { nodeCount: info.nodeCount }),
         ...(info.edgeCount === undefined ? {} : { edgeCount: info.edgeCount }),
         superseded: latest !== undefined && info.version < latest,
@@ -248,11 +256,14 @@ async function buildOverview(deps: OrchestrationPanelDeps, url: URL): Promise<Ov
 function foldSites(flows: FlowRow[]): SiteRow[] {
   const bySite = new Map<string, SiteRow>()
   for (const flow of flows) {
-    const row = bySite.get(flow.site) ?? { site: flow.site, pageFlows: 0, apiFlows: 0, flows: 0, domains: [] }
+    const row = bySite.get(flow.site) ?? { site: flow.site, pageFlows: 0, apiFlows: 0, flows: 0, domains: [], hosts: [] }
     row.flows += 1
     if (flow.kind === 'page-chain') row.pageFlows += 1
     if (flow.kind === 'interface-chain') row.apiFlows += 1
     if (flow.domain !== undefined && !row.domains.includes(flow.domain)) row.domains.push(flow.domain)
+    for (const host of flow.hosts ?? []) {
+      if (!row.hosts.includes(host)) row.hosts.push(host)
+    }
     if (flow.updatedAt !== undefined && (row.updatedAt === undefined || flow.updatedAt > row.updatedAt)) {
       row.updatedAt = flow.updatedAt
     }

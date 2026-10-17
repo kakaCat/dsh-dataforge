@@ -187,8 +187,13 @@ export function projectEdges(doc: ChainDocLike): FlowEdge[] {
     label: edgeLabelOf(edge.from),
     sourceHandle: null,
     targetHandle: null,
-    animated: true,
-    markerEnd: { type: MarkerType.ArrowClosed },
+    // 原型是安静的直线框图：默认不动画；只有用户正在看的那条边靠选中高亮区分。
+    animated: false,
+    type: 'smoothstep',
+    markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: '#86909c' },
+    style: { stroke: '#86909c', strokeWidth: 1.5 },
+    labelStyle: { fontSize: 11, fill: '#4e5969' },
+    labelBgStyle: { fill: '#fff', fillOpacity: 0.9 },
     // 绑定路径原样存在 data 上：画布只改节点的源/靶，保存时仍写回完整路径。
     data: { from: edge.from, to: edge.to },
   }))
@@ -281,7 +286,16 @@ function CanvasInner({ graph, onSave }: OrchestrationCanvasProps): ReactNode {
     setEdges((current) => applyEdgeChanges(changes, current))
   }, [])
   const onConnect = useCallback((connection: Connection) => {
-    setEdges((current) => addEdge({ ...connection, id: `e-new-${Date.now()}`, animated: true, markerEnd: { type: MarkerType.ArrowClosed } }, current))
+    setEdges((current) => addEdge({
+      ...connection,
+      id: `e-new-${Date.now()}`,
+      animated: false,
+      type: 'smoothstep',
+      markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: '#86909c' },
+      style: { stroke: '#86909c', strokeWidth: 1.5 },
+      labelStyle: { fontSize: 11, fill: '#4e5969' },
+      labelBgStyle: { fill: '#fff', fillOpacity: 0.9 },
+    }, current))
   }, [])
 
   const selNode = nodes.find((node) => node.id === selNodeId)
@@ -488,18 +502,22 @@ function CanvasInner({ graph, onSave }: OrchestrationCanvasProps): ReactNode {
           onNodeClick={(_event, node) => { setSelNodeId(node.id); setSelEdgeId(undefined) }}
           onEdgeClick={(_event, edge) => { setSelEdgeId(edge.id); setSelNodeId(undefined) }}
           onPaneClick={() => { setSelNodeId(undefined); setSelEdgeId(undefined) }}
+          deleteKeyCode={['Delete', 'Backspace']}
           fitView
+          fitViewOptions={{ padding: 0.25 }}
+          minZoom={0.3}
+          maxZoom={1.6}
           proOptions={{ hideAttribution: true }}
         >
-          <Background />
-          <Controls />
-          <MiniMap pannable zoomable />
+          <Background gap={18} size={1} color="#dfe3ea" />
+          <Controls showInteractive={false} />
+          <MiniMap pannable zoomable style={{ width: 140, height: 90 }} />
           <Panel position="top-left">
             <div className="dsh-df-rf-toolbar">
               <button type="button" onClick={() => { addNode('page') }}>+ 页面节点</button>
               <button type="button" onClick={() => { addNode('api') }}>+ 接口节点</button>
               <button type="button" onClick={deleteSelection}>删除选中</button>
-              <span className="dsh-df-rf-hint">拖圆点连线 · 点节点/边编辑</span>
+              <span className="dsh-df-rf-hint">拖圆点连线 · Delete 删除选中 · 点节点/边编辑</span>
             </div>
             {/* 调色板收在工具条下面（不浮在画布中央）：原型没有这块，但它是 FR-2.2 的拖入入口，
                 折起来时只是一条 232px 的窄条，不遮节点。 */}
@@ -519,7 +537,12 @@ function CanvasInner({ graph, onSave }: OrchestrationCanvasProps): ReactNode {
           </Panel>
           {selNode === undefined ? null : (
             <Panel position="top-right">
-              <NodeEditor node={selNode} onChange={updateNodeData} onClose={() => { setSelNodeId(undefined) }} />
+              <NodeEditor
+                node={selNode}
+                onChange={updateNodeData}
+                onDelete={deleteSelection}
+                onClose={() => { setSelNodeId(undefined) }}
+              />
             </Panel>
           )}
           {selEdge === undefined ? null : (
@@ -530,6 +553,7 @@ function CanvasInner({ graph, onSave }: OrchestrationCanvasProps): ReactNode {
                 sourceCard={cardsOfNode(nodes, graph, selEdge.source)}
                 targetCard={cardsOfNode(nodes, graph, selEdge.target)}
                 onChange={updateEdgeBinding}
+                onDelete={deleteSelection}
                 onClose={() => { setSelEdgeId(undefined) }}
               />
             </Panel>
@@ -588,14 +612,15 @@ const INPUT_TYPES = [
 function NodeEditor(props: {
   node: FlowNode
   onChange: (patch: Partial<CanvasNodeData>) => void
+  onDelete: () => void
   onClose: () => void
 }): ReactNode {
-  const { node, onChange, onClose } = props
+  const { node, onChange, onDelete, onClose } = props
   const constants = node.data.constants ?? {}
   return (
     <div className="dsh-df-rf-panel">
       <h3>
-        <span>节点 {node.id}</span>
+        <span>编辑节点</span>
         <button type="button" className="dsh-df-rf-close" onClick={onClose}>✕</button>
       </h3>
       <label>名称（来自卡 / 页面，只读）</label>
@@ -669,6 +694,9 @@ function NodeEditor(props: {
             }}
           />
         </div>
+      </div>
+      <div className="dsh-df-rf-row">
+        <button type="button" className="dsh-df-btn-danger" onClick={onDelete}>删除节点</button>
       </div>
     </div>
   )
@@ -793,9 +821,10 @@ function EdgeEditor(props: {
   sourceCard?: CardProjection
   targetCard?: CardProjection
   onChange: (side: 'from' | 'to', value: string) => void
+  onDelete: () => void
   onClose: () => void
 }): ReactNode {
-  const { from, to, sourceCard, targetCard, onChange, onClose } = props
+  const { from, to, sourceCard, targetCard, onChange, onDelete, onClose } = props
   const sourceNode = from.split('.')[0] ?? ''
   const targetNode = to.split('.')[0] ?? ''
   const fromPath = from.slice(sourceNode.length + 1)
@@ -804,7 +833,7 @@ function EdgeEditor(props: {
   return (
     <div className="dsh-df-rf-panel">
       <h3>
-        <span>依赖绑定</span>
+        <span>编辑连线</span>
         <button type="button" className="dsh-df-rf-close" onClick={onClose}>✕</button>
       </h3>
 
@@ -845,6 +874,9 @@ function EdgeEditor(props: {
           ? '有一侧节点没有卡模板（页面节点或卡不在库），只能手写路径。'
           : '候选来自两侧卡的字段表；边标签取上游字段的叶子名。'}
       </p>
+      <div className="dsh-df-rf-row">
+        <button type="button" className="dsh-df-btn-danger" onClick={onDelete}>删除连线</button>
+      </div>
     </div>
   )
 }

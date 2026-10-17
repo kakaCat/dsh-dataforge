@@ -113,6 +113,8 @@ export type OrchestrationVersion = {
   version: number
   created?: string
   source?: ChainSource
+  /** 该版本的 meta.note（版本说明）。 */
+  note?: string
   nodeCount?: number
   edgeCount?: number
   /** 是否已被更新的版本取代（非最新版）。 */
@@ -141,6 +143,8 @@ export type OrchestrationSite = {
   flows: number
   updatedAt?: string
   domains: string[]
+  /** 链引用的卡/页面 host（原型网站卡的 host 行）。 */
+  hosts: string[]
 }
 
 export type OrchestrationOverview = {
