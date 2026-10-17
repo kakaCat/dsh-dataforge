@@ -167,6 +167,7 @@ function fullConfig(workspace: string): Required<Config> {
     chainNodeTimeoutSeconds: 5,
     chainConcurrency: 4,
     chainResponseLimitBytes: 2_097_152,
+    chainCredentialPersistence: true,
   }
 }
 

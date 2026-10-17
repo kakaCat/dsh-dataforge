@@ -39,7 +39,7 @@ function fixture(): {
     captureStabilityWindowMs: 1500,
     captureBodyLimitBytes: 262_144,
     captureChromeChannel: 'chrome',
-    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152,
+    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true,
   }
   const dones: Promise<unknown>[] = []
   const jobs = {

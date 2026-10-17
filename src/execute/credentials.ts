@@ -46,6 +46,8 @@ export type CredentialApplication = {
   captureIds: string[]
   /** 匹配到但已过期的条数。 */
   expired: number
+  /** R-4 M3：其中来自持久化换票 jar 的条数（0/缺省 = 全部来自采集库）。 */
+  persisted?: number
   /** 降级原因（可进事件，不含值）。 */
   reason?: string
 }

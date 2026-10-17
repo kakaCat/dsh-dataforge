@@ -30,7 +30,7 @@ it('index: 注册 14 个工具（含编排三件套），策略段含采集纪�
     captureStabilityWindowMs: 1500,
     captureBodyLimitBytes: 262_144,
     captureChromeChannel: 'chrome',
-    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152,
+    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true,
   } as never)
   expect(registered).toHaveLength(16)
   const names = registered.map((t) => t.name)

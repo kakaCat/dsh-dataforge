@@ -26,6 +26,7 @@ import {
   emptyCredentialApplication,
   selectCookies,
 } from '../execute/credentials.js'
+import { originOfUrl, readPersistedCookies } from './credential-store.js'
 
 /** 采集库里的 credential_events 行（只取本模块用到的列）。 */
 type CredentialRow = {
@@ -39,6 +40,11 @@ type CredentialRow = {
 export type CaptureCredentialProviderOptions = {
   /** `dataRoot/capture/capture.sqlite`。 */
   dbPath: string
+  /**
+   * R-4 M3：换票结果持久化文件（`dataRoot/credentials/cookies.json`）。
+   * 缺省不读持久化；传入后按目标 origin 合并，换票得到的新 cookie 优先。
+   */
+  storePath?: string
   /** 测试可注入的时钟（毫秒）。 */
   now?: () => number
 }
@@ -153,19 +159,41 @@ export function createCaptureCredentialProvider(options: CaptureCredentialProvid
     if (card.auth === undefined || card.auth === 'none') return none('该卡无鉴权', captureIds)
     if (card.auth === 'unknown') return none('鉴权标志未判定，不注入', captureIds)
     if (card.auth !== 'cookie-session') return unsupported(card, captureIds)
-    if (captureIds.length === 0) return none('卡没有采集来源（sources[].captureId 为空）', [])
-
-    let rows: CredentialRow[]
-    try {
-      rows = readCookieRows(options.dbPath, captureIds)
-    } catch (error) {
-      return none(`采集库不可用：${messageOf(error)}`, captureIds)
-    }
 
     const entries: CredentialCookie[] = []
-    for (const row of rows) {
-      const cookie = cookieOfRow(row)
-      if (cookie !== undefined) entries.push(cookie)
+    let databaseError: string | undefined
+
+    if (captureIds.length > 0) {
+      try {
+        const rows = readCookieRows(options.dbPath, captureIds)
+        for (const row of rows) {
+          const cookie = cookieOfRow(row)
+          if (cookie !== undefined) entries.push(cookie)
+        }
+      } catch (error) {
+        databaseError = messageOf(error)
+      }
+    }
+
+    // R-4 M3：换票结果持久化。按目标 origin 精确取，同名由 selectCookies 去重时新值胜出
+    // （持久化 cookie 的 domain 是目标 host，比采集 cookie 的 `.父域` 更具体）。
+    if (options.storePath !== undefined) {
+      const origin = originOfUrl(need.url)
+      if (origin !== undefined) entries.push(...readPersistedCookies(options.storePath, origin, now()))
+    }
+
+    if (entries.length === 0) {
+      if (captureIds.length === 0) {
+        return none(
+          databaseError === undefined
+            ? '卡没有采集来源（sources[].captureId 为空）'
+            : `采集库不可用：${databaseError}`,
+          [],
+        )
+      }
+      return databaseError === undefined
+        ? none(`没有匹配 ${hostOf(need.url)} 的 cookie`, captureIds)
+        : none(`采集库不可用：${databaseError}`, captureIds)
     }
 
     const selection = selectCookies(entries, need.url, now())
@@ -181,9 +209,11 @@ export function createCaptureCredentialProvider(options: CaptureCredentialProvid
       return none(`没有匹配 ${hostOf(need.url)} 的 cookie`, captureIds)
     }
 
-    return {
-      headers: { cookie: header },
-      application: appliedCredentialApplication(selection, captureIds),
-    }
+    const application = appliedCredentialApplication(selection, captureIds)
+    const persistedUsed = selection.selected.filter((cookie) => cookie.captureId === 'persisted').length
+    if (persistedUsed > 0) application.persisted = persistedUsed
+    // 持久化命中但采集库不可用：摘要里保留原因，不把「从哪来的」说错。
+    if (databaseError !== undefined) application.reason = `采集库不可用（已用持久化凭证兜底）：${databaseError}`
+    return { headers: { cookie: header }, application }
   }
 }

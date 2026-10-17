@@ -37,6 +37,11 @@ export interface Config {
   chainConcurrency: number
   /** 执行：单响应正文读取上限（字节），超过即截断并如实标注。 */
   chainResponseLimitBytes: number
+  /**
+   * 换票结果持久化：把登录链下发的 cookie 写到 `dataRoot/credentials/cookies.json`
+   * （0600，按 origin 隔离），供后续运行/复跑直接用。缺省 true；关闭后换票只活一次运行。
+   */
+  chainCredentialPersistence?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -54,6 +59,7 @@ export const Config: Schema<Config> = Schema.object({
   chainNodeTimeoutSeconds: Schema.number().default(30),
   chainConcurrency: Schema.number().default(4),
   chainResponseLimitBytes: Schema.number().default(2_097_152),
+  chainCredentialPersistence: Schema.boolean().default(true),
 })
 
 /** 归一化（相对路径 → 绝对；~ 展开）。 */
@@ -74,5 +80,6 @@ export function normalizeConfig(raw: Config): Required<Config> {
     chainNodeTimeoutSeconds: raw.chainNodeTimeoutSeconds,
     chainConcurrency: raw.chainConcurrency,
     chainResponseLimitBytes: raw.chainResponseLimitBytes,
+    chainCredentialPersistence: raw.chainCredentialPersistence ?? true,
   }
 }

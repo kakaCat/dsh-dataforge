@@ -12,13 +12,15 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import type { Dirent } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChainDoc, InterfaceCardDoc } from '../../src/chains/schema.js'
 import { chainToYaml } from '../../src/chains/schema.js'
 import { cardsRoot, saveChain } from '../../src/chains/store.js'
 import { chainRunForTool, type ChainRunToolDeps } from '../../src/orchestration/application.js'
+import { createCaptureCredentialProvider } from '../../src/capture/credentials.js'
 import { loadRunEvents, listRunIds, readRunRecord } from '../../src/runs/store.js'
 
 const CHAIN_CONFIG = {
@@ -85,7 +87,28 @@ function depsOf(workspace: string): ChainRunToolDeps {
     dataRoot: join(workspace, 'data'),
     chain: CHAIN_CONFIG,
     resolveJobs: () => undefined,
+    credentialStorePath: join(workspace, 'data', 'credentials', 'cookies.json'),
   }
+}
+
+/** 数据根下所有文件（扫描门用；持久化 jar 本身除外——它就是要存值的）。 */
+function filesUnder(root: string): string[] {
+  const out: string[] = []
+  const walk = (dir: string): void => {
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.isFile()) out.push(full)
+    }
+  }
+  walk(root)
+  return out
 }
 
 function cardOf(cardId: string, method: string, urlTemplate: string, inputs: InterfaceCardDoc['inputs'] = []): InterfaceCardDoc {
@@ -187,6 +210,81 @@ describe('主链 401 → 登录链换票 → 重放', () => {
     // 主链留痕也不能有换票后的 cookie 值。
     const mainEvents = loadRunEvents(deps.dataRoot, value.runId ?? '') ?? []
     expect(JSON.stringify(mainEvents)).not.toContain('sid=fresh')
+
+    // 零泄漏扫描门：dataRoot 下除持久化 jar 外的所有文件 + 工具回执，都不能出现密码/token/新 cookie。
+    // （持久化 jar 是唯一允许存凭证值的地方，权限已由 credential-store.test.ts 锁 0600。）
+    const storeFile = join(deps.dataRoot, 'credentials', 'cookies.json')
+    for (const file of filesUnder(deps.dataRoot)) {
+      if (file === storeFile) continue
+      const text = readFileSync(file, 'utf8')
+      expect(text, file).not.toContain('PASSWORD-SECRET')
+      expect(text, file).not.toContain('TOKEN-SECRET')
+      expect(text, file).not.toContain('sid=fresh')
+    }
+    const receipt = JSON.stringify(value)
+    expect(receipt).not.toContain('PASSWORD-SECRET')
+    expect(receipt).not.toContain('TOKEN-SECRET')
+    expect(receipt).not.toContain('sid=fresh')
+  })
+
+  it('R-4 M3：换票结果持久化，第二次运行直接带新 cookie，不再登录', async () => {
+    dataCookies = []
+    loginHits = 0
+    const workspace = workspaceOf()
+    const loginCard = cardOf('card_login', 'POST', '/login', [
+      { path: 'body.user', type: 'string' },
+      { path: 'body.pass', type: 'string' },
+    ])
+    const dataCard = { ...cardOf('card_data', 'GET', '/data'), auth: 'cookie-session' }
+    writeCard(workspace, loginCard)
+    writeCard(workspace, dataCard)
+    seedChain(workspace, '认证站点', '登录', [
+      { id: 'login', card: 'card_login', constants: { 'body.user': '$inputs.user', 'body.pass': '$inputs.pass' } },
+    ], [
+      { name: 'user', type: 'string', required: true },
+      { name: 'pass', type: 'string', required: true },
+    ])
+    seedChain(workspace, '业务站点', '取数', [{ id: 'data', card: 'card_data', constants: {} }])
+
+    const deps = depsOf(workspace)
+    const first = await chainRunForTool(deps, {}, {
+      site: '业务站点',
+      flow: '取数',
+      confirm: true,
+      relogin: {
+        site: '认证站点',
+        flow: '登录',
+        inputs: { user: 'alice', pass: 'PASSWORD-SECRET' },
+        baseUrl: base,
+      },
+    })
+    expect(first.summary?.status).toBe('completed')
+    expect(first.nodes?.[0]?.relogin).toMatchObject({ attempted: true, success: true, persisted: 1 })
+    expect(loginHits).toBe(1)
+
+    const storePath = join(workspace, 'data', 'credentials', 'cookies.json')
+    expect(statSync(storePath).mode & 0o777).toBe(0o600)
+    const persisted = JSON.parse(readFileSync(storePath, 'utf8')) as {
+      origins: Record<string, { cookies: Array<{ name: string; value: string }> }>
+    }
+    expect(persisted.origins[new URL(base).origin]?.cookies).toEqual([{ name: 'sid', value: 'fresh' }])
+
+    // 第二次：同一 dataRoot，provider 读持久化 jar，主链直接成功，不再触发登录。
+    const provider = createCaptureCredentialProvider({
+      dbPath: join(workspace, 'capture.sqlite'),
+      storePath,
+    })
+    dataCookies = []
+    const second = await chainRunForTool({ ...deps, credentials: provider }, {}, {
+      site: '业务站点',
+      flow: '取数',
+      confirm: true,
+    })
+
+    expect(second.summary?.status).toBe('completed')
+    expect(loginHits).toBe(1)
+    expect(dataCookies).toEqual(['sid=fresh'])
+    expect(second.nodes?.[0]?.relogin).toBeUndefined()
   })
 
   it('登录链与主链不同源 → relogin-unavailable，登录请求一次都不发', async () => {

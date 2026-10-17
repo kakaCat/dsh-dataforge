@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CaptureStore } from '../../src/capture/store.js'
 import { captureIdsOf, createCaptureCredentialProvider } from '../../src/capture/credentials.js'
+import { persistCookies } from '../../src/capture/credential-store.js'
 import type { ChainDoc, InterfaceCardDoc } from '../../src/chains/schema.js'
 import { buildPlan } from '../../src/execute/plan.js'
 import { runChain } from '../../src/execute/run.js'
@@ -229,5 +230,48 @@ describe('createCaptureCredentialProvider：只读采集库并注入', () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
+  })
+
+  it('R-4 M3：持久化换票 cookie 覆盖采集旧值，摘要标 persisted', () => {
+    const { store, dbPath, dir } = storeOf()
+    addCookie(store, { name: 'sid', value: 'from-capture', domain: '.example.com' })
+    const storePath = join(dir, 'credentials', 'cookies.json')
+    persistCookies(storePath, 'https://a.example.com', ['sid=from-relogin'], NOW)
+
+    const provider = createCaptureCredentialProvider({ dbPath, storePath, now: () => NOW })
+    const resolution = provider({ card: cardOf(), url: 'https://a.example.com/api/x', method: 'GET', nodeId: 'n1' })
+
+    expect(resolution.headers.cookie).toBe('sid=from-relogin')
+    expect(resolution.application.status).toBe('applied')
+    expect(resolution.application.persisted).toBe(1)
+    expect(JSON.stringify(resolution.application)).not.toContain('from-relogin')
+  })
+
+  it('R-4 M3：采集库缺席但持久化 jar 有 cookie → 仍可注入', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'capture-cred-store-only-'))
+    const storePath = join(dir, 'credentials', 'cookies.json')
+    persistCookies(storePath, 'https://a.example.com', ['sid=persisted-only'], NOW)
+    const provider = createCaptureCredentialProvider({
+      dbPath: join(dir, 'missing.sqlite'),
+      storePath,
+      now: () => NOW,
+    })
+
+    const resolution = provider({ card: cardOf(), url: 'https://a.example.com/', method: 'GET', nodeId: 'n1' })
+
+    expect(resolution.headers.cookie).toBe('sid=persisted-only')
+    expect(resolution.application.persisted).toBe(1)
+  })
+
+  it('R-4 M3：无 storePath 时不读持久化（M1 行为不变）', () => {
+    const { store, dbPath, dir } = storeOf()
+    addCookie(store, { name: 'sid', value: 'from-capture', domain: '.example.com' })
+    persistCookies(join(dir, 'credentials', 'cookies.json'), 'https://a.example.com', ['sid=from-relogin'], NOW)
+
+    const provider = createCaptureCredentialProvider({ dbPath, now: () => NOW })
+    const resolution = provider({ card: cardOf(), url: 'https://a.example.com/', method: 'GET', nodeId: 'n1' })
+
+    expect(resolution.headers.cookie).toBe('sid=from-capture')
+    expect(resolution.application.persisted).toBeUndefined()
   })
 })

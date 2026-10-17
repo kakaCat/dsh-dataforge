@@ -31,6 +31,7 @@ import { foldSummary, listRunIds, loadRunEvents, readRunRecord } from '../runs/s
 import type { RunSummary } from '../shared/types.js'
 import type { CredentialProvider } from '../execute/credentials.js'
 import { cookieHeaderFromSetCookies, cookieNamesOf } from '../execute/credentials.js'
+import { persistCookies } from '../capture/credential-store.js'
 import { extractJobId, ownerOf } from '../application.js'
 
 export type OrchestrationDeps = {
@@ -58,6 +59,11 @@ export type ChainRunToolDeps = OrchestrationDeps & {
    * 装配处（`index.ts`）把采集库只读适配器注进来，工具壳不认识 SQLite。
    */
   credentials?: CredentialProvider
+  /**
+   * R-4 M3：换票结果持久化文件（`dataRoot/credentials/cookies.json`）。
+   * 缺省不落盘；装配处按 `config.chainCredentialPersistence` 决定是否给。
+   */
+  credentialStorePath?: string
 }
 
 /** 逐条问题时给模型看的行：`nodes[0]: reason`。 */
@@ -292,6 +298,7 @@ export type ChainRunNodeValue = {
     message?: string
     runId?: string
     cookieNames?: string[]
+    persisted?: number
   }
 }
 
@@ -613,7 +620,18 @@ function createReloginRunner(
         runId: prepared.runId,
       }
     }
-    return { ok: true, cookieHeader, cookieNames: cookieNamesOf(cookieHeader), runId: prepared.runId }
+    // R-4 M3：换票结果落本地 jar（0600，按 origin）。落盘失败不打断当前链。
+    const persisted =
+      deps.credentialStorePath !== undefined && expectedOrigin !== undefined
+        ? persistCookies(deps.credentialStorePath, expectedOrigin, cookies, Date.now())
+        : 0
+    return {
+      ok: true,
+      cookieHeader,
+      cookieNames: cookieNamesOf(cookieHeader),
+      runId: prepared.runId,
+      ...(persisted > 0 ? { persisted } : {}),
+    }
   }
 }
 

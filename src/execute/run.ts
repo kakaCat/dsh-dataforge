@@ -163,7 +163,7 @@ export type ReloginSpec = {
 }
 
 export type ReloginOutcome =
-  | { ok: true; cookieHeader: string; cookieNames: string[]; runId?: string }
+  | { ok: true; cookieHeader: string; cookieNames: string[]; runId?: string; persisted?: number }
   | {
       ok: false
       code: 'relogin-failed' | 'relogin-unavailable' | 'relogin-cycle'
@@ -187,6 +187,8 @@ export type ReloginRecord = {
   message?: string
   runId?: string
   cookieNames?: string[]
+  /** R-4 M3：写入本地持久化 jar 的条数（0 = 未持久化/无新 cookie）。 */
+  persisted?: number
 }
 
 /** `run.json` 的内容（写入一次，先于第一个请求；崩溃时至少留下计划与目标）。 */
@@ -680,6 +682,7 @@ export async function executeChainRun(
             success: true,
             ...(relogin.runId === undefined ? {} : { runId: relogin.runId }),
             cookieNames: relogin.cookieNames,
+            ...(relogin.persisted === undefined ? {} : { persisted: relogin.persisted }),
           }
         : {
             attempted: true,

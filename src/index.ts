@@ -134,6 +134,11 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
     resolveWorkspaceRoot,
   }
 
+  // R-4 M3：换票结果持久化（0600，按 origin）。关闭后换票只活一次运行。
+  const credentialStorePath = config.chainCredentialPersistence
+    ? join(config.dataRoot, 'credentials', 'cookies.json')
+    : undefined
+
   // 执行域：运行留痕复用 dataRoot/runs（与流程造数同一套投影），配置走四个执行开关。
   const chainRunDeps: ChainRunToolDeps = {
     ...orchestrationDeps,
@@ -147,9 +152,13 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       foregroundTimeoutSeconds: config.timeoutSeconds,
     },
     resolveJobs: () => jobsService,
-    // R-4 M1：执行期按卡的来源 captureId 只读采集库注入 cookie。
+    // R-4 M1/M3：执行期按卡的来源 captureId 只读采集库注入 cookie；
     // 采集库缺席/坏库由 provider 自己降级，不阻断无鉴权链。
-    credentials: createCaptureCredentialProvider({ dbPath: orchestrationDeps.captureDbPath }),
+    credentials: createCaptureCredentialProvider({
+      dbPath: orchestrationDeps.captureDbPath,
+      ...(credentialStorePath === undefined ? {} : { storePath: credentialStorePath }),
+    }),
+    ...(credentialStorePath === undefined ? {} : { credentialStorePath }),
   }
 
   // 面板数据面：/dashboard/api/dataforge 只读路由（webServer 惰性注入；服务缺席 → 工具面照常）。

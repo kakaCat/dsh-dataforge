@@ -909,7 +909,7 @@ function renderChainRun(value: ChainRunToolValue): string {
       node.relogin === undefined
         ? ''
         : node.relogin.success
-          ? `（已换票重放${node.relogin.runId === undefined ? '' : `，登录链 ${node.relogin.runId}`}）`
+          ? `（已换票重放${node.relogin.runId === undefined ? '' : `，登录链 ${node.relogin.runId}`}${node.relogin.persisted === undefined ? '' : `，已持久化 ${node.relogin.persisted} 个 cookie`}）`
           : `（换票失败 ${node.relogin.code ?? 'relogin-failed'}）`
     return `- ${node.nodeId}：${node.status}${http}（${node.elapsedMs}ms）${error}${relogin}`
   })
@@ -1072,6 +1072,7 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
                     message: { type: 'string' },
                     runId: { type: 'string' },
                     cookieNames: { type: 'array', items: { type: 'string' } },
+                    persisted: { type: 'number' },
                   },
                 },
               },
