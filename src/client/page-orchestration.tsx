@@ -318,6 +318,10 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
               return next
             })
           }}
+          otherKindCount={(overview?.flows ?? []).filter(
+            (item) => item.site === site && item.kind !== null && item.kind !== undefined
+              && (kind === 'page' ? item.kind === 'interface-chain' : item.kind === 'page-chain'),
+          ).length}
           onToggleFlow={(key) => {
             setCollapsedFlows((current) => {
               const next = new Set(current)
@@ -452,6 +456,8 @@ function FlowsView(props: {
   onSearch: (value: string) => void
   onToggleDomain: (domain: string) => void
   onToggleFlow: (key: string) => void
+  /** 另一编排类型在本网站有几条流程（空态给一条「去另一类」的出路，别让人卡在空列表）。 */
+  otherKindCount: number
   onPage: (page: number) => void
   onPageSize: (size: number) => void
   sizeOptions: readonly number[]
@@ -462,7 +468,7 @@ function FlowsView(props: {
   onImported: (notice: string) => void
 }): ReactNode {
   const {
-    siteName, kind, search, domains, total, page, pageSize, sizeOptions, collapsedDomains, collapsedFlows,
+    siteName, kind, search, domains, total, page, pageSize, sizeOptions, collapsedDomains, collapsedFlows, otherKindCount,
     onKind, onSearch, onToggleDomain, onToggleFlow, onPage, onPageSize, onBack, onOpenGraphs, onOpenCanvas,
     onCreated, onImported,
   } = props
@@ -542,6 +548,17 @@ function FlowsView(props: {
           {search.trim().length > 0
             ? `没有匹配「${search.trim()}」的流程。`
             : `这个网站还没有${kind === 'page' ? '页面编排' : '接口编排'}流程。`}
+          {search.trim().length === 0 && otherKindCount > 0 ? (
+            <div className="dsh-df-empty-hint">
+              <button
+                type="button"
+                className="dsh-df-btn"
+                onClick={() => { onKind(kind === 'page' ? 'api' : 'page') }}
+              >
+                改看{kind === 'page' ? '接口编排' : '页面编排'}（{otherKindCount} 条）→
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

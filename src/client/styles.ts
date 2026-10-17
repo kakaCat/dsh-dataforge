@@ -296,6 +296,9 @@ const CSS = `
 .dsh-df-legend-stack > div { display: flex; align-items: center; gap: 8px; }
 @media (max-width: 980px) { .dsh-df-legend-stack { display: none; } }
 
+/* 空态里的出路（例如只有接口编排时，给一条「改看接口编排」的按钮） */
+.dsh-df-empty-hint { margin-top: 12px; display: flex; justify-content: center; }
+
 /* 每页条数下拉：贴着分页条，别用表单默认的大内边距 */
 .dsh-df-pagerbar .dsh-df-pagesize { padding: 3px 6px; font-size: 12px; border-radius: 6px; }
 
