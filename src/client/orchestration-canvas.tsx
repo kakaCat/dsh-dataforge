@@ -18,6 +18,7 @@ import {
   applyEdgeChanges, applyNodeChanges, addEdge, useReactFlow,
   type Connection, type Edge, type EdgeChange, type Node, type NodeChange, type NodeProps,
 } from '@xyflow/react'
+import { formatTime } from './format.js'
 import { XYFLOW_CSS } from './xyflow-css.js'
 import { XYFLOW_STYLE_ID, injectCssOnce } from './styles.js'
 import type {
@@ -100,9 +101,12 @@ const NODE_TYPES = { page: PageNode, api: ApiNode, pill: PillNode }
 
 /** 边的标签 = from 的叶子字段名（`body.orderNo` → orderNo）。 */
 export function edgeLabelOf(from: string): string {
+  // 页面链的边是「节点 → 节点」，没有字段可取：原型里那种人写的动线名（菜单进入…）
+  // 链模型里没有，硬拿节点 id 当标签只是噪音，所以不显示。
   const dot = from.lastIndexOf('.')
-  const leaf = dot >= 0 ? from.slice(dot + 1) : from
-  return leaf.replace(/\[\*?\]$/, '') || from
+  if (dot < 0) return ''
+  const leaf = from.slice(dot + 1)
+  return leaf.replace(/\[\*?\]$/, '')
 }
 
 /**
@@ -375,8 +379,8 @@ function CanvasInner({ graph, onSave }: OrchestrationCanvasProps): ReactNode {
   }, [selEdgeId, selNodeId])
 
   const legend = useMemo(
-    () => `${graph.kind === 'page-chain' ? '页面编排' : '接口编排'} · v${graph.version} · ${nodes.length} 节点 ${edges.length} 边`,
-    [edges.length, graph.kind, graph.version, nodes.length],
+    () => `${graph.kind === 'page-chain' ? '页面编排' : '接口编排'} · v${graph.version} · ${nodes.length} 节点 ${edges.length} 边 · 更新于 ${formatTime(graph.created)}`,
+    [edges.length, graph.created, graph.kind, graph.version, nodes.length],
   )
 
   return (
@@ -490,25 +494,27 @@ function CanvasInner({ graph, onSave }: OrchestrationCanvasProps): ReactNode {
           <Background />
           <Controls />
           <MiniMap pannable zoomable />
-          <Panel position="center-left">
-            <CardPalette
-              kind={graph.kind}
-              palette={palette}
-              error={paletteError}
-              onAdd={(seed) => {
-                appendNode(seed, screenToFlowPosition({
-                  x: window.innerWidth / 2,
-                  y: window.innerHeight / 2,
-                }))
-              }}
-            />
-          </Panel>
           <Panel position="top-left">
             <div className="dsh-df-rf-toolbar">
               <button type="button" onClick={() => { addNode('page') }}>+ 页面节点</button>
               <button type="button" onClick={() => { addNode('api') }}>+ 接口节点</button>
               <button type="button" onClick={deleteSelection}>删除选中</button>
               <span className="dsh-df-rf-hint">拖圆点连线 · 点节点/边编辑</span>
+            </div>
+            {/* 调色板收在工具条下面（不浮在画布中央）：原型没有这块，但它是 FR-2.2 的拖入入口，
+                折起来时只是一条 232px 的窄条，不遮节点。 */}
+            <div className="dsh-df-palette-slot">
+              <CardPalette
+                kind={graph.kind}
+                palette={palette}
+                error={paletteError}
+                onAdd={(seed) => {
+                  appendNode(seed, screenToFlowPosition({
+                    x: window.innerWidth / 2,
+                    y: window.innerHeight / 2,
+                  }))
+                }}
+              />
             </div>
           </Panel>
           {selNode === undefined ? null : (
@@ -682,7 +688,7 @@ function CardPalette(props: {
 }): ReactNode {
   const { kind, palette, error, onAdd } = props
   const [keyword, setKeyword] = useState('')
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
 
   const isPage = kind === 'page-chain'
   const cards = useMemo(() => {

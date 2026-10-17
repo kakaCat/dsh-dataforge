@@ -132,7 +132,7 @@ export function QuickCapturePage({ visible, seed }: QuickCapturePageProps): Reac
             onChange={(event) => { setUrl(event.target.value) }}
           />
           <div className="dsh-df-mode-tag">单页 · 只读 · 静止期监听</div>
-          <button className="dsh-df-btn-primary" type="submit" disabled={sending}>发起采集</button>
+          <button className="dsh-df-btn-primary dsh-df-btn-block" type="submit" disabled={sending}>发起采集</button>
         </form>
         {outcome !== undefined && (
           <div

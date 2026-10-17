@@ -105,8 +105,10 @@ const CSS = `
 .dsh-df-mode-tag { display: inline-flex; align-items: center; gap: 5px;
   background: var(--dsh-df-accent-soft); color: var(--dsh-df-accent); border-radius: 6px;
   padding: 2px 8px; font-size: 11px; font-weight: 600; margin-top: 10px; }
-.dsh-df-btn-primary { margin-top: 12px; width: 100%; border: none; background: var(--dsh-df-accent);
-  color: #fff; border-radius: 8px; padding: 9px 0; font-size: 13px; font-weight: 600; cursor: pointer; }
+.dsh-df-btn-primary { border: none; background: var(--dsh-df-accent); color: #fff; border-radius: 6px;
+  padding: 5px 12px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+/* 表单里的主操作才占满一行（原型的按钮全都是紧凑的，别让全局类把列表行按钮撑爆） */
+.dsh-df-btn-block { width: 100%; margin-top: 12px; padding: 9px 0; font-size: 13px; border-radius: 8px; }
 .dsh-df-btn-primary:hover { filter: brightness(1.06); }
 .dsh-df-btn-primary:disabled { opacity: .5; cursor: default; }
 .dsh-df-btn, .dsh-df-btn-ghost, .dsh-df-mini, .dsh-df-pact { border: 1px solid var(--dsh-df-line);
@@ -287,6 +289,16 @@ const CSS = `
   padding: 9px 14px; font-size: 11px; color: var(--dsh-df-ink-3); display: flex; gap: 14px;
   align-items: center; box-shadow: 0 8px 24px rgba(29, 33, 41, .08); flex-wrap: wrap; }
 
+/* 编排页的「层级图例」：原型是带标题的三行说明（badge + 解释），与采集网站页的横排徽标不同 */
+.dsh-df-legend-stack { flex-direction: column; align-items: flex-start; gap: 5px;
+  right: 22px; bottom: 18px; padding: 10px 14px; }
+.dsh-df-legend-stack > b { font-size: 11px; font-weight: 600; color: var(--dsh-df-ink-2); }
+.dsh-df-legend-stack > div { display: flex; align-items: center; gap: 8px; }
+@media (max-width: 980px) { .dsh-df-legend-stack { display: none; } }
+
+/* 每页条数下拉：贴着分页条，别用表单默认的大内边距 */
+.dsh-df-pagerbar .dsh-df-pagesize { padding: 3px 6px; font-size: 12px; border-radius: 6px; }
+
 /* ── 刷新/加载/错误提示（跨页共用） ── */
 .dsh-df-errline { color: var(--dsh-df-err); font-size: 12px; margin-top: 10px;
   word-break: break-all; }
@@ -436,6 +448,9 @@ const CSS = `
 .dsh-df-rf-pill { border: 1.5px solid #94a3b8; background: #f8fafc; color: var(--dsh-df-ink-2);
   border-radius: 999px; padding: 5px 20px; font-weight: 700; font-size: 12px; }
 .dsh-df-rf-selected { outline: 2px solid var(--dsh-df-accent); outline-offset: 2px; }
+.dsh-df-palette-slot { margin-top: 8px; }
+.dsh-df-palette-slot .dsh-df-palette { width: 232px; max-width: 232px; }
+
 .dsh-df-rf-toolbar { display: flex; gap: 6px; align-items: center; background: var(--dsh-df-card);
   border: 1px solid var(--dsh-df-line); border-radius: 10px; padding: 6px 8px;
   box-shadow: 0 2px 10px rgba(20,30,60,.08); flex-wrap: wrap; }

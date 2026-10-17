@@ -18,6 +18,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { fetchChainGraph, fetchOrchestrationOverview, importChainYaml, saveChainGraph } from './api.js'
+import { formatTime } from './format.js'
 import { OrchestrationCanvas } from './orchestration-canvas.js'
 import type {
   ChainDocLike, ChainGraph, ChainSaveResult, ChainSource, OrchestrationFlow,
@@ -27,6 +28,10 @@ import type {
 const SITES_PAGE_SIZE = 9
 const FLOWS_PAGE_SIZE = 10
 const GRAPHS_PAGE_SIZE = 10
+/** 每页条数候选（原型三处分页条都有这个下拉，默认值就是上面三个常量）。 */
+const SITE_PAGE_OPTIONS = [9, 18, 36] as const
+const FLOW_PAGE_OPTIONS = [10, 20, 50] as const
+const GRAPH_PAGE_OPTIONS = [10, 20, 50] as const
 
 type View = 'sites' | 'flows' | 'graphs' | 'canvas'
 type KindTab = 'page' | 'api'
@@ -44,14 +49,6 @@ const KIND_LABELS: Record<string, string> = {
 
 function sourceLabel(source: ChainSource | undefined): string {
   return source === undefined ? '未标注来源' : SOURCE_LABELS[source]
-}
-
-function formatTime(iso: string | undefined): string {
-  if (iso === undefined) return '—'
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return iso
-  const pad = (value: number): string => String(value).padStart(2, '0')
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 /** 站点展示名：链文件里的 meta.site 与目录 slug 可能不同，这里以目录名为键、原名为展示。 */
@@ -83,6 +80,9 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
   const [sitesPage, setSitesPage] = useState(1)
   const [flowsPage, setFlowsPage] = useState(1)
   const [graphsPage, setGraphsPage] = useState(1)
+  const [sitesPageSize, setSitesPageSize] = useState<number>(SITES_PAGE_SIZE)
+  const [flowsPageSize, setFlowsPageSize] = useState<number>(FLOWS_PAGE_SIZE)
+  const [graphsPageSize, setGraphsPageSize] = useState<number>(GRAPHS_PAGE_SIZE)
   const [collapsedDomains, setCollapsedDomains] = useState<Set<string>>(new Set())
   const [collapsedFlows, setCollapsedFlows] = useState<Set<string>>(new Set())
 
@@ -144,9 +144,9 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
   }, [filteredFlows])
 
   const pagedFlows = useMemo(() => {
-    const start = (flowsPage - 1) * FLOWS_PAGE_SIZE
-    return filteredFlows.slice(start, start + FLOWS_PAGE_SIZE)
-  }, [filteredFlows, flowsPage])
+    const start = (flowsPage - 1) * flowsPageSize
+    return filteredFlows.slice(start, start + flowsPageSize)
+  }, [filteredFlows, flowsPage, flowsPageSize])
 
   const pagedDomains = useMemo(() => {
     const visibleIds = new Set(pagedFlows.map((item) => item.flow))
@@ -157,9 +157,9 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
 
   const siteRows = overview?.sites ?? []
   const pagedSites = useMemo(() => {
-    const start = (sitesPage - 1) * SITES_PAGE_SIZE
-    return siteRows.slice(start, start + SITES_PAGE_SIZE)
-  }, [siteRows, sitesPage])
+    const start = (sitesPage - 1) * sitesPageSize
+    return siteRows.slice(start, start + sitesPageSize)
+  }, [siteRows, sitesPage, sitesPageSize])
 
   const versionRows = useMemo(() => {
     if (flow === undefined) return [] as OrchestrationVersion[]
@@ -167,9 +167,9 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
   }, [flow])
 
   const pagedVersions = useMemo(() => {
-    const start = (graphsPage - 1) * GRAPHS_PAGE_SIZE
-    return versionRows.slice(start, start + GRAPHS_PAGE_SIZE)
-  }, [graphsPage, versionRows])
+    const start = (graphsPage - 1) * graphsPageSize
+    return versionRows.slice(start, start + graphsPageSize)
+  }, [graphsPage, versionRows, graphsPageSize])
 
   /* ───────────────────────── 动线 ───────────────────────── */
 
@@ -285,7 +285,9 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
           total={siteRows.length}
           totalFlows={overview?.flows.length ?? 0}
           page={sitesPage}
-          pageSize={SITES_PAGE_SIZE}
+          pageSize={sitesPageSize}
+          sizeOptions={SITE_PAGE_OPTIONS}
+          onPageSize={(size) => { setSitesPageSize(size); setSitesPage(1) }}
           hint={overview?.chainsRootHint}
           onPage={setSitesPage}
           onEnter={enterSite}
@@ -301,7 +303,9 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
           domains={pagedDomains}
           total={filteredFlows.length}
           page={flowsPage}
-          pageSize={FLOWS_PAGE_SIZE}
+          pageSize={flowsPageSize}
+          sizeOptions={FLOW_PAGE_OPTIONS}
+          onPageSize={(size) => { setFlowsPageSize(size); setFlowsPage(1) }}
           collapsedDomains={collapsedDomains}
           collapsedFlows={collapsedFlows}
           onKind={(next) => { setKind(next); setFlowsPage(1); setSearch('') }}
@@ -337,7 +341,9 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
           versions={pagedVersions}
           total={versionRows.length}
           page={graphsPage}
-          pageSize={GRAPHS_PAGE_SIZE}
+          pageSize={graphsPageSize}
+          sizeOptions={GRAPH_PAGE_OPTIONS}
+          onPageSize={(size) => { setGraphsPageSize(size); setGraphsPage(1) }}
           busy={graphLoading}
           onPage={setGraphsPage}
           onBack={() => { setView('flows') }}
@@ -359,6 +365,7 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
           <OrchestrationCanvas graph={graph} onSave={handleSave} />
         </>
       )}
+      <HierarchyLegend />
     </div>
   )
 }
@@ -372,11 +379,13 @@ function SitesView(props: {
   totalFlows: number
   page: number
   pageSize: number
+  sizeOptions: readonly number[]
   hint?: string
   onPage: (page: number) => void
+  onPageSize: (size: number) => void
   onEnter: (site: string) => void
 }): ReactNode {
-  const { loading, sites, total, totalFlows, page, pageSize, hint, onPage, onEnter } = props
+  const { loading, sites, total, totalFlows, page, pageSize, sizeOptions, hint, onPage, onPageSize, onEnter } = props
   const pages = Math.max(1, Math.ceil(total / pageSize))
   return (
     <>
@@ -412,10 +421,16 @@ function SitesView(props: {
           </button>
         ))}
       </div>
-      <div className="dsh-df-pagerbar">
-        <span className="dsh-df-total">共 <b>{total}</b> 个网站 · <b>{totalFlows}</b> 条编排流程</span>
-        <Pager page={page} pages={pages} onPage={onPage} />
-      </div>
+      <PagerBar
+        total={<>共 <b>{total}</b> 个网站 · <b>{totalFlows}</b> 条编排流程</>}
+        unit="网站"
+        page={page}
+        pages={pages}
+        pageSize={pageSize}
+        sizeOptions={sizeOptions}
+        onPage={onPage}
+        onPageSize={onPageSize}
+      />
     </>
   )
 }
@@ -438,6 +453,8 @@ function FlowsView(props: {
   onToggleDomain: (domain: string) => void
   onToggleFlow: (key: string) => void
   onPage: (page: number) => void
+  onPageSize: (size: number) => void
+  sizeOptions: readonly number[]
   onBack: () => void
   onOpenGraphs: (flow: OrchestrationFlow) => void
   onOpenCanvas: (flow: OrchestrationFlow, version?: number) => void
@@ -445,8 +462,9 @@ function FlowsView(props: {
   onImported: (notice: string) => void
 }): ReactNode {
   const {
-    siteName, kind, search, domains, total, page, pageSize, collapsedDomains, collapsedFlows,
-    onKind, onSearch, onToggleDomain, onToggleFlow, onPage, onBack, onOpenGraphs, onOpenCanvas, onCreated, onImported,
+    siteName, kind, search, domains, total, page, pageSize, sizeOptions, collapsedDomains, collapsedFlows,
+    onKind, onSearch, onToggleDomain, onToggleFlow, onPage, onPageSize, onBack, onOpenGraphs, onOpenCanvas,
+    onCreated, onImported,
   } = props
   const [modalOpen, setModalOpen] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -548,7 +566,8 @@ function FlowsView(props: {
                       <span className="dsh-df-lv dsh-df-lv-2">流程</span>
                       <span className="dsh-df-fname">{item.flow}</span>
                       <span className="dsh-df-meta">
-                        {item.nodeCount ?? 0} 节点 · 更新于 {formatTime(item.updatedAt)}
+                        {item.nodeCount ?? 0} {item.kind === 'interface-chain' ? '接口' : '页面'}节点 ·
+                        更新于 {formatTime(item.updatedAt)}
                       </span>
                       <span className="dsh-df-caret">▼</span>
                     </button>
@@ -565,13 +584,13 @@ function FlowsView(props: {
                               v{version.version}{current ? ' · 当前' : ''}
                             </span>
                             <span className="dsh-df-vmeta">
-                              {formatTime(version.created)} · {sourceLabel(version.source)} · {version.nodeCount ?? 0} 节点
+                              {formatTime(version.created)} · 由 {sourceLabel(version.source)} · {version.nodeCount ?? 0} 节点
                               {version.unreadable === undefined ? '' : ` · 读不出来：${version.unreadable}`}
                             </span>
                             <button
                               type="button"
                               className={current ? 'dsh-df-btn-primary' : 'dsh-df-btn'}
-                              onClick={() => { onOpenCanvas(item, version.version) }}
+                              onClick={() => { onOpenGraphs(item) }}
                             >
                               查看编排图
                             </button>
@@ -581,11 +600,6 @@ function FlowsView(props: {
                       {item.versions.length === 0 ? (
                         <div className="dsh-df-sub">该流程没有可读版本</div>
                       ) : null}
-                      <div className="dsh-df-ver">
-                        <button type="button" className="dsh-df-btn" onClick={() => { onOpenGraphs(item) }}>
-                          编排图列表{latest === undefined ? '' : `（${item.versions.length}）`}
-                        </button>
-                      </div>
                     </div>
                   </div>
                 )
@@ -595,12 +609,16 @@ function FlowsView(props: {
         )
       })}
 
-      <div className="dsh-df-pagerbar">
-        <span className="dsh-df-total">
-          共 <b>{total}</b> 条{kind === 'page' ? '页面编排' : '接口编排'}流程
-        </span>
-        <Pager page={page} pages={pages} onPage={onPage} />
-      </div>
+      <PagerBar
+        total={<>共 <b>{total}</b> 条{kind === 'page' ? '页面编排' : '接口编排'}流程</>}
+        unit="条"
+        page={page}
+        pages={pages}
+        pageSize={pageSize}
+        sizeOptions={sizeOptions}
+        onPage={onPage}
+        onPageSize={onPageSize}
+      />
 
       {modalOpen ? (
         <NewFlowModal
@@ -676,12 +694,14 @@ function GraphsView(props: {
   total: number
   page: number
   pageSize: number
+  sizeOptions: readonly number[]
   busy: boolean
   onPage: (page: number) => void
+  onPageSize: (size: number) => void
   onBack: () => void
   onOpenCanvas: (version: number) => void
 }): ReactNode {
-  const { flow, versions, total, page, pageSize, busy, onPage, onBack, onOpenCanvas } = props
+  const { flow, versions, total, page, pageSize, sizeOptions, busy, onPage, onPageSize, onBack, onOpenCanvas } = props
   const pages = Math.max(1, Math.ceil(total / pageSize))
   return (
     <>
@@ -740,15 +760,68 @@ function GraphsView(props: {
 
       {total === 0 ? <div className="dsh-df-empty">该流程还没有可读版本。</div> : null}
 
-      <div className="dsh-df-pagerbar">
-        <span className="dsh-df-total">共 <b>{total}</b> 张编排图</span>
-        <Pager page={page} pages={pages} onPage={onPage} />
-      </div>
+      <PagerBar
+        total={<>共 <b>{total}</b> 张编排图</>}
+        unit="张"
+        page={page}
+        pages={pages}
+        pageSize={pageSize}
+        sizeOptions={sizeOptions}
+        onPage={onPage}
+        onPageSize={onPageSize}
+      />
     </>
   )
 }
 
 /* ───────────────────────── 分页条 ───────────────────────── */
+
+/**
+ * 分页条（原型 .pagerbar）：左边「共 N …」+「每页 N 条」下拉，右边页码。
+ *
+ * 下拉是真的生效（改 pageSize 并回到第 1 页），不是原型里的装饰控件——
+ * 假控件比没有更糟：用户会以为点了没反应。
+ */
+function PagerBar(props: {
+  total: ReactNode
+  unit: string
+  page: number
+  pages: number
+  pageSize: number
+  sizeOptions: readonly number[]
+  onPage: (page: number) => void
+  onPageSize: (size: number) => void
+}): ReactNode {
+  const { total, unit, page, pages, pageSize, sizeOptions, onPage, onPageSize } = props
+  return (
+    <div className="dsh-df-pagerbar">
+      <span className="dsh-df-total">{total}</span>
+      <select
+        className="dsh-df-select dsh-df-pagesize"
+        value={pageSize}
+        aria-label={`每页${unit}数`}
+        onChange={(event) => { onPageSize(Number(event.target.value)) }}
+      >
+        {sizeOptions.map((size) => (
+          <option key={size} value={size}>{size} {unit}/页</option>
+        ))}
+      </select>
+      <Pager page={page} pages={pages} onPage={onPage} />
+    </div>
+  )
+}
+
+/** 右下角「层级图例」（原型 .legend）：编排页三级结构的自解释卡片。 */
+function HierarchyLegend(): ReactNode {
+  return (
+    <aside className="dsh-df-legend dsh-df-legend-stack">
+      <b>层级图例</b>
+      <div><span className="dsh-df-lv dsh-df-lv-1">网站 / 业务域</span><span>一级：先选网站，流程按业务域分组</span></div>
+      <div><span className="dsh-df-lv dsh-df-lv-2">流程</span><span>二级：页面编排 / 接口编排下的业务流程</span></div>
+      <div><span className="dsh-df-lv dsh-df-lv-3">版本</span><span>三级：流程的版本快照，点「查看编排图」进编排图列表（分页）→ 打开画布</span></div>
+    </aside>
+  )
+}
 
 function Pager(props: { page: number; pages: number; onPage: (page: number) => void }): ReactNode {
   const { page, pages, onPage } = props

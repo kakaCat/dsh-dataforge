@@ -286,3 +286,32 @@ R-1 的链契约（schema + 校验 + 版本 + 唯一写入口）已经稳定并�
 - **相关文档**：[R-2 需求](../requirement/r2-orchestration-canvas.md)、[R-1 设计](./r1-chain-model.md)、[ADR-0001 编排界面技术选型](../../adr/0001-orchestration-ui-stack.md)
 - **评审记录**：待评审
 - **变更历史**：2026-10-17 初稿（实现完成当日追写，含与原型的三处有意偏差）
+- 2026-10-17 追记①「面板整块不激活」的根因与修法：`@xyflow/react` 依赖的
+  `use-sync-external-store` 会把 `process.env.NODE_ENV !== 'production' && (dev 分支)` 留在
+  产物顶层，而浏览器里没有 `process` —— 宿主模块加载器一执行 factory 就抛
+  `process is not defined`，**整个 client 半都不激活**（现象：侧栏没有「数据采集」图标，
+  控制台之外没有任何提示，宿主半一切正常）。修法两层，缺一不可：
+  1. `tsdown.client.config.mjs` 加 `define: { 'process.env.NODE_ENV': '"production"' }`，
+     dev 分支被 DCE 掉；
+  2. `scripts/wrap-client.mjs` 加构建期守卫：`lib/client.cjs` 里只要残留裸 `process.` 就
+     **构建失败**并指到行号 —— 换依赖/改配置后不会静默发布一个必炸的 bundle。
+  排查经验：遇到「插件宿主半 active、client 半毫无痕迹」时，先看产物里有没有
+  `process.` / 顶层 JSON.parse / 顶层 `window`，再看模块图，别先怀疑 slot 注册。
+
+
+- 2026-10-17 追记②「与原型对齐」的修订（对照 `docs/prototypes/orchestration.html` 的渲染结果逐屏比对）：
+  - 补「层级图例」（右下角三级说明卡，网站/业务域 → 流程 → 版本）；
+  - 三处分页条补「每页 N 条」下拉（网站 9/18/36、流程 10/20/50、编排图 10/20/50），
+    **真实生效**（改 pageSize 并回到第 1 页），不做原型里那种点了没反应的装饰控件；
+  - 版本行的「查看编排图」改为进**编排图列表**（原型动线：版本 → 编排图列表 → 打开画布），
+    此前直接跳画布，等于把中间那层藏了；删掉原型没有的「编排图列表（n）」多余一行；
+  - `.dsh-df-btn-primary` 原来是 `width:100%; margin-top:12px` 的全局样式，把「+ 新建流程」
+    和列表行里的「查看编排图」撑成整行大按钮；改成紧凑按钮 + `.dsh-df-btn-block` 修饰类
+    （只有采集表单的提交按钮需要块级）；
+  - 画布：标题补「更新于 …」；页面链的边不再拿节点 id 当标签（原型的人写动线名链模型里
+    没有，宁可不显示）；调色板从 `Panel position="center-left"`（浮在画布正中、遮住节点）
+    移到左上工具条下面，且默认收起；
+  - 仍保留的偏差（都是**数据模型里没有**或**要新依赖**，不是没做）：站点卡第二行是
+    「业务域」而非 host（overview 无 host 字段）、无「自动取名」标签、无「导出 PNG」
+    （DOM→PNG 要引第三方库，违反零新依赖）、无「✎ 重命名」（改名要动目录与 meta，
+    R-1 的版本即不可变快照会破，见 M5）。
