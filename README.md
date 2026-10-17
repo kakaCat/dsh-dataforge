@@ -32,6 +32,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | 接口库 | `src/library/{import,store}.ts` | 采集 SQLite（只读）→ 卡文件；cardId 分配与归并 |
 | 接口链 | `src/chains/{schema,validate,store,compile}.ts` | 链 schema / 语义校验 / 版本快照 / page-chain 编译 |
 | 执行引擎 | `src/execute/{plan,coverage,request,binding,http,run}.ts` | 计划编译 / 缺参覆盖 / 请求构造 / 绑定求值 / HTTP 出口 / 调度器 |
+| 凭证注入 | `src/{execute,capture}/credentials.ts` | cookie 匹配纯函数 / 只读采集库 provider / 注入摘要（R-4 M1） |
 | 编排应用层 | `src/orchestration/application.ts` | 链读写、执行闸门与 IF-1/2 的错误码折叠与回执值 |
 
 ## 三道闸（调用纪律，写进 dataforge_run 工具描述）
@@ -153,11 +154,23 @@ runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result
 
 **错误码是契约**（只增不改名）：预检 `missing-params` / `chain-not-found` / `invalid-chain` / `not-executable` / `cycle` / `base-url-unresolved` / `inputs-invalid` / `confirm-required` / `execution-disabled` / `execution-unavailable`；运行期 `binding-path-not-found` / `binding-type-mismatch` / `binding-null` / `empty-wildcard` / `param-missing` / `param-type-mismatch` / `bad-url-template` / `node-timeout` / `node-network-error` / `node-http-error` / `node-auth-required` / `response-too-large` / `cancelled`。
 
-**安全面**：`credentials: 'omit'`（不继承 cookie jar）、头名命中脱敏集合即打码、请求/响应正文摘要各留 4 KiB、响应读取上限 `chainResponseLimitBytes`、只允许 http(s)、`chainRunEnabled` 全局开关。**卡与链零凭证**；凭证注入与 401 换票归 R-4（本期 401 如实记 `node-auth-required`，不发空值、不重试）。
+**安全面**：`credentials: 'omit'`（不继承 cookie jar）、头名命中脱敏集合即打码、请求/响应正文摘要各留 4 KiB、响应读取上限 `chainResponseLimitBytes`、只允许 http(s)、`chainRunEnabled` 全局开关。**卡与链零凭证**；cookie 注入见下节（R-4 M1），401 换票仍归 R-4 M2。
 
 **不幂等**：同一参数重复调用就是新 run、新请求；写类节点不做自动整链重试（节点级 `retry` 只对 GET/HEAD/OPTIONS 生效）。取消后重跑必须重新确认。
 
 **长跑**：`jobs` 在场则以 `kind: 'dataforge-chain'` 起后台 job（`job_output` 看进度、`job_kill` 取消，终态 `killed`）；`jobs` 不在场则前台降级并在回执标 `degradedNotice`。
+
+### 凭证注入（R-4 M1：cookie 型）
+
+设计：[docs/projects/PRJ-0002/design/r4-credential-injection.md](docs/projects/PRJ-0002/design/r4-credential-injection.md)（M1 注入已实现；M2 换票、M3 硬化待做）。
+
+- **来源**：只读 `dataRoot/capture/capture.sqlite` 的 `credential_events`，**只按卡的 `sources[].captureId`** 查，不做全库兜底（A 站 cookie 不会发给 B 站）；
+- **匹配**：domain / path / secure / expires 四道门，同名同路径去重（更具体的域优先），排序可复现；
+- **注入点**：`buildRequest()` 之后、`httpRequest()` 之前；`cookie` 头与卡上已有值拼接，其它同名头以注入值为准；
+- **零留痕**：请求摘要里 `cookie` 恒为 `***`；响应正文摘要与 emitted 值会按已知凭证值再做一次脱敏（防服务端回显）；事件里只留 `credentials: { status, names, domains, captureIds, expired }`，**没有值**；
+- **401 诊断**：区分「注入了 N 个 cookie 但仍 401（可能过期，换票属 M2）」与「没有注入可用凭证（原因）」；
+- **诚实边界**：一期只采到 cookie（本机 48 条、0 条 token），`token-header` / `token-param` 卡不猜 Authorization，摘要标 `unsupported` 并提示补采集；
+- **回滚**：provider 缺席 = 回到 R-3 无凭证行为（`src/index.ts` 不装配即可），无需迁移。
 
 ### 编排页签（面板内可视化编辑）
 
