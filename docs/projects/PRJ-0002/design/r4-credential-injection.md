@@ -18,8 +18,8 @@ updated: 2026-10-17
   1. **M1 注入**：执行期从一期采集库（`capture.sqlite` 的 `credential_events`）按「卡的来源 captureId + 目标 origin」解析 cookie，在 `buildRequest()` 之后、`httpRequest()` 之前把 `cookie` 头注入；值只在进程内过手，运行记录只留名字/来源，不留值。
   2. **M2 换票**：401 时执行一条**显式声明的登录链**（普通 `interface-chain`，经 `dataforge_chain_run` 的 `relogin` 运行参数传入），从登录响应收割 `set-cookie` 进本次运行的内存 cookie jar，单飞换票后重放原请求一次；登录链的账号/密码来自运行期槽位，不落链文件、不写运行记录。
   3. **M3 硬化**：换票 cookie 持久化（0600、按 origin）、零泄漏扫描门、跨运行节流、token 型凭证补课。
-- **本期实际落地**：M1（cookie 注入）+ M2（401 换票）+ M3 的持久化与扫描门（2026-10-17）。M3 剩余项（token 补课、跨运行节流、运行级缓存）的接口与失败语义仍按本设计推进。
-- **关键决策（回答需求 Q1）**：**cookie 型先行，token 型如实拒绝**。一期采集只落 cookie（本机实查：48 条 `cookie`、0 条 `token`/`localStorage`、0 条 `login_sessions`），token 型站点在 M1 不伪造注入，回执明说「token 型凭证未采集」；补采集是 M3 的前置，不在 R-4 里偷做。
+- **本期实际落地**：M1（cookie 注入）+ M2（401 换票）+ M3 的持久化/扫描门/token 补采与注入/运行级缓存/跨运行单飞（2026-10-17）。诚实边界：body token 与 localStorage token 只记录不注入（浏览器采集点缺失，不伪造）。
+- **关键决策（回答需求 Q1）**：**cookie 型先行，token 型先拒绝、M3 再补**。M1 只采到 cookie 时不伪造注入；M3 补采 `Authorization`/query token 后支持 token-header/token-param 注入，body/localStorage 仍不猜。
 - **影响面**：新增 `src/execute/credentials.ts`（纯函数 + 契约）与 `src/capture/credentials.ts`（只读采集库的 provider）；`src/execute/run.ts` 增加注入点与 401 诊断；`src/orchestration/application.ts` 加一个可选依赖缝；`src/index.ts` 装配。**不改**链/卡文件格式，**不新增 npm 依赖**，**不加数据库表**（M1）。
 
 ## 背景与问题  serves: 全文
@@ -303,7 +303,7 @@ provider 不抛异常，因此没有对外错误码；内部失败一律折成 `
 |---|---|---|
 | 无凭证 / 库不可用 / 卡无来源 | `none` | 继续发请求；若 401，回执说「未注入可用凭证」 |
 | 匹配到但全过期 | `expired` | 继续发请求；若 401，回执说「凭证可能过期」 |
-| token 型凭证 | `unsupported` | 继续发请求；回执说「token 型一期未采集」 |
+| token 型凭证 | `unsupported`（M1；M3 起 token-header/token-param 改为 `applied`） | 继续发请求；M3 起按采集到的 token 注入，body/localStorage 仍如实「未支持」 |
 | JSON 坏行 | `none`（跳过坏行） | 同无凭证；不因单条坏数据炸整条链 |
 
 **兼容性**
@@ -524,7 +524,7 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 |---|---|---|---|---|
 | M1 | `execute/credentials.ts` 纯函数 + `capture/credentials.ts` provider + `run.ts` 注入点 + 401 诊断 + 单测/e2e | 本地 HTTP 服务收到注入 cookie；事件全文无凭证原文；provider 缺席行为与 R-3 一致；typecheck/test/build 全绿 | yunpeng | 2026-10-18 |
 | M2 | `relogin` 运行参数 + Set-Cookie 收割 + 内存 jar + 单飞 + 重放一次 + 敏感模式 + 同源/自环保护 + `relogin-*` 错误码 | 401 → 换票 → 重放成功；换票失败中止且文案含「需人工重新登录」；并发 401 只换一次；登录链参数/正文/token 不进留痕 | yunpeng | 已完成（2026-10-17） |
-| M3 | ✅ 换票持久化 jar（0600/按 origin）+ 零泄漏扫描门；⏳ token 型补课、跨运行节流、运行级缓存 | 换票跨运行复跑通过（第二次不再登录）；扫描门进 `pnpm test`；token/节流仍待做 | yunpeng | 部分完成（2026-10-17） |
+| M3 | ✅ 换票持久化 jar（0600/按 origin）+ 零泄漏扫描门 + token 补采与注入（Authorization/query）+ 运行级缓存 + 跨运行换票单飞；⏳ body token 注入、localStorage 采集点 | 换票跨运行复跑通过；扫描门进 `pnpm test`；token-header/token-param 注入本地服务断言通过；body/localStorage 如实 `unsupported` | yunpeng | 已完成（2026-10-17，body/localStorage 为诚实边界） |
 
 ## 需求追溯  serves: 全文
 
@@ -543,9 +543,9 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 |---|---|
 | 为什么不在 `buildPlan()` 里判凭证？ | 计划是纯函数、dry-run 与真跑共用，不能读盘。凭证是运行期事实（会过期、会换票），只能在节点发出前解析。计划卡因此不承诺「一定带得上凭证」，只承诺「不会发空值」。 |
 | 为什么 provider 缺席不是错误？ | R-3 的既有调用方（单测、无采集环境的部署）不该因为 R-4 加一层就全挂。provider 是注入式增强，缺席 = 回到无凭证执行；401 仍然诚实。 |
-| 为什么 token 型直接拒绝，不做「猜一个 Authorization」？ | token 的 scheme（Bearer/Basic/自定义）、位置（header/query/body）、刷新方式都因站点而异。一期没采到 token 值，猜一个只会制造「看起来带了凭证」的假象。回执明确说「未采集」比伪造更安全。 |
+| 为什么 token 型不「猜一个 Authorization」？ | token 的 scheme（Bearer/Basic/自定义）、位置（header/query/body）、刷新方式都因站点而异。M1/M2 没采到 token 值时不伪造；M3 只注入采集到的原文（header/query），body/localStorage 仍如实 `unsupported`。回执明确说「未采集」比伪造更安全。 |
 | 为什么采集库里的 cookie 是明文，M1 不加密？ | 一期红线是「只存本地、不出壳」，不是「加密存储」；加密需要密钥管理决策（系统钥匙串/环境变量），属于独立安全需求。M1 不改变存储形态，避免把「怎么加密」混进「怎么注入」。 |
-| 最可能被投诉什么？ | 「为什么我的链还是 401」——因为一期只采到 cookie、没采到 token/登录卡，M1 只解决 cookie 型；回执必须把「没带」与「带了仍 401」说清楚，不能让用户以为注入没生效。 |
+| 最可能被投诉什么？ | 「为什么我的链还是 401」——M1 只解决 cookie 型；M3 补了 Authorization/query token，但 body/localStorage token 仍不注入。回执必须把「没带」「带了仍 401」「token 未支持」说清楚，不能让用户以为注入没生效。 |
 | 6 个月后会成为什么负担？ | 凭证解析散落成第二个「采集库读取面」：M1 只读 `credential_events`，若 M3 加持久化/缓存，必须继续收在 `capture/credentials.ts`，不许在执行层直接开 SQLite。 |
 | 流量涨 10 倍先坏在哪里？ | 每节点一次 SQLite 打开/查询，节点数上千时先坏在文件句柄与查询开销；M3 用运行级缓存兜底，不改接口。 |
 | 谁半夜被叫起来、手上有什么？ | 本地工具没有值班面；最坏是用户发现 401。手上证据：`step.start.data.credentials`（带没带、哪些名字）+ 响应摘要（状态码/错误体），足以判断是凭证问题还是业务问题。 |
@@ -582,14 +582,17 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
   - [x] 敏感模式：登录链 `run.json.params` 值写成 `***`，请求/响应正文 `[已脱敏]`，事件全文无密码/token；
   - [x] 同源 + 自环保护：跨源 `relogin-unavailable`、自环 `relogin-cycle`，均不发登录请求。
 
-- M3（2026-10-17，部分完成）：
-  - [x] 全量 `pnpm test`：437 passed / 3 skipped；`pnpm typecheck` 0；`pnpm build` 通过；
+- M3（2026-10-17，已完成；body/localStorage 为诚实边界）：
+  - [x] 全量 `pnpm test`：531 passed / 3 skipped；`pnpm typecheck` 0；`pnpm build` 通过；
   - [x] 持久化 jar：文件 0600、目录 0700、按 origin 隔离、同名覆盖、`Max-Age` 优先、坏文件降级（`test/capture/credential-store.test.ts`）；
   - [x] 换票跨运行复跑：第二次运行直接带新 cookie，不再触发登录链（`test/orchestration/relogin.test.ts`）；
   - [x] provider 合并持久化 cookie（摘要 `persisted` 计数），采集库缺席时可兜底（`test/capture/credentials.test.ts`）；
   - [x] 零泄漏扫描门：`dataRoot` 下除持久化 jar 外所有文件 + 工具回执，密码/token/新 cookie 原文零命中；
-  - [ ] token 型凭证补课（`Authorization`/localStorage）；
-  - [ ] 跨运行换票节流 + 运行级缓存。
+  - [x] token 补采：采集收口扫 `request_samples`，header `authorization`/`proxy-authorization` 与 URL query token 落 `credential_events(kind='token')`（body token 只检测）；`test/capture/token-harvest.test.ts` 11 例；
+  - [x] token 注入：`token-header` 注入 Authorization 原值、`token-param` 注入 URL query，摘要只留名字、事件零原文（`test/execute/token-credentials.test.ts` 13 例）；
+  - [x] 运行级缓存：按 db 主文件 + `-wal` 边车 + jar 的 `mtimeMs:size` 失效（`test/capture/credentials-cache.test.ts` 7 例）；
+  - [x] 跨运行换票单飞：按「主链 origin + 登录链 site/flow」跨运行单飞（`test/execute/throttle.test.ts` 6 例 + `orchestration/application.ts` 接线）；
+  - [ ] body token 注入（本期如实 `unsupported`）、localStorage token 采集点（一期浏览器采集点没有，不伪造）。
 
 ## 附录  serves: 全文
 

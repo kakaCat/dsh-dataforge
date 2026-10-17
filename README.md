@@ -15,10 +15,12 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
   └─ dataforge_capture* / dataforge_browser_*   浏览器只活在采集期：页面上的 XHR 成卡
   └─ dataforge_library_import                   采集卡 → 项目接口库（稳定 cardId、跨 run 归并）
   └─ dataforge_chain_upsert / dataforge_chain_get  接口链：版本快照、绑定即拓扑依赖
+  └─ dataforge_chain_bind                         绑定回写：probe 发现的边 → 新版本（不手抄 YAML）
   └─ dataforge_chain_run / dataforge_chain_runs    执行：拓扑调度 + 纯 HTTP 直调 + 运行留痕
   └─ dataforge_chain_probe                        首跑：单节点试探 + 每个值带来源 + 写操作确认闸
   └─ dataforge_chain_crystallize                  结晶：三分类草案 + 用户确认 + 入参槽位写回
   └─ dataforge_chain_diagnose                     复跑诊断：失败节点 / 绑定边 / 上游状态 / 下一步
+  └─ dataforge_chain_compare                      复跑对照：两次 run 的入参/出参/节点差异
         │
         ▼  编排/执行/复跑一律走「接口卡模板 + 凭证卡」＋纯 HTTP，不再开浏览器
 ```
@@ -35,10 +37,12 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | 接口库 | `src/library/{import,store}.ts` | 采集 SQLite（只读）→ 卡文件；cardId 分配与归并 |
 | 接口链 | `src/chains/{schema,validate,store,compile}.ts` | 链 schema / 语义校验 / 版本快照 / page-chain 编译 |
 | 执行引擎 | `src/execute/{plan,coverage,request,binding,http,run}.ts` | 计划编译 / 缺参覆盖 / 请求构造 / 绑定求值 / HTTP 出口 / 调度器 |
-| 凭证注入 | `src/{execute,capture}/credentials.ts` | cookie 匹配纯函数 / 只读采集库 provider / 注入摘要（R-4 M1） |
+| 凭证注入 | `src/{execute,capture}/{credentials,token-harvest,throttle}.ts` | cookie/token 匹配与注入 / token 补采 / 运行级缓存 / 换票单飞（R-4 M1/M3） |
 | 首跑试探 | `src/{execute,orchestration}/{probe,explore}.ts` | 单节点请求 / 值来源校验 / 缺参与写闸 / `probe-run` 留痕（R-5 M1） |
+| 绑定回写 | `src/orchestration/bind.ts` | probe outputs → 绑定边合并（to 相同替换）→ `saveChain` 新版本（R-5 M2） |
 | 结晶复跑 | `src/{execute,orchestration}/crystal.ts` | 三分类草案 / 铁律 / 确认闸 / `saveChain` 槽位写回 / `crystal-run` 审计（R-6 M1） |
 | 复跑诊断 | `src/orchestration/diagnose.ts` | 失败节点 / 入边 / 上游状态 / 按错误码给建议（R-6 M2） |
+| 复跑对照 | `src/orchestration/compare.ts` | 两次 `chain-run` 的入参 / 节点出参 / 状态差异投影（R-6 M2） |
 | 编排应用层 | `src/orchestration/application.ts` | 链读写、执行闸门与 IF-1/2 的错误码折叠与回执值 |
 
 ## 三道闸（调用纪律，写进 dataforge_run 工具描述）
@@ -141,13 +145,14 @@ dataforge_capture(task_type=action, entry_url="https://目标站/", confirm=true
 | `<workspace>/.dsh/dataforge/library/cards/<cardId>.yaml` | 一张接口卡一个文件；`index.yaml` 是 cardId → 文件/归并键/站点的指针 |
 | `<workspace>/.dsh/dataforge/chains/<site>/<flow>/v<n>.yaml` | 一个版本一个文件，**版本即不可变快照**，目录即历史 |
 
-### 五个工具
+### 编排工具（六个）
 
 | 工具 | 干什么 | 失败门 |
 |---|---|---|
 | `dataforge_library_import` | 采集卡 → 项目接口库；同 `mergeKey` 跨 run 归并，分配稳定 cardId | `no-capture-data`（采集库没卡）；坏卡跳过不炸批 |
 | `dataforge_chain_upsert` | 唯一链写入口：schema + 语义校验全过才落盘为新版本 | `invalid-chain`（逐条指到 `nodes[i]`/`edges[j]`）、`card-not-imported` |
 | `dataforge_chain_get` | 回读链（缺省最新版本）；`export=true` 原文导出 | `chain-not-found`、`invalid-chain`（手改坏，可回读旧版本） |
+| `dataforge_chain_bind` | 绑定回写：只给边，`to` 相同替换、其余新增，自增版本 | `chain-not-found`、`invalid-chain`、`card-not-imported`（零落盘） |
 | `dataforge_chain_run` | **唯一执行入口**：预检 → 计划卡 → 确认 → 拓扑调度直调 HTTP | `missing-params` / `chain-not-found` / `invalid-chain` / `not-executable` / `cycle` / `base-url-unresolved` / `inputs-invalid` / `confirm-required` / `execution-disabled` / `execution-unavailable`（都不发请求） |
 | `dataforge_chain_runs` | 按链列运行留痕（读 `run.json` 的 `chain` 段过滤，状态现折叠） | 空态是 `ok:true` + `notice`；坏 `run.json` 跳过并计数 |
 
@@ -185,23 +190,30 @@ runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result
 - **数组选择**：边可写 `pick: { match: { field, equals }, field? }`，从数组出参里按字段值选元素再取字段（替代脆弱的 `list[3]` 下标）；
 - **鉴权误判修正**：采集期页面脚本拿不到 `cookie` 头时，卡可能被标成 `auth: none`；可在卡文件里把它改成 `cookie-session`，执行期就会按来源 captureId 注入本地 cookie。
 
-**安全面**：`credentials: 'omit'`（不继承 cookie jar）、头名命中脱敏集合即打码、请求/响应正文摘要各留 4 KiB、响应读取上限 `chainResponseLimitBytes`、只允许 http(s)、`chainRunEnabled` 全局开关。**卡与链零凭证**；cookie 注入与 401 换票见下节（R-4 M1/M2）。
+**安全面**：`credentials: 'omit'`（不继承 cookie jar）、头名命中脱敏集合即打码、请求/响应正文摘要各留 4 KiB、响应读取上限 `chainResponseLimitBytes`、只允许 http(s)、`chainRunEnabled` 全局开关。**卡与链零凭证**；cookie/token 注入与 401 换票见下节（R-4 M1/M3）。
 
 **不幂等**：同一参数重复调用就是新 run、新请求；写类节点不做自动整链重试（节点级 `retry` 只对 GET/HEAD/OPTIONS 生效）。取消后重跑必须重新确认。
 
 **长跑**：`jobs` 在场则以 `kind: 'dataforge-chain'` 起后台 job（`job_output` 看进度、`job_kill` 取消，终态 `killed`）；`jobs` 不在场则前台降级并在回执标 `degradedNotice`。
 
-### 凭证注入与自动换票（R-4 M1/M2）
+### 凭证注入与自动换票（R-4 M1/M2/M3）
 
-设计：[docs/projects/PRJ-0002/design/r4-credential-injection.md](docs/projects/PRJ-0002/design/r4-credential-injection.md)（M1 注入、M2 换票、M3 持久化与扫描门已实现；token 补课/跨运行节流待做）。
+设计：[docs/projects/PRJ-0002/design/r4-credential-injection.md](docs/projects/PRJ-0002/design/r4-credential-injection.md)（M1 注入、M2 换票、M3 持久化 + token 补采与注入 + 运行级缓存 + 跨运行单飞已实现；body/localStorage token 只记录不注入）。
 
 - **来源**：只读 `dataRoot/capture/capture.sqlite` 的 `credential_events`，**只按卡的 `sources[].captureId`** 查，不做全库兜底（A 站 cookie 不会发给 B 站）；
-- **匹配**：domain / path / secure / expires 四道门，同名同路径去重（更具体的域优先），排序可复现；
-- **注入点**：`buildRequest()` 之后、`httpRequest()` 之前；`cookie` 头与卡上已有值拼接，其它同名头以注入值为准；
-- **零留痕**：请求摘要里 `cookie` 恒为 `***`；响应正文摘要与 emitted 值会按已知凭证值再做一次脱敏（防服务端回显）；事件里只留 `credentials: { status, names, domains, captureIds, expired }`，**没有值**；
-- **401 诊断**：区分「注入了 N 个 cookie 但仍 401（可能过期）」与「没有注入可用凭证（原因）」；传了 `relogin` 时自动进入换票；
-- **诚实边界**：一期只采到 cookie（本机 48 条、0 条 token），`token-header` / `token-param` 卡不猜 Authorization，摘要标 `unsupported` 并提示补采集；
+- **匹配**：cookie 走 domain / path / secure / expires 四道门，同名同路径去重（更具体的域优先），排序可复现；token 按卡的 `auth` 与 `authEvidence` 名字匹配（缺省 authorization）；
+- **注入点**：`buildRequest()` 之后、`httpRequest()` 之前；`cookie` 头与卡上已有值拼接，其它同名头以注入值为准；token-param 以 URL 序列化拼 query（同名参数覆盖，正确编码）；
+- **零留痕**：请求摘要里 `cookie` 恒为 `***`；token-param 的 query 参数名保留、值打码；响应正文摘要与 emitted 值会按已知凭证值再做一次脱敏（防服务端回显）；事件里只留 `credentials: { status, header, names, domains, captureIds, expired }`，**没有值**；
+- **401 诊断**：区分「注入了 N 个 cookie / 注入了 authorization 头 / 注入了 query token 但仍 401」与「没有注入可用凭证（原因，含 token 未采集）」；传了 `relogin` 时自动进入换票；
 - **回滚**：provider 缺席 = 回到 R-3 无凭证行为（`src/index.ts` 不装配即可）；不传 `relogin` = 回到 M1 行为，无需迁移。
+
+**token 补采与注入（M3）**：
+
+- 采集收口（`dataforge_capture` 自主任务与 `dataforge_browser_close`）会扫本 captureId 的请求样本：`authorization` / `proxy-authorization` 头原样落 `credential_events(kind='token')`；URL query 的 token 类参数（`access_token`/`*_token` 等）一并落库；JSON body token 只检测落库；
+- 注入：`token-header` 卡注入 Authorization（保留 `Bearer`/`Basic` 原文，不猜 scheme）；`token-param` 卡把 token 拼进 URL query；**body token 与 localStorage token 本期只记录、不注入**（回执如实 `unsupported`，不伪造）；
+- 采集库只读、凭证值只进出站请求与 DB `value_json`；事件里的 token query 值已打码；
+- **运行级缓存**：`createCaptureCredentialProvider({ cache: true })`（`src/index.ts` 已开）按 db 主文件 + `-wal` 边车 + 持久化 jar 的 `mtimeMs:size` 缓存行；采集库变化自动失效，文件被删沿用缓存（同一运行不丢凭证）；
+- 边界：只做进程内缓存与单飞，不做跨进程锁。
 
 **自动换票（M2）**：给 `dataforge_chain_run` 传一条普通接口链作为登录链：
 
@@ -219,9 +231,10 @@ runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result
 - 登录链以**敏感模式**执行：`run.json.params` 的值写 `***`、请求/响应正文摘要 `[已脱敏]`、`emitted`/绑定预览不落值；账号密码只从 `relogin.inputs` 进内存，**不写链、不写运行记录**；
 - 安全边界：登录链与主链必须**同源**（拒绝跨站复用凭证）；`relogin.site/flow` = 主链自身 → `relogin-cycle`；
 - 失败语义：登录链不存在/不可用 → `relogin-unavailable`；登录链失败或没有下发 `set-cookie` → `relogin-failed`，回执固定带「需人工重新登录并更新凭证」；换票后重放仍 401 → 中止，不二次换票；
-- 并发：同一运行内两个节点同时 401，只执行一次登录链，其它节点等结果。
+- 并发：同一运行内两个节点同时 401，只执行一次登录链，其它节点等结果（M2）；**跨运行/跨会话也会按「主链 origin + 登录链 site/flow」单飞**（M3），同一登录接口不会被并发打爆；
+- 边界：登录链只收割 `set-cookie`；token 型站点 401 时换票能力取决于登录接口是否下发可注入的凭证（本期未扩展）。
 
-**换票持久化（M3 部分）**：
+**换票持久化（M3）**：
 
 - 换票成功后把 `set-cookie` 写入 `<dataRoot>/credentials/cookies.json`：目录 0700、文件 0600、**按 origin 隔离**、原子写；
 - 下一次运行由 provider 按目标 origin 读回，同名覆盖采集期的旧 cookie；采集库缺席时也能靠持久化 jar 兜底；
@@ -264,14 +277,32 @@ runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result
 **成功时返回**：请求/响应摘要、耗时、尝试次数、卡出参的实际值（`outputs`，用来发现绑定边）、逐值来源（`provenance`）。下一步：
 
 ```text
-probe 试探 → 读 outputs 发现绑定 → dataforge_chain_upsert 写边（R-1 校验）→ dataforge_chain_run 整链
+probe 试探 → 读 outputs 发现绑定 → dataforge_chain_bind 回写边（只给边，R-1 校验）→ dataforge_chain_run 整链
 ```
 
 **留痕**：每次 probe 一条 `runs/<runId>/`，`run.json` 的 `kind: probe-run` + `probe.explorationId`，同一次首跑的多发 probe 用同一个 explorationId 串起来。`dataforge_status` 可直接读。
 
 **诚实边界**：probe 不消费绑定边、不缓存上游响应、不自动猜值、不自动推断绑定；probe 也不换票（401 会提示走 `dataforge_chain_run` 的 `relogin`）。
 
-### 结晶与复跑（R-6 M1）
+### 绑定回写（R-5 M2：dataforge_chain_bind）
+
+首跑 probe 拿到 `outputs` 后，不需要手抄整份链 YAML——只给「边」：
+
+```json
+{
+  "site": "智慧供应链 SCM", "flow": "采购下单",
+  "edges": [
+    { "from": "query-material.body.items[0].internalId", "to": "create-order.body.lines[0].materialId" },
+    { "from": "query-material.body.items[0].fs_id", "to": "create-order.body.fid_list", "transform": "array-json" }
+  ]
+}
+```
+
+- **合并语义**：`to` 相同 = 重写这条绑定（替换，不叠加两条指向同一入参的边）；`from/to/transform/pick` 全同 = 未变化；其余新增；同一次调用 `to` 重复以后者为准；
+- **写链纪律不打折**：仍只经 `saveChain`——卡引用、两端字段存在性、成环、绑定与常量互斥、僵尸槽位全部校验，失败**零落盘**并逐条给 issues（指向 `edges[i]`）；版本只增不删，旧版本可回读；
+- **内容无变化也落新版本**：`saveChain` 无内容去重，回执用 `added/replaced/unchanged` 说明原因；失败码复用 `chain-not-found` / `invalid-chain` / `card-not-imported`。
+
+### 结晶与复跑（R-6 M1/M2）
 
 首跑 probe 留下的「值 + 来源」在这里变成链资产：
 
@@ -313,6 +344,19 @@ dataforge_chain_diagnose(runId)
 ```
 
 只读，不重跑、不改链。真实站点联调步骤见 [docs/projects/PRJ-0002/plan/real-site-acceptance.md](docs/projects/PRJ-0002/plan/real-site-acceptance.md)。
+
+**复跑对照（R-6 M2）**：诊断回答「断在哪」，对照回答「换入参复跑后什么变了」：
+
+```text
+dataforge_chain_compare(run_ids: [首跑 runId, 复跑 runId])
+  → runs：两侧链版本 / params / 状态 / failedNode
+  → inputs：链级入参逐槽位差异（谁从 A 换成了 C）
+  → emitted：各节点出参差异（链生成值是否重新求解、不是首跑缓存）
+  → nodes：节点状态 / HTTP / 耗时对照
+  → summary + hints：版本不同、入参变化、失败节点变化等提示
+```
+
+只读，不重跑、不发请求；敏感键（password/token/authorization/cookie 等）一律 `***`，不投影 header。失败码：`invalid-run-ids` / `run-not-found` / `not-chain-run`。
 
 ### 编排页签（面板内可视化编辑）
 

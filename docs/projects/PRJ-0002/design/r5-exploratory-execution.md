@@ -289,7 +289,7 @@ agent 读 outputs → 用 dataforge_chain_upsert 写绑定边 → dataforge_chai
 | 里程碑 | 内容 | 出口判据 | 负责人 | 目标日期 |
 |---|---|---|---|---|
 | M1 | `execute/probe.ts` + `orchestration/explore.ts` + `dataforge_chain_probe` + 来源校验 + 写闸 + 留痕 | 本地服务：缺参 paused、写闸零请求、成功 probe 带 provenance/outputs、run 可回读；typecheck/test/build 全绿 | yunpeng | 已完成（2026-10-17） |
-| M2 | 绑定回写便捷入口（`dataforge_chain_bind` 或 upsert 提示增强）+ 首跑任务测试 | agent 不手写 YAML 也能把 probe 发现的边写回；真实链首跑一次 | yunpeng | 2026-10-21 |
+| M2 | 绑定回写便捷入口（`dataforge_chain_bind` 或 upsert 提示增强）+ 首跑任务测试 | agent 不手写 YAML 也能把 probe 发现的边写回；真实链首跑一次 | yunpeng | 已完成（2026-10-17）：新增 `dataforge_chain_bind`（只给边、to 相同替换、只经 saveChain） |
 | M3 | 探索组汇总（一次看全组尝试）+ 有限自动重试策略 + 面板展示 | 首跑从 N 次 probe 到整链成功可复盘；无 P0/P1 | yunpeng | 2026-10-25 |
 
 ## 需求追溯  serves: 全文
@@ -311,7 +311,7 @@ agent 读 outputs → 用 dataforge_chain_upsert 写绑定边 → dataforge_chai
 | agent 把猜的值标成 `user` 怎么办？ | 工具无法验证真人确认；只能强制 `agent-inferred` 带 evidence，并在 R-6 结晶前要求二次确认。这是诚实边界，不伪造。 |
 | 为什么 probe 不消费绑定边？ | 首跑时绑定往往还没建；probe 要能独立试一个节点。上游来的值用 `source:'upstream'` + evidence 手填，等链补好后再跑整链。 |
 | 敏感值怎么识别？ | 字段路径命中 `password/passwd/pwd/secret/token/authorization/cookie/api-key` 等词即脱敏；这只是兜底，凭证本身走 R-4。 |
-| 6 个月后会成为什么负担？ | 多一个 probe 入口与一种 run kind；只要保持「probe 不写链、绑定回写只走 upsert」，负担可控。 |
+| 6 个月后会成为什么负担？ | 多一个 probe 入口与一种 run kind；只要保持「probe 不写链、绑定回写只走 dataforge_chain_bind（仍过 R-1）」，负担可控。 |
 | 流量涨 10 倍先坏在哪里？ | 目标站限流与 `runs/` 目录增长；probe 没有自动循环，先坏在 agent 调用频率，而不是插件吞吐。 |
 | 数据错了怎么修？ | run 是 append-only 证据，不改历史；修值后重新 probe / 重新 upsert 链版本。 |
 | 这个决定错了多久能发现？ | 若单节点 probe 不够用，第一次真实首跑就会暴露（需要跨节点缓存）；那时再补 M2 的探索组/断点。 |
@@ -321,7 +321,7 @@ agent 读 outputs → 用 dataforge_chain_upsert 写绑定边 → dataforge_chai
 | 问题 | 选项 | 负责人 | 截止 |
 |---|---|---|---|
 | Q1（需求原问题）agent 自主权边界 | **已决（M1）：`agent-inferred` 必须带依据，写操作只认 `confirm`；`user` 由 agent 声明，工具不验证真人** | yunpeng | 已决：2026-10-17 |
-| Q2 绑定回写用 upsert 还是新工具 | (a) 复用 `dataforge_chain_upsert`（M1 选择）；(b) 新增 `dataforge_chain_bind`（M2 评估） | yunpeng | M2 开工前 |
+| Q2 绑定回写用 upsert 还是新工具 | **已决（M2）：新增 `dataforge_chain_bind`**——只收边、按 `to` 合并，避免 agent 每次重抄整份 YAML；写仍只经 `saveChain` | yunpeng | 已决：2026-10-17 |
 | Q3 探索组是否需要汇总视图 | (a) 只按 `explorationId` 过滤 run（M1）；(b) 新增 `dataforge_explore_runs`（M3） | yunpeng | M3 开工前 |
 | Q4 是否缓存 probe 响应供后续复用 | (a) 不复用（M1，审计优先）；(b) 探索组内缓存（M2 评估） | yunpeng | M2 开工前 |
 
@@ -337,6 +337,12 @@ agent 读 outputs → 用 dataforge_chain_upsert 写绑定边 → dataforge_chai
   - [x] 成功后返回卡出参实际值（`body.items[*].internalId` = M-1）；
   - [x] 工具入口闸：执行开关/节点不存在/baseUrl 推不出/paused→executed（`test/orchestration/explore.test.ts`）；
   - [x] 注册第 17 个工具与首跑策略段（`test/index.test.ts`）。
+
+- M2（2026-10-17）：
+  - [x] `pnpm typecheck` 0；`pnpm test` 531 passed / 3 skipped；`pnpm build` 通过；
+  - [x] `dataforge_chain_bind` 落地并注册：`test/orchestration/bind.test.ts` 9 例——新增/幂等/替换/transform+pick 回读/三类非法边零落盘/多边与 `$inputs` 槽位边/page-chain 拒绝/坏形状兜底；
+  - [x] 写链纪律：只经 `saveChain`（R-1 校验），失败零落盘、issues 指到 `edges[i]`；版本只增不删；
+  - [x] 真实链首跑：百度网盘「文件列表探测 → 文件列表→分享」已走 probe→绑定→整链（`runs/probe-*`、`runs/chain-*` 留痕）。
 
 ## 附录  serves: 全文
 
