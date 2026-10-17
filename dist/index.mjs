@@ -1542,6 +1542,16 @@ const VOLATILE = /* @__PURE__ */ new Set([
 	"token"
 ]);
 const SEGMENT_PARAM = /\/(?:\d+|[a-f0-9][a-f0-9-]{19,})(?=\/|$)/gi;
+/**
+* `new URL()` 会把路径里的 `{}` 转义成 `%7B…%7D`。
+*
+* 模板占位符（`{p}`、`{id}`）必须原样保留：一旦落成 `%7Bp%7D`，入库后再归一化一次就完全
+* 认不出来了——链上要替换的 `{p}` 没了，执行期只能报「匿名占位符无法给值」。
+* 这里只还原**花括号**这一种转义，不动路径里别的 `%xx`（那可能是业务语义，比如 `%2F`）。
+*/
+function restorePlaceholderBraces(pathname) {
+	return pathname.replace(/%7B([A-Za-z0-9_]*)%7D/gi, "{$1}");
+}
 function normalizeUrlForTemplate(rawUrl) {
 	const u = new URL(rawUrl, "http://capture.local");
 	const seen = /* @__PURE__ */ new Map();
@@ -1549,7 +1559,7 @@ function normalizeUrlForTemplate(rawUrl) {
 		if (VOLATILE.has(k)) continue;
 		if (!seen.has(k)) seen.set(k, v);
 	}
-	const path = u.pathname.replace(SEGMENT_PARAM, "/{p}");
+	const path = restorePlaceholderBraces(u.pathname).replace(SEGMENT_PARAM, "/{p}");
 	const query = sortedParamsToString([...seen.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
 	return { urlTemplate: query === "" ? path : `${path}?${query}` };
 }
@@ -2976,14 +2986,54 @@ function libraryRoleOf(field) {
 function inputPathOf(field) {
 	return `${LOCATION_PREFIX[field.location ?? "body"] ?? "body"}.${normalizeFieldPath(field.field)}`;
 }
-function projectInputs(template) {
+/**
+* URL 模板的路径占位符 → 卡上的 `path.*` 入参名。
+*
+* 关键区别：采集期的 `pathParams` 记的是**采到的真实段值**（`['12345']`），不是参数名——
+* 拿它当字段名会产出 `path.12345` 这种垃圾，而且每采到一个新 ID 就多一条，字段表会无限膨胀。
+* 所以名字只能从**模板的占位符**来：`/orders/{p}/items` 里的 `{p}` 是采集期把「数字/长随机段」
+* 统一抽掉的匿名记号，按出现次序命名为 `p1`、`p2`…；`{id}` 这种具名占位符直接用名字。
+*/
+function pathParamNamesOf(urlTemplate) {
+	const path = urlTemplate.split("?")[0];
+	const names = [];
+	let anonymous = 0;
+	for (const segment of path.split("/")) {
+		const match = /^\{([A-Za-z0-9_]+)\}$/.exec(segment.trim());
+		if (match === null) continue;
+		const raw = match[1];
+		if (raw === "p") {
+			anonymous += 1;
+			names.push(`p${anonymous}`);
+			continue;
+		}
+		names.push(raw);
+	}
+	return names;
+}
+function projectInputs(template, urlTemplate) {
 	if (template === void 0) return [];
 	const out = [];
+	const seen = /* @__PURE__ */ new Set();
+	for (const name of pathParamNamesOf(urlTemplate)) {
+		const path = `path.${name}`;
+		if (seen.has(path)) continue;
+		seen.add(path);
+		out.push({
+			path,
+			type: "string",
+			required: true,
+			role: "input"
+		});
+	}
 	for (const field of template.fields) {
 		if (field.role === "credential") continue;
+		const path = inputPathOf(field);
+		if (seen.has(path)) continue;
+		seen.add(path);
 		const role = libraryRoleOf(field);
 		out.push({
-			path: inputPathOf(field),
+			path,
 			type: libraryTypeOf(field),
 			required: role === "input",
 			role,
@@ -3025,7 +3075,7 @@ function projectCard(card, relations) {
 			method: card.method,
 			urlTemplate
 		},
-		inputs: projectInputs(requestTemplate),
+		inputs: projectInputs(requestTemplate, urlTemplate),
 		outputs: projectOutputs(responseTemplate),
 		auth: auth.auth,
 		...auth.authEvidence === void 0 ? {} : { authEvidence: auth.authEvidence },
@@ -3129,10 +3179,6 @@ function mergeCard(existing, draft) {
 		changed
 	};
 }
-/** 卡是否已经把这次采集记进 sources（决定"未导入的 run"要不要再处理）。 */
-function alreadyLinked(card, captureId) {
-	return card.sources.some((source) => source.captureId === captureId);
-}
 /**
 * 导入接口库（IF-1）。
 *
@@ -3183,12 +3229,6 @@ function importLibrary(options) {
 			cardsByMergeKey.set(draft.identity.mergeKey, created.card);
 			createdIds.add(created.card.cardId);
 			touched.add(created.card.cardId);
-			captureIds.add(raw.captureId);
-			continue;
-		}
-		if (alreadyLinked(existing, raw.captureId)) {
-			unchanged.add(existing.cardId);
-			touched.add(existing.cardId);
 			captureIds.add(raw.captureId);
 			continue;
 		}
@@ -3766,6 +3806,7 @@ function dependencyPairs(doc) {
 		}
 		const from = splitBindingPath(edge.from);
 		const to = splitBindingPath(edge.to);
+		if (isInputSlotRef(edge.from)) continue;
 		if (from && to) pairs.push({
 			from: from.nodeId,
 			to: to.nodeId
