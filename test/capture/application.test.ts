@@ -85,7 +85,7 @@ it('single_page：闸放行 → job 跑完 → 样本/卡/cookie 落库，run=do
   expect(f.deps.store.countSamples(a.captureId as string)).toBe(1)
   const cards = f.deps.store.listCards(a.captureId as string)
   expect(cards).toHaveLength(1)
-  expect(cards[0]?.urlTemplate).toBe('/api/list:page=1')
+  expect(cards[0]?.urlTemplate).toBe('/api/list?page=1')
   expect(cards[0]?.responseTemplate?.codePath).toBe('err_no')
   expect(f.deps.store.listCredentials(a.captureId as string)).toHaveLength(1)
 })
@@ -140,4 +140,116 @@ it('status/result/cancel 投影', async () => {
   expect(captureResult(f.deps, 'cap_none', 'cards').notice).toContain('无记录')
   expect(captureCancel(f.deps, id).ok).toBe(true)
   expect(f.deps.store.getRun(id)?.status).toBe('cancelled')
+})
+
+it('A7：wire 样本落关系行（page×card×入参指纹），pageId 关联采集页', async () => {
+  const f = fixture()
+  const a = await startCapture(f.deps, { taskType: 'single_page', entryUrl: 'https://x.test/' })
+  await Promise.all(f.jobs.dones)
+  const rels = f.deps.store.listRelations(a.captureId as string)
+  expect(rels).toHaveLength(1)
+  expect(rels[0]?.pageUrl).toBe('https://x.test/')
+  expect(rels[0]?.pageId).toBeDefined()
+  expect(rels[0]?.paramsFingerprint).toMatch(/^[0-9a-f]{16}$/)
+  const page = f.deps.store.listPages(a.captureId as string)
+  expect(page.map((p) => p.url)).toContain('https://x.test/')
+  // 样本回指关系行：一条请求能回答「哪个页面 × 哪个接口 × 哪种形态」
+  const samples = f.deps.store.listSamples(a.captureId as string)
+  expect(samples[0]?.relationId).toBe(rels[0]?.id)
+  expect(f.deps.store.listRelationsByCard(rels[0]?.cardId ?? 'x').map((r) => r.id)).toContain(rels[0]?.id)
+})
+
+it('A8：卡带语义名 + 位置标注模板 + 鉴权标志（token 头探测到，值不入卡）', async () => {
+  const f = fixture()
+  const bound = startCapture(f.deps, { taskType: 'action', entryUrl: 'https://x.test/', confirm: true })
+  const a: Awaited<typeof bound> = await bound
+  f.lastBoundSink()?.({
+    ...WIRE,
+    requestHeaders: { authorization: 'Bearer sk-secret', 'content-type': 'application/json' },
+    requestPostData: '{"sku":"A1","ts":9}',
+    responseText: '{"err_no":0}',
+  })
+  f.lastBoundSink()?.({
+    ...WIRE,
+    url: 'https://x.test/api/list?page=2',
+    requestHeaders: { authorization: 'Bearer sk-secret', 'content-type': 'application/json' },
+    requestPostData: '{"sku":"A2","ts":9}',
+  })
+  const cards = f.deps.store.listCards(a.captureId as string)
+  expect(cards).toHaveLength(1)
+  const card = cards[0]
+  expect(card?.name).toBe('GET list')
+  expect(card?.authType).toBe('token-header')
+  expect(card?.authEvidence).toBe('header:authorization')
+  expect(JSON.stringify(card)).not.toContain('sk-secret')
+  const reqFields = card?.requestTemplate?.fields ?? []
+  const byField = new Map(reqFields.map((x) => [x.field, x]))
+  expect(byField.get('page')?.location).toBe('query')
+  expect(byField.get('sku')?.location).toBe('body')
+  expect(byField.get('sku')?.role).toBe('input')
+  expect(byField.get('content-type')?.location).toBe('header')
+  expect(byField.get('ts')).toBeUndefined()
+  const rels = f.deps.store.listRelations(a.captureId as string)
+  expect(rels).toHaveLength(2)
+  expect(rels[0]?.paramsFingerprint).not.toBe(rels[1]?.paramsFingerprint)
+})
+
+it('A9：样本超上限如实弃采并在 run 上附 notice', async () => {
+  const f = fixture()
+  const { SAMPLE_LIMIT_PER_RUN } = await import('../../src/capture/application.js')
+  const bound = startCapture(f.deps, { taskType: 'action', entryUrl: 'https://x.test/', confirm: true })
+  const a: Awaited<typeof bound> = await bound
+  const sink = f.lastBoundSink()
+  expect(sink).toBeDefined()
+  for (let i = 0; i < SAMPLE_LIMIT_PER_RUN + 5; i += 1) sink?.({ ...WIRE, url: `https://x.test/api/list?page=${i}` })
+  expect(f.deps.store.countSamples(a.captureId as string)).toBe(SAMPLE_LIMIT_PER_RUN)
+  const run = f.deps.store.getRun(a.captureId as string)
+  expect(run?.notice).toContain(`${SAMPLE_LIMIT_PER_RUN}`)
+  expect(run?.status).toBe('running')
+})
+
+it('FR-1.5：jobs 服务缺席 → 前台降级执行，回执附 degradedNotice，run 照常 done', async () => {
+  const f = fixture()
+  const deps: CaptureDeps = { ...f.deps, resolveJobs: () => undefined }
+  const a = await startCapture(deps, { taskType: 'single_page', entryUrl: 'https://x.test/' })
+  expect(a.accepted).toBe(true)
+  expect(a.degradedNotice).toContain('前台降级')
+  await vi.waitFor(() => {
+    expect(deps.store.getRun(a.captureId as string)?.status).toBe('done')
+  }, { timeout: 5_000 })
+  expect(deps.store.countSamples(a.captureId as string)).toBe(1)
+})
+
+it('回归：jobs 服务在但 start 抛错（无 agent 归属）→ 同样前台降级，绝不留僵尸 running 行', async () => {
+  const f = fixture()
+  const deps: CaptureDeps = {
+    ...f.deps,
+    resolveJobs: () => ({
+      start: () => { throw new Error('background jobs unavailable: no job controller serves this agent') },
+    }),
+  }
+  const a = await startCapture(deps, { taskType: 'single_page', entryUrl: 'https://x.test/' })
+  // 关键：面板路由没有 agent，这种「服务在但拒绝」正是线上形态；不能把异常冒给调用方
+  expect(a.accepted).toBe(true)
+  expect(a.degradedNotice).toContain('前台降级')
+  expect(a.degradedNotice).toContain('no job controller')
+  await vi.waitFor(() => {
+    expect(deps.store.getRun(a.captureId as string)?.status).toBe('done')
+  }, { timeout: 5_000 })
+  expect(deps.store.countSamples(a.captureId as string)).toBe(1)
+  expect(deps.store.getRun(a.captureId as string)?.notice).toContain('前台降级')
+})
+
+it('回归：前台执行本身失败 → run 收口为 failed（不留 running）', async () => {
+  const f = fixture()
+  const deps: CaptureDeps = {
+    ...f.deps,
+    resolveJobs: () => ({ start: () => { throw new Error('rejected') } }),
+    openCapturingPage: (async () => { throw new Error('chrome 起不来') }) as never,
+  }
+  const a = await startCapture(deps, { taskType: 'single_page', entryUrl: 'https://x.test/' })
+  await vi.waitFor(() => {
+    expect(deps.store.getRun(a.captureId as string)?.status).toBe('failed')
+  }, { timeout: 5_000 })
+  expect(deps.store.getRun(a.captureId as string)?.error).toContain('chrome 起不来')
 })

@@ -26,10 +26,14 @@ import { DataforgeError } from './shared/errors.js'
 import {
   defineBrowserActTool, defineBrowserCloseTool, defineBrowserOpenTool, defineBrowserSnapshotTool,
   defineCaptureCancelTool, defineCaptureResultTool, defineCaptureStatusTool, defineCaptureTool,
-  defineFlowsTool, defineRunTool, defineStatusTool,
+  defineChainGetTool, defineChainUpsertTool, defineFlowsTool, defineLibraryImportTool,
+  defineRunTool, defineStatusTool,
 } from './tools.js'
+import type { OrchestrationDeps } from './orchestration/application.js'
 import { openCapturingPage } from './capture/browser.js'
 import { CaptureStore } from './capture/store.js'
+import { startCapture } from './capture/application.js'
+import { PANEL_API_PREFIX, registerCapturePanelRoutes, type PanelRouteRegistrar } from './capture/panel-routes.js'
 import { SessionRegistry } from './capture/session.js'
 import type { CaptureDeps } from './capture/application.js'
 import type { DataforgeDeps } from './application.js'
@@ -122,6 +126,33 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
     openCapturingPage,
   }
 
+  // 编排域：接口库导入 + 链读写（卡与链都落在工作区 .dsh/dataforge/ 下，按 exec 解析工作区）。
+  const orchestrationDeps: OrchestrationDeps = {
+    captureDbPath: join(config.dataRoot, 'capture', 'capture.sqlite'),
+    resolveWorkspaceRoot,
+  }
+
+  // 面板数据面：/dashboard/api/dataforge 只读路由（webServer 惰性注入；服务缺席 → 工具面照常）。
+  anyCtx.inject?.(['webServer'], (webSvc) => {
+    const effect = webSvc['effect'] as ((fn: () => (() => void) | void, label?: string) => void) | undefined
+    const webServer = webSvc['webServer'] as PanelRouteRegistrar | undefined
+    if (webServer === undefined || typeof webServer.register !== 'function') {
+      logger?.info?.('webServer 服务不可用：采集面板数据路由未注册（工具面照常）')
+      return
+    }
+    const install = (): (() => void) => registerCapturePanelRoutes(webServer, {
+      store: captureDeps.store,
+      // FR-7.6：面板唯一写入口 = 单页采集；action/爬取只走 agent 会话入口。
+      startCapture: (args) => startCapture(captureDeps, args),
+    })
+    if (typeof effect === 'function') {
+      effect(install, `${name}: capture panel routes`)
+    } else {
+      install()
+    }
+    logger?.info?.(`采集面板数据路由已注册：${PANEL_API_PREFIX}（runs / cards / captures）`)
+  })
+
   anyCtx.inject?.(['tools'], (toolsService) => {
     const tools = toolsService['tools'] as { register?: (tool: unknown) => unknown } | undefined
     if (typeof tools?.register !== 'function') {
@@ -146,11 +177,14 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       defineBrowserActTool(captureDeps),
       defineBrowserSnapshotTool(captureDeps),
       defineBrowserCloseTool(captureDeps),
+      defineLibraryImportTool(orchestrationDeps),
+      defineChainUpsertTool(orchestrationDeps),
+      defineChainGetTool(orchestrationDeps),
     ]) {
       tools.register(tool)
     }
-    logger?.info?.(`已注册 11 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
-      + `（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
+    logger?.info?.(`已注册 14 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
+      + ` + library_import/chain_upsert/chain_get（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
   })
 
   // 常驻策略段：工具自述只在「打算调工具」时被读到，三道闸纪律得每轮在场。

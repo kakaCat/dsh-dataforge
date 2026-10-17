@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>接口库 · 页面原型</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --line: #e4e7ec;
+    --ink: #1d2129;
+    --ink-2: #4e5969;
+    --ink-3: #86909c;
+    --accent: #3b6ef0;
+    --accent-soft: #eaf0fe;
+    --ok: #16a34a;
+    --ok-soft: #e8f8f0;
+    --warn: #d97706;
+    --warn-soft: #fff4e5;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
+
+  /* ── 顶栏 ─────────────────────────────── */
+  .topbar { background: var(--card); border-bottom: 1px solid var(--line); padding: 0 28px; display: flex; align-items: center; gap: 28px; height: 52px; position: sticky; top: 0; z-index: 10; }
+  .brand { font-weight: 700; font-size: 14px; }
+  .brand em { font-style: normal; color: var(--accent); }
+  .tabs { display: flex; gap: 4px; height: 100%; }
+  .tab { display: flex; align-items: center; padding: 0 14px; color: var(--ink-2); text-decoration: none; border-bottom: 2px solid transparent; font-size: 13px; }
+  .tab.active { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+
+  .page { max-width: 1080px; margin: 0 auto; padding: 24px 28px 64px; }
+
+  .lv { font-size: 10px; font-weight: 700; letter-spacing: .05em; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+  .lv-1 { background: #eef2ff; color: #4f46e5; }
+  .lv-2 { background: #ecfdf5; color: #059669; }
+  .lv-3 { background: #fff7ed; color: #ea580c; }
+
+  .method { font: 700 10.5px var(--mono); border-radius: 5px; padding: 1px 7px; }
+  .method.GET { background: var(--ok-soft); color: var(--ok); }
+  .method.POST { background: var(--warn-soft); color: var(--warn); }
+  .mono { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+
+  /* ═══ 视图 A：选网站（一级） ═══ */
+  .view-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+  .view-head h1 { font-size: 17px; font-weight: 700; }
+  .view-head .sub { color: var(--ink-3); font-size: 12px; }
+
+  .site-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+  .site-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+  .site-card:hover { border-color: var(--accent); box-shadow: 0 4px 16px rgba(59,110,240,.10); }
+  .site-card .title { display: flex; align-items: center; gap: 8px; }
+  .site-card .title b { font-size: 14.5px; flex: 1; }
+  .site-card .host { font: 11.5px var(--mono); color: var(--ink-3); margin-top: 3px; }
+  .site-card .stats { display: flex; gap: 14px; margin-top: 12px; font-size: 11.5px; color: var(--ink-3); flex-wrap: wrap; }
+  .site-card .stats b { color: var(--ink-2); }
+  .site-card .foot { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--ink-3); }
+  .site-card .enter { color: var(--accent); font-weight: 600; font-size: 12px; }
+  .auto-tag { font-size: 10px; color: var(--warn); background: var(--warn-soft); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+
+  /* ═══ 视图 B：网站内（页面 → 接口） ═══ */
+  .crumb { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 12.5px; color: var(--ink-3); }
+  .crumb a { color: var(--accent); text-decoration: none; cursor: pointer; font-weight: 600; }
+  .site-banner { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 18px; margin-bottom: 16px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .site-banner .title { font-size: 15px; font-weight: 700; }
+  .site-banner .host { font: 11.5px var(--mono); color: var(--ink-3); }
+  .site-banner .stats { margin-left: auto; display: flex; gap: 14px; font-size: 11.5px; color: var(--ink-3); }
+  .site-banner .stats b { color: var(--ink-2); }
+
+  /* L2 页面节点 */
+  .page-node { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 14px; overflow: hidden; }
+  .page-node > header { display: flex; align-items: center; gap: 10px; padding: 12px 18px; background: linear-gradient(90deg, #f8faff, #fff); border-bottom: 1px solid var(--line); cursor: pointer; }
+  .page-node > header .pname { font-weight: 600; flex: 1; }
+  .page-node > header .purl { font: 11px var(--mono); color: var(--ink-3); word-break: break-all; }
+  .page-node > header .meta { color: var(--ink-3); font-size: 11px; white-space: nowrap; }
+  .caret { color: var(--ink-3); font-size: 11px; transition: transform .15s; }
+  .page-node.collapsed .caret { transform: rotate(-90deg); }
+  .page-node.collapsed .page-body { display: none; }
+  .page-body { padding: 12px 18px 14px; }
+
+  /* L3 接口卡：缩进 + 导轨线 */
+  .iface { position: relative; margin-left: 18px; padding-left: 16px; border-left: 2px solid var(--line); }
+  .iface + .iface { margin-top: 10px; }
+  .iface-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; cursor: pointer; transition: border-color .15s; }
+  .iface-card:hover { border-color: #b8c3d9; }
+  .iface.open .iface-card { border-color: var(--accent); border-radius: 10px 10px 0 0; border-bottom-style: dashed; }
+  .iface-head { display: flex; align-items: center; gap: 10px; }
+  .iface-head .name { font-weight: 600; flex: 1; }
+  .iface-url { font: 11.5px var(--mono); color: var(--ink-2); word-break: break-all; margin-top: 3px; }
+  .iface-chips { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--ink-3); flex-wrap: wrap; }
+  .iface-chips b { color: var(--ink-2); }
+
+  .iface-detail { display: none; border: 1px solid var(--accent); border-top: none; border-radius: 0 0 10px 10px; padding: 12px 16px; background: #fdfdff; }
+  .iface.open .iface-detail { display: block; }
+  .sec { margin-left: 12px; padding-left: 14px; border-left: 2px dashed #ead9c2; margin-bottom: 12px; }
+  .sec:last-child { margin-bottom: 0; }
+  .sec h3 { font-size: 12px; color: var(--ink-2); font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .sec h3 small { color: var(--ink-3); font-weight: 400; font-size: 11px; }
+
+  table.fields { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.fields th, table.fields td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; vertical-align: top; }
+  table.fields th { background: #f7f8fa; color: var(--ink-2); font-weight: 600; white-space: nowrap; }
+  .tag-unverified { color: var(--warn); font-size: 11px; }
+
+  /* 分页条 */
+  .pagerbar { display: flex; align-items: center; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
+  .pagerbar .total { font-size: 12px; color: var(--ink-3); }
+  .pagerbar .pages { display: flex; gap: 4px; margin-left: auto; }
+  .pagerbar .pg { min-width: 30px; text-align: center; border: 1px solid var(--line); background: var(--card); border-radius: 6px; padding: 3px 8px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
+  .pagerbar .pg.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .pagerbar .pg:disabled { opacity: .45; cursor: default; }
+  .pagerbar select { border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font-size: 12px; color: var(--ink-2); background: var(--card); }
+
+  .legend { position: fixed; right: 22px; bottom: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 11px; color: var(--ink-3); box-shadow: 0 4px 18px rgba(20,30,60,.08); }
+  .legend div { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+  @media (max-width: 980px) { .legend { display: none; } }
+
+  #view-site { display: none; }
+</style>
+</head>
+<body>
+
+<nav class="topbar">
+  <div class="brand">Data<em>Forge</em> · 数据采集</div>
+  <div class="tabs">
+    <a class="tab" href="quick-capture.html">快速采集</a>
+    <a class="tab active" href="#">接口库</a>
+    <a class="tab" href="sites.html">采集网站</a>
+    <a class="tab" href="orchestration.html">编排</a>
+  </div>
+</nav>
+
+<div class="page">
+
+  <!-- ═══ 视图 A：先选网站（一级分类） ═══ -->
+  <div id="view-sites">
+    <div class="view-head">
+      <h1>接口库</h1>
+      <div class="sub">接口按网站分类归档 · 采集时自动按 Host 分类并取名 · 请先选择一个网站</div>
+    </div>
+
+    <div class="site-grid">
+      <div class="site-card" onclick="enterSite()">
+        <div class="title"><span class="lv lv-1">网站</span><b>智慧供应链 SCM</b><span class="auto-tag">自动取名</span></div>
+        <div class="host">scm.example.com</div>
+        <div class="stats"><span>页面 <b>6</b></span><span>接口 <b>8</b></span><span>形态 <b>42</b></span><span>采集 <b>5</b> 次</span></div>
+        <div class="foot"><span>最近采集 10-17 12:04</span><span class="enter">进入 →</span></div>
+      </div>
+
+      <div class="site-card" onclick="enterSite()">
+        <div class="title"><span class="lv lv-1">网站</span><b>BPM 审批中心</b><span class="auto-tag">自动取名</span></div>
+        <div class="host">bpm.example.com</div>
+        <div class="stats"><span>页面 <b>4</b></span><span>接口 <b>6</b></span><span>形态 <b>19</b></span><span>采集 <b>3</b> 次</span></div>
+        <div class="foot"><span>最近采集 10-17 11:48</span><span class="enter">进入 →</span></div>
+      </div>
+
+      <div class="site-card" onclick="enterSite()">
+        <div class="title"><span class="lv lv-1">网站</span><b>统一认证平台</b><span class="auto-tag">自动取名</span></div>
+        <div class="host">sso.example.com</div>
+        <div class="stats"><span>页面 <b>2</b></span><span>接口 <b>4</b></span><span>形态 <b>6</b></span><span>采集 <b>1</b> 次</span></div>
+        <div class="foot"><span>最近采集 10-16 18:22</span><span class="enter">进入 →</span></div>
+      </div>
+    </div>
+
+    <!-- 分页条：网站列表分页 -->
+    <div class="pagerbar">
+      <span class="total">共 <b>3</b> 个网站 · <b>18</b> 个接口</span>
+      <select><option>9 网站/页</option><option>18 网站/页</option></select>
+      <div class="pages">
+        <button class="pg" disabled>‹</button>
+        <button class="pg on">1</button>
+        <button class="pg" disabled>›</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 视图 B：网站内 —— 页面（二级）→ 接口（三级） ═══ -->
+  <div id="view-site">
+    <div class="crumb">
+      <a onclick="backToSites()">← 返回网站列表</a>
+      <span>/</span><span>接口库</span><span>/</span><b style="color:var(--ink)">智慧供应链 SCM</b>
+    </div>
+
+    <div class="site-banner">
+      <span class="lv lv-1">网站</span>
+      <div>
+        <div class="title">智慧供应链 SCM</div>
+        <div class="host">scm.example.com</div>
+      </div>
+      <div class="stats"><span>页面 <b>6</b></span><span>接口 <b>8</b></span><span>形态 <b>42</b></span><span>样本 <b>96</b></span></div>
+    </div>
+
+    <!-- L2：页面节点 ① -->
+    <section class="page-node">
+      <header onclick="this.parentElement.classList.toggle('collapsed')">
+        <span class="lv lv-2">页面</span>
+        <span class="pname">采购订单列表</span>
+        <span class="purl">/purchase/order/list</span>
+        <span class="meta">3 接口 · 17 样本</span>
+        <span class="caret">▼</span>
+      </header>
+      <div class="page-body">
+
+        <!-- L3：接口 ①（展开） -->
+        <div class="iface open">
+          <div class="iface-card" onclick="this.parentElement.classList.toggle('open')">
+            <div class="iface-head">
+              <span class="lv lv-3">接口</span>
+              <span class="method POST">POST</span>
+              <span class="name">采购订单分页查询</span>
+              <span class="caret">▼</span>
+            </div>
+            <div class="iface-url">/api/scm/purchase/order/page</div>
+            <div class="iface-chips"><span>形态 <b>3</b> · 样本 <b>9</b></span><span>鉴权 header:cookie:JSESSIONID</span></div>
+          </div>
+          <div class="iface-detail">
+            <div class="sec">
+              <h3>调用形态（3）<small>入参指纹吃 query + JSON 体 + 表单体；易变键已剔除</small></h3>
+              <table class="fields">
+                <tr><th>指纹</th><th>入参要点</th><th>样本</th></tr>
+                <tr><td class="mono">a1f3…9c</td><td class="mono">pageNum=1, pageSize=20, status=已审批</td><td>5</td></tr>
+                <tr><td class="mono">b77e…21</td><td class="mono">pageNum=1, pageSize=20, status=待审批, orgCode=2120</td><td>3</td></tr>
+                <tr><td class="mono">c90a…4d</td><td class="mono">pageNum=2, pageSize=20</td><td>1</td></tr>
+              </table>
+            </div>
+            <div class="sec">
+              <h3>请求模板<small>字段由样本归纳，面板不替样本背书</small></h3>
+              <table class="fields">
+                <tr><th>字段</th><th>位置</th><th>类型</th><th>示例</th><th>备注</th></tr>
+                <tr><td class="mono">pageNum</td><td>body</td><td>number</td><td class="mono">1</td><td></td></tr>
+                <tr><td class="mono">pageSize</td><td>body</td><td>number</td><td class="mono">20</td><td></td></tr>
+                <tr><td class="mono">status</td><td>body</td><td>string</td><td class="mono">已审批</td><td>枚举，<span class="tag-unverified">取值未验证</span></td></tr>
+                <tr><td class="mono">orgCode</td><td>body</td><td>string?</td><td class="mono">2120</td><td>可选，仅形态 b77e…21 出现</td></tr>
+              </table>
+            </div>
+            <div class="sec">
+              <h3>响应模板</h3>
+              <table class="fields">
+                <tr><th>字段</th><th>类型</th><th>备注</th></tr>
+                <tr><td class="mono">code</td><td>number</td><td>0 = 成功</td></tr>
+                <tr><td class="mono">data.total</td><td>number</td><td>总条数</td></tr>
+                <tr><td class="mono">data.list[]</td><td>array&lt;object&gt;</td><td>订单行：orderNo / supplierCode / amount / status …</td></tr>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- L3：接口 ②③（收起） -->
+        <div class="iface">
+          <div class="iface-card" onclick="this.parentElement.classList.toggle('open')">
+            <div class="iface-head">
+              <span class="lv lv-3">接口</span>
+              <span class="method GET">GET</span>
+              <span class="name">订单状态字典</span>
+              <span class="caret">▼</span>
+            </div>
+            <div class="iface-url">/api/scm/dict/orderStatus</div>
+            <div class="iface-chips"><span>形态 <b>1</b> · 样本 <b>2</b></span><span>鉴权 header:cookie:JSESSIONID</span></div>
+          </div>
+          <div class="iface-detail"></div>
+        </div>
+
+        <div class="iface">
+          <div class="iface-card" onclick="this.parentElement.classList.toggle('open')">
+            <div class="iface-head">
+              <span class="lv lv-3">接口</span>
+              <span class="method GET">GET</span>
+              <span class="name">供应商联想搜索</span>
+              <span class="caret">▼</span>
+            </div>
+            <div class="iface-url">/api/scm/supplier/suggest?keyword={keyword}</div>
+            <div class="iface-chips"><span>形态 <b>2</b> · 样本 <b>6</b></span><span>未探测到鉴权</span></div>
+          </div>
+          <div class="iface-detail"></div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- L2：页面节点 ②（收起） -->
+    <section class="page-node collapsed">
+      <header onclick="this.parentElement.classList.toggle('collapsed')">
+        <span class="lv lv-2">页面</span>
+        <span class="pname">采购订单详情</span>
+        <span class="purl">/purchase/order/detail</span>
+        <span class="meta">2 接口 · 10 样本</span>
+        <span class="caret">▼</span>
+      </header>
+      <div class="page-body"></div>
+    </section>
+
+    <!-- L2：页面节点 ③（收起） -->
+    <section class="page-node collapsed">
+      <header onclick="this.parentElement.classList.toggle('collapsed')">
+        <span class="lv lv-2">页面</span>
+        <span class="pname">供应商管理</span>
+        <span class="purl">/purchase/supplier/index</span>
+        <span class="meta">3 接口 · 21 样本</span>
+        <span class="caret">▼</span>
+      </header>
+      <div class="page-body"></div>
+    </section>
+
+    <!-- 分页条：按页面分页 -->
+    <div class="pagerbar">
+      <span class="total">共 <b>6</b> 个页面 · <b>8</b> 个接口</span>
+      <select><option>3 页面/页</option><option>5 页面/页</option><option>10 页面/页</option></select>
+      <div class="pages">
+        <button class="pg" disabled>‹</button>
+        <button class="pg on">1</button>
+        <button class="pg">2</button>
+        <button class="pg">›</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="legend">
+  <b>层级图例</b>
+  <div><span class="lv lv-1">网站</span> 一级分类：按 Host 自动归档、自动取名</div>
+  <div><span class="lv lv-2">页面</span> 网站内采集过的页面（分页载体）</div>
+  <div><span class="lv lv-3">接口</span> 页面下沉淀的接口卡（可展开细节）</div>
+</div>
+
+<script>
+  function enterSite() {
+    document.getElementById('view-sites').style.display = 'none';
+    document.getElementById('view-site').style.display = 'block';
+    window.scrollTo(0, 0);
+  }
+  function backToSites() {
+    document.getElementById('view-site').style.display = 'none';
+    document.getElementById('view-sites').style.display = 'block';
+    window.scrollTo(0, 0);
+  }
+</script>
+
+</body>
+</html>

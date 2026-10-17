@@ -34,20 +34,25 @@ export interface RawSampleInput {
   truncated: boolean
 }
 
-const SAMPLE_THRESHOLD = 10_000
-
-/** wire→store 输入：小体量 JSON 才读全量；超限标 truncated 不挂预览。 */
+/**
+ * wire→store 输入：请求体与响应体共用同一条体量上限。
+ *
+ * 超限不挂正文（避免把上传/大表单整包灌进盘），但**必须如实置 truncated**——
+ * 早期实现对超限请求体静默丢正文且不置位，卡上就只剩一个「没有入参的 POST 接口」。
+ */
 export function responseToRawSample(wire: WireSample, bodyLimit: number): RawSampleInput | undefined {
   const body = wire.responseText
-  const oversized = body !== undefined && Buffer.byteLength(body) > bodyLimit
+  const responseOversized = body !== undefined && Buffer.byteLength(body) > bodyLimit
+  const request = wire.requestPostData
+  const requestOversized = request !== undefined && Buffer.byteLength(request) > bodyLimit
   return {
     url: wire.url,
     method: wire.method,
     status: wire.status,
     requestHeaders: wire.requestHeaders,
-    requestBody: wire.requestPostData === undefined || Buffer.byteLength(wire.requestPostData) > SAMPLE_THRESHOLD ? undefined : wire.requestPostData,
-    responseBody: body === undefined || oversized ? undefined : body,
-    truncated: oversized,
+    requestBody: requestOversized ? undefined : request,
+    responseBody: responseOversized ? undefined : body,
+    truncated: responseOversized || requestOversized,
   }
 }
 
@@ -95,7 +100,13 @@ export async function openCapturingPage(
       }
       try {
         method = request.method()
-        const postRaw: string | null = resourceType === 'fetch' ? request.postData() : null
+        // 请求体一律取（xhr 与 fetch 同等）：POST 业务接口的入参就在这里，早期只对 fetch 取是硬伤。
+        let postRaw: string | null = null
+        try {
+          postRaw = request.postData()
+        } catch {
+          postRaw = null // 取不到（已回收/流式）如实留空，不假装有入参
+        }
         onWireSample({
           url,
           method,

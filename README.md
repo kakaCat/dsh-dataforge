@@ -10,12 +10,13 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
   └─ dataforge_flows   列出可运行流程（含必填参数清单）
   └─ dataforge_run     三道闸 → 后台 job（或前台降级）→ 引擎桥
   └─ dataforge_status  按留痕查进度 / 业务单号链
+
+采集 → 编排（编排是本次新增的一段，见「编排」节）
+  └─ dataforge_capture* / dataforge_browser_*   浏览器只活在采集期：页面上的 XHR 成卡
+  └─ dataforge_library_import                   采集卡 → 项目接口库（稳定 cardId、跨 run 归并）
+  └─ dataforge_chain_upsert / dataforge_chain_get  接口链：版本快照、绑定即拓扑依赖
         │
-        ▼  spawn python dsh_bridge.py <flow.yaml> [--dry-run] --key value ...
-        │
-   stdout = NDJSON 事件流（meta/step/terminal/result）
-   stderr = 引擎人类可读日志（收局诊断取尾部 4000 字符）
-   exit 0 = SUCCESS terminal
+        ▼  编排/执行/复跑一律走「接口卡模板 + 凭证卡」＋纯 HTTP，不再开浏览器
 ```
 
 分层职责（与 DSH 家族插件同款约定）：
@@ -27,6 +28,9 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | 包发现 | `src/flows/discover.ts` | 三层流程包合并（后写赢）、yaml `inputs` 解析 |
 | 引擎桥 | `src/engine/bridge.ts` | 预检、argv 构造、NDJSON 逐行解析（半行缓冲）、kill |
 | 运行留痕 | `src/runs/store.ts` | `dataRoot/runs/<runId>/`：`run.json` + `events.ndjson` |
+| 接口库 | `src/library/{import,store}.ts` | 采集 SQLite（只读）→ 卡文件；cardId 分配与归并 |
+| 接口链 | `src/chains/{schema,validate,store,compile}.ts` | 链 schema / 语义校验 / 版本快照 / page-chain 编译 |
+| 编排应用层 | `src/orchestration/application.ts` | IF-1/2/3 的错误码折叠与回执值 |
 
 ## 三道闸（调用纪律，写进 dataforge_run 工具描述）
 
@@ -77,11 +81,97 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 `dataforge_status` 无 runId 时列最近 10 条；有 runId 时折叠为摘要（status/stepsDone/lastStepId/lastError/businessData/message）。
 长跑（真实造数 2-8 分钟）必须走宿主后台 job：`dataforge_run` 经 `ctx.jobs.start()` 注册（NDJSON 逐行 append 推流、cancel = SIGTERM→2s SIGKILL）；jobs 服务缺席时如实标注 `degradedNotice` 前台执行。
 
+## 采集（接口逆向）与侧栏面板
+
+采集域把「页面上的 XHR/fetch」沉淀成**接口卡 + 页面×接口×形态关系行**，两个入口同一套落库投影：
+
+| 入口 | 用途 | 说明 |
+|---|---|---|
+| `dataforge_capture(task_type=action)` + `dataforge_browser_*` | agent 驱动真实交互（搜索/翻页/提交） | 写操作先经用户确认；会话期间遇到的 XHR 全部成卡 |
+| `dataforge_capture(task_type=single_page)` | 单页静止期采集 | 走后台 job；jobs 不可用时**前台降级**执行（回执带 `degradedNotice`） |
+| 侧栏「数据采集」面板 | 单入口三标签：采集运行 / 快速采集 / 接口库 | 快速采集只发起 single_page（FR-7.6），2 秒轮询进度，收口后按「页面 → 接口 → 形态」出文档 |
+
+**落库模型**（`<dataRoot>/capture/capture.sqlite`）：
+
+- `interface_cards`：接口卡，身份 `(capture_id, merge_key)`——跨 run 同接口各留各的卡，同 run 内归并；
+- `page_card_relations`：`(card_id, page_url, params_fingerprint)` 幂等，同接口不同入参形态各一行，样本回指 `request_samples.relation_id`；
+- 入参指纹吃 **query + JSON 体 + 表单体**，数组保序、易变键（`_t`/`ts`/`sid`/token…）剔除——物料清单不同即不同形态；
+- 鉴权标志只记来源名（`header:authorization` / `header:cookie:JSESSIONID`），**凭证值永不入卡、永不出路由**；
+- 老库自动迁移：`merge_key` 全库唯一 → `(capture_id, merge_key)`；补 `notice` / `relation_id` 列；历史卡按 `related_pages_json` 补 `legacy` 关系行。
+
+**面板写入口纪律**：只收 `http/https`，拒本机回环与链路本地/云元数据地址；同 host 已有进行中采集 → `409 host-busy`；body 上限 8 KB（`413`）；响应一律剥除凭据原文与 `sessionId`。
+
+## 编排（接口库 → 接口链）
+
+采集解决「接口长什么样」，编排解决「按什么顺序调、字段怎么传」。载体是**工作区文件**，不是表——它们要进 git、要手改、要导入导出：
+
+| 落点 | 内容 |
+|---|---|
+| `<workspace>/.dsh/dataforge/library/cards/<cardId>.yaml` | 一张接口卡一个文件；`index.yaml` 是 cardId → 文件/归并键/站点的指针 |
+| `<workspace>/.dsh/dataforge/chains/<site>/<flow>/v<n>.yaml` | 一个版本一个文件，**版本即不可变快照**，目录即历史 |
+
+### 三个工具
+
+| 工具 | 干什么 | 失败门 |
+|---|---|---|
+| `dataforge_library_import` | 采集卡 → 项目接口库；同 `mergeKey` 跨 run 归并，分配稳定 cardId | `no-capture-data`（采集库没卡）；坏卡跳过不炸批 |
+| `dataforge_chain_upsert` | 唯一链写入口：schema + 语义校验全过才落盘为新版本 | `invalid-chain`（逐条指到 `nodes[i]`/`edges[j]`）、`card-not-imported` |
+| `dataforge_chain_get` | 回读链（缺省最新版本）；`export=true` 原文导出 | `chain-not-found`、`invalid-chain`（手改坏，可回读旧版本） |
+
+### 卡文件（不含凭证值、不冻结样本值）
+
+```yaml
+cardId: card_000001
+kind: interface-card
+identity:
+  mergeKey: GET /api/materials:q       # 采集期归并键原样保留：同键即同卡
+  method: GET
+  urlTemplate: /api/materials?q={q}
+inputs:
+  - path: query.q                      # 首段是位置：query/body/header/path
+    type: string
+    required: true
+    role: input
+outputs:
+  - path: body.items[*].internalId     # 数组用 [*]；绑定边可用具体下标 [0]
+    type: string
+auth: cookie-session                   # 只投影鉴权**标志**
+authEvidence: header:cookie:JSESSIONID # 只投影来源**名**
+sources:                               # 溯源可多次累积
+  - captureId: cap_20261017_01
+    pages: [https://scm.example.com/purchase/new]
+    relationIds: [pr_mvc1qewz_e4lk56]
+```
+
+- **为什么要有导入这步**：链靠稳定 cardId 引用接口，而不是 `(capture_id, merge_key)`——重新采集不会让旧链断引用；
+- **cardId 序号式不复用**：水位持久化在 `index.yaml`，删卡重导拿新号，旧链不会被新卡顶替；
+- **索引只是加速器**：`index.yaml` 缺失/损坏按卡文件重建，卡文件才是权威；
+- **采集库全程只读**：导入侧用 `readonly` 打开 SQLite，不建表、不写事件。
+
+### 链文件（绑定即拓扑依赖）
+
+```yaml
+apiVersion: dataforge/v1
+kind: interface-chain        # interface-chain 可执行；page-chain 需编译
+meta: { site: 智慧供应链 SCM, flow: 采购下单, version: 3, created: 2026-10-17T12:00:00Z }
+inputs:                      # 链级入参槽位（R-6 结晶写入 example 值）
+  - { name: materialCodes, type: array<string>, required: true }
+nodes:
+  - { id: query-material, card: card_000001, constants: { query.orgId: "2120" } }
+  - { id: create-order, card: card_000457 }
+edges:                       # from 可为「节点.出参」或 $inputs.槽位名
+  - { from: query-material.body.items[0].internalId, to: create-order.body.lines[0].materialId }
+```
+
+**定义期校验**（不通过一律不落盘，不存在部分写入）：节点 id 链内唯一、边两端节点存在、`to` 在目标卡入参里（或在 `constants` 里已给值——绑定与常量互斥）、`from` 在源卡出参里、无环、槽位 `$inputs.<name>` 被引用（防僵尸槽位）。
+
+**⚠️ 常量里不要写凭证**：`constants` 会进版本文件，落盘时 `scanCredentialConstants` 会告警；凭证注入是执行期的事（R-4）。
+
 ## 验证
 
 ```bash
 pnpm typecheck   # tsc --noEmit
-pnpm test        # vitest：24 个用例，含真引擎 dry-run 集成（python3 + engineRoot 存在时自动启用）
+pnpm test        # vitest：全量用例（含真引擎 dry-run 集成；python3 + engineRoot 存在时自动启用）
 pnpm build       # tsdown → dist/
 ```
 

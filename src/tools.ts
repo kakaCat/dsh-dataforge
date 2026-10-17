@@ -16,10 +16,15 @@ import {
   type CaptureDeps, type CaptureToolValue, type StartCaptureArgs,
 } from './capture/application.js'
 import type { ActSpec } from './capture/session.js'
+import { lossless } from './shared/json.js'
 import type {
   CardRow, CaptureRunRow, CredentialRow, PageRow, SampleRow,
 } from './shared/capture-types.js'
 import type { RunSummary } from './shared/types.js'
+import {
+  getChainForTool, importLibraryForTool, upsertChainForTool,
+  type ChainGetToolValue, type ChainUpsertToolValue, type ImportLibraryToolValue, type OrchestrationDeps,
+} from './orchestration/application.js'
 
 /** 渲染边界单向收紧：进 render 的值已被 defineTool 按 schema 运行时校验，只是 TS 推断偏松。 */
 function tighten<T>(value: unknown): T {
@@ -101,7 +106,7 @@ export function defineFlowsTool(deps: DataforgeDeps) {
       render: (_args, value) => [{ type: 'text', text: renderFlows(tighten<FlowsValue>(value)) }],
     },
     async execute(_args, exec: ToolRunContext) {
-      return await listFlows(deps, exec)
+      return lossless(await listFlows(deps, exec))
     },
   })
 }
@@ -186,12 +191,12 @@ export function defineRunTool(deps: DataforgeDeps) {
       render: (_args, value) => [{ type: 'text', text: renderRun(tighten<RunToolValue>(value)) }],
     },
     async execute(args, exec: ToolRunContext) {
-      return await runFlow(deps, exec, {
+      return lossless(await runFlow(deps, exec, {
         flow: args.flow,
         params: args.params,
         ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
         ...(args.dry_run === undefined ? {} : { dryRun: args.dry_run }),
-      })
+      }))
     },
   })
 }
@@ -250,7 +255,7 @@ export function defineStatusTool(deps: DataforgeDeps) {
       render: (_args, value) => [{ type: 'text', text: renderStatus(tighten<StatusValue>(value)) }],
     },
     async execute(args) {
-      return runStatus(deps, args.run_id)
+      return lossless(runStatus(deps, args.run_id))
     },
   })
 }
@@ -268,7 +273,60 @@ function renderCapture(value: CaptureToolValue): string {
   if (value.sessionId !== undefined) {
     return `✅ 已开会话 ${value.sessionId}（captureId ${value.captureId ?? '?'}）：用 dataforge_browser_snapshot 看 UI、dataforge_browser_act 交互；结束后 dataforge_browser_close 收 cookie。`
   }
-  return `🚀 采集已启动（captureId ${value.captureId ?? '?'}）：site_crawl 是后台任务，用 dataforge_capture_status 轮询，完成后 dataforge_capture_result(scope=cards) 取卡。`
+  const degraded = value.degradedNotice === undefined ? '' : `\n⚠ ${value.degradedNotice}`
+  return `🚀 采集已启动（captureId ${value.captureId ?? '?'}）：site_crawl 是后台任务，用 dataforge_capture_status 轮询，完成后 dataforge_capture_result(scope=cards) 取卡。${degraded}`
+}
+
+/** 回执里一行一条，逐行截断；超出部分只报条数，不回灌原始 JSON。 */
+const RECEIPT_MAX_LINES = 20
+const RECEIPT_URL_MAX = 110
+
+function shortUrl(url: string): string {
+  return url.length <= RECEIPT_URL_MAX ? url : `${url.slice(0, RECEIPT_URL_MAX)}…`
+}
+
+/** 模板摘要：字段数 + 探测到的状态码路径（"入参 5 字段" / "出参 8 字段(code)"）。 */
+function templateBrief(label: string, template: CardRow['requestTemplate']): string {
+  if (template === undefined) return `${label} 未采到`
+  const code = template.codePath === undefined ? '' : `(${template.codePath})`
+  return `${label} ${template.fields.length} 字段${code}`
+}
+
+/**
+ * 采集产物回执：直接把接口列出来——方法 + URL 模板 + 样本数 + 出入参规模。
+ *
+ * 早先只回一句「N 条记录（详见 items）」，对话里根本看不到采到了什么接口；
+ * 凭证只报名称与来源，value_json 原文永不进回执。
+ */
+function renderCaptureResult(scope: string, value: CaptureResultValue): string {
+  if (value.notice !== undefined) return `📭 ${value.notice}`
+  const items = value.items ?? []
+  if (items.length === 0) return `📦 0 条记录`
+
+  let lines: string[]
+  if (scope === 'cards') {
+    lines = (items as CardRow[]).map((c) => {
+      const name = c.name === undefined ? '' : `${c.name} `
+      return `- ${name}${c.method} ${shortUrl(c.urlTemplate)} ｜ ×${c.sampleCount} ｜ ${templateBrief('入参', c.requestTemplate)}，${templateBrief('出参', c.responseTemplate)}`
+    })
+  } else if (scope === 'samples') {
+    lines = (items as SampleRow[]).map((s) => {
+      const status = s.status === undefined ? '???' : String(s.status)
+      const trunc = s.truncated ? ' ⚠️超限未存正文' : ''
+      return `- #${s.seq} ${s.method} ${status} ${shortUrl(s.url)}${trunc}`
+    })
+  } else if (scope === 'credentials') {
+    // 只报名称/类型/来源域；value_json（cookie 原文）不出壳。
+    lines = (items as CredentialRow[]).map((c) => `- ${c.kind} ${c.name} @ ${c.url}`)
+  } else {
+    lines = (items as PageRow[]).map((p) => `- [d${p.depth}] ${p.status} ${shortUrl(p.url)}`)
+  }
+
+  const shown = lines.slice(0, RECEIPT_MAX_LINES)
+  const rest = lines.length - shown.length
+  const tail = rest > 0 ? `\n… 还有 ${rest} 条（items 里有全量）` : ''
+  const head = scope === 'cards' ? '🧩 接口卡' : scope === 'samples' ? '📡 请求样本' : scope === 'credentials' ? '🔒 凭证（仅名称/来源）' : '📄 页面'
+  return `${head} ${items.length} 条：\n${shown.join('\n')}${tail}`
 }
 
 export function defineCaptureTool(deps: CaptureDeps) {
@@ -303,6 +361,7 @@ export function defineCaptureTool(deps: CaptureDeps) {
           gate: { type: 'string', description: 'started / bad-url / bad-task / action-confirm-required' },
           captureId: { type: 'string' },
           sessionId: { type: 'string', description: 'action 型：会话原语 id' },
+          degradedNotice: { type: 'string', description: 'jobs 服务缺席时前台降级执行的说明' },
           card: { type: 'string' },
         },
       },
@@ -313,13 +372,13 @@ export function defineCaptureTool(deps: CaptureDeps) {
       if (taskType !== 'single_page' && taskType !== 'site_crawl' && taskType !== 'action') {
         return { accepted: false, gate: 'bad-task', card: `❌ taskType 非法：${String(taskType)}` }
       }
-      return await startCapture(deps, {
+      return lossless(await startCapture(deps, {
         taskType,
         entryUrl: args.entry_url,
         ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
         ...(args.max_depth === undefined ? {} : { maxDepth: args.max_depth }),
         ...(args.max_pages === undefined ? {} : { maxPages: args.max_pages }),
-      } satisfies StartCaptureArgs)
+      } satisfies StartCaptureArgs))
     },
   })
 }
@@ -355,7 +414,7 @@ export function defineCaptureStatusTool(deps: CaptureDeps) {
       },
     },
     async execute(args) {
-      return captureStatus(deps, args.capture_id)
+      return lossless(captureStatus(deps, args.capture_id))
     },
   })
 }
@@ -379,17 +438,13 @@ export function defineCaptureResultTool(deps: CaptureDeps) {
           items: { type: 'array', items: { type: 'object', additionalProperties: true } },
         },
       },
-      render: (_args, value) => {
-        const v = tighten<CaptureResultValue>(value)
-        if (v.notice !== undefined) return [{ type: 'text', text: `📭 ${v.notice}` }]
-        return [{ type: 'text', text: `📦 ${v.items?.length ?? 0} 条记录（详见 items）` }]
-      },
+      render: (args, value) => [{ type: 'text', text: renderCaptureResult(String(args.scope), tighten<CaptureResultValue>(value)) }],
     },
     async execute(args) {
       if (args.scope !== 'cards' && args.scope !== 'samples' && args.scope !== 'credentials' && args.scope !== 'pages') {
         return { ok: false, notice: `scope 非法：${String(args.scope)}（cards | samples | credentials | pages）` }
       }
-      return captureResult(deps, args.capture_id, args.scope, args.limit)
+      return lossless(captureResult(deps, args.capture_id, args.scope, args.limit))
     },
   })
 }
@@ -417,7 +472,7 @@ export function defineCaptureCancelTool(deps: CaptureDeps) {
       },
     },
     async execute(args) {
-      return captureCancel(deps, args.capture_id)
+      return lossless(captureCancel(deps, args.capture_id))
     },
   })
 }
@@ -473,7 +528,7 @@ export function defineBrowserOpenTool(deps: CaptureDeps) {
       },
     },
     async execute(args) {
-      return deps.registry.open(args.entry_url === undefined ? {} : { entryUrl: args.entry_url })
+      return lossless(deps.registry.open(args.entry_url === undefined ? {} : { entryUrl: args.entry_url }))
     },
   })
 }
@@ -507,7 +562,7 @@ export function defineBrowserActTool(deps: CaptureDeps) {
     async execute(args) {
       const spec = toActSpec(args.act)
       if (spec === undefined) return { ok: false, error: `act 非法：${JSON.stringify(args.act).slice(0, 200)}` }
-      return await deps.registry.act(args.session_id, spec)
+      return lossless(await deps.registry.act(args.session_id, spec))
     },
   })
 }
@@ -537,7 +592,7 @@ export function defineBrowserSnapshotTool(deps: CaptureDeps) {
       },
     },
     async execute(args) {
-      return await deps.registry.snapshot(args.session_id)
+      return lossless(await deps.registry.snapshot(args.session_id))
     },
   })
 }
@@ -590,7 +645,207 @@ export function defineBrowserCloseTool(deps: CaptureDeps) {
         cookies: closed.cookies.map((c) => ({ name: String(c['name'] ?? ''), domain: String(c['domain'] ?? '') })),
         ...(closed.captureId === undefined ? {} : { captureId: closed.captureId }),
       }
-      return summarized
+      return lossless(summarized)
+    },
+  })
+}
+
+// ────────────────────────────────────────────────
+// 编排三件套：dataforge_library_import / dataforge_chain_upsert / dataforge_chain_get
+// ────────────────────────────────────────────────
+
+function renderLibraryImport(value: ImportLibraryToolValue): string {
+  if (!value.ok) {
+    const hints = value.hints === undefined || value.hints.length === 0 ? '' : `\n建议：${value.hints.join('；')}`
+    return `⚠️ 接口库导入未完成（${value.code ?? 'unknown'}）：${value.message ?? ''}${hints}`
+  }
+  const head = `📦 接口库导入：新建 ${value.imported ?? 0} 张 / 归并 ${value.merged ?? 0} 张 / 未变 ${value.unchanged ?? 0} 张 / 跳过 ${value.skipped ?? 0} 张`
+  const ids = value.cardIds ?? []
+  const body = ids.length === 0 ? '- 本次没有卡落库' : ids.slice(0, RECEIPT_MAX_LINES).map((id) => `- ${id}`).join('\n')
+  const rest = ids.length > RECEIPT_MAX_LINES ? `\n… 还有 ${ids.length - RECEIPT_MAX_LINES} 张（cardIds 里有全量）` : ''
+  const skipped = (value.skippedReasons ?? []).length === 0 ? '' : `\n跳过原因：\n${(value.skippedReasons ?? []).map((r) => `- ${r}`).join('\n')}`
+  return `${head}\n${body}${rest}${skipped}\n库：${value.libraryRoot ?? ''}`
+}
+
+export function defineLibraryImportTool(deps: OrchestrationDeps) {
+  return defineTool({
+    name: 'dataforge_library_import',
+    description: `把采集到的接口卡导入**项目接口库**（工作区 .dsh/dataforge/library/）。
+
+为什么要有这一步：链靠稳定的 cardId 引用接口，而不是 (capture_id, merge_key)。
+同 mergeKey 的卡跨 run 归并成同一张卡，重新采集不会让旧链断引用。
+
+用法：
+- 一般先跑本工具再写链；capture_id 缺省 = 全部尚未导入完的采集 run。
+- 纯增量幂等：重复导入同一 run 不产生重复卡、不重复记来源、不重写文件。
+- 坏卡跳过不炸批：被跳过的卡与中文原因在 skippedReasons 里如实给出。
+
+失败时：
+- no-capture-data → 采集库里还没有卡；先让用户跑一次采集（dataforge_capture），不要空转重试。
+- 卡文件不含任何凭证值：只投影 auth 标志与来源名，凭证注入是 R-4 的事。`,
+    parameters: {
+      capture_id: { type: 'string', description: '只导入这一次采集；缺省 = 全部尚未导入完的 run' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string', description: 'no-capture-data / capture-unreadable / library-unavailable' },
+          message: { type: 'string' },
+          hints: { type: 'array', items: { type: 'string' } },
+          imported: { type: 'number' },
+          merged: { type: 'number' },
+          unchanged: { type: 'number' },
+          skipped: { type: 'number' },
+          cardIds: { type: 'array', items: { type: 'string' } },
+          skippedReasons: { type: 'array', items: { type: 'string' } },
+          captures: { type: 'array', items: { type: 'string' } },
+          libraryRoot: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderLibraryImport(tighten<ImportLibraryToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<ImportLibraryToolValue> {
+      return lossless(await importLibraryForTool(deps, exec, {
+        ...(args.capture_id === undefined ? {} : { captureId: args.capture_id }),
+      }))
+    },
+  })
+}
+
+function renderChainIssues(issues: Array<{ target: string; code: string; reason: string }> | undefined): string {
+  if (issues === undefined || issues.length === 0) return ''
+  return `\n${issues.map((issue) => `- ${issue.target}：${issue.reason}`).join('\n')}`
+}
+
+export function defineChainUpsertTool(deps: OrchestrationDeps) {
+  return defineTool({
+    name: 'dataforge_chain_upsert',
+    description: `写入一条接口链（唯一写入口），落盘为**新版本快照**。
+
+先 schema 校验、再语义校验：卡引用必须在项目接口库存在、拓扑无环、绑定两端字段在卡模板里、
+绑定与常量互斥、链级 inputs 槽位被 $inputs.<name> 引用。**全部通过才落盘，不存在部分写入。**
+
+链 YAML 形状（apiVersion: dataforge/v1）：
+- nodes: [{id, card, constants}]，card 是 dataforge_library_import 给的 cardId；
+- edges: [{from, to}]，from 是「节点.出参路径」或「$inputs.槽位名」，to 是「节点.入参路径」；
+- inputs: [{name, type, required}]，槽位靠常量值引用才算有人用（防僵尸槽位）。
+
+失败时（逐条问题指向 nodes[i] / edges[j]，修好再提交，不会落盘）：
+- invalid-chain → 定义本身不合法；
+- card-not-imported → 卡不在项目库，先跑 dataforge_library_import。
+
+版本只增不删：同一 site/flow 每次落盘都是 max+1 的新文件，旧版本永远可回读。`,
+    parameters: {
+      site: { type: 'string', required: true, description: '站点名（如「智慧供应链 SCM」）' },
+      flow: { type: 'string', required: true, description: '流程名（如「采购下单」）' },
+      chain_yaml: { type: 'string', required: true, description: '链 YAML 全文' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string', description: 'invalid-chain / card-not-imported' },
+          message: { type: 'string' },
+          version: { type: 'number' },
+          path: { type: 'string' },
+          issues: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { target: { type: 'string' }, code: { type: 'string' }, reason: { type: 'string' } },
+            },
+          },
+          warnings: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => {
+        const v = tighten<ChainUpsertToolValue>(value)
+        if (!v.ok) {
+          return [{
+            type: 'text',
+            text: `❌ 链未落盘（${v.code ?? 'invalid-chain'}）：${v.message ?? ''}${renderChainIssues(v.issues)}`,
+          }]
+        }
+        const warn = (v.warnings ?? []).length === 0 ? '' : `\n⚠️ 提醒：\n${(v.warnings ?? []).map((w) => `- ${w}`).join('\n')}`
+        return [{ type: 'text', text: `🔗 链已落盘：v${v.version ?? 0}\n文件：${v.path ?? ''}${warn}` }]
+      },
+    },
+    async execute(args, exec: ToolRunContext): Promise<ChainUpsertToolValue> {
+      return lossless(await upsertChainForTool(deps, exec, {
+        site: args.site,
+        flow: args.flow,
+        chainYaml: args.chain_yaml,
+      }))
+    },
+  })
+}
+
+export function defineChainGetTool(deps: OrchestrationDeps) {
+  return defineTool({
+    name: 'dataforge_chain_get',
+    description: `读链：按 site/flow/version（缺省最新）取链 YAML 全文。
+
+- 缺省：校验读取——文件被手改坏就如实报 invalid-chain，并列出可用版本供你回读旧版本；
+- export=true：原文读取（不校验）。链文件天然零凭证，导出即原文，无需剥除。
+
+失败时：
+- chain-not-found → site/flow/version 任一不匹配；versions 里是可用版本，据此重试或放弃。`,
+    parameters: {
+      site: { type: 'string', required: true },
+      flow: { type: 'string', required: true },
+      version: { type: 'number', description: '缺省 = 最新版本' },
+      export: { type: 'boolean', description: 'true = 原文导出（不校验）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string', description: 'chain-not-found / invalid-chain' },
+          message: { type: 'string' },
+          chainYaml: { type: 'string' },
+          version: { type: 'number' },
+          path: { type: 'string' },
+          versions: { type: 'array', items: { type: 'number' } },
+          issues: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { target: { type: 'string' }, code: { type: 'string' }, reason: { type: 'string' } },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        const v = tighten<ChainGetToolValue>(value)
+        if (!v.ok) {
+          const versions = (v.versions ?? []).length === 0 ? '无' : (v.versions ?? []).map((n) => `v${n}`).join(' / ')
+          return [{
+            type: 'text',
+            text: `❌ 读链失败（${v.code ?? 'chain-not-found'}）：${v.message ?? ''}\n可用版本：${versions}${renderChainIssues(v.issues)}`,
+          }]
+        }
+        return [{
+          type: 'text',
+          text: `🔗 ${v.path ?? ''}（v${v.version ?? 0}）\n\`\`\`yaml\n${v.chainYaml ?? ''}\`\`\``,
+        }]
+      },
+    },
+    async execute(args, exec: ToolRunContext): Promise<ChainGetToolValue> {
+      return lossless(await getChainForTool(deps, exec, {
+        site: args.site,
+        flow: args.flow,
+        ...(args.version === undefined ? {} : { version: args.version }),
+        ...(args.export === undefined ? {} : { export: args.export }),
+      }))
     },
   })
 }

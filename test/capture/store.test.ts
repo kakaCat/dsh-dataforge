@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest'
+import Database from 'better-sqlite3'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -73,5 +74,243 @@ it('大响应体落文件（相对路径 samples/）', () => {
   expect(rows[0]?.responseBodyPath).toContain('cap_2')
   expect(rows[0]?.responsePreview).toBeUndefined()
   expect(store.readBinary(rows[0]?.responseBodyPath ?? 'missing')).toHaveLength(300_000)
+})
+
+it('卡片身份按 run 隔离：跨 run 同接口各留各的卡，同 run 内仍归并', () => {
+  const { store } = newStore()
+  for (const id of ['cap_a', 'cap_b']) {
+    store.upsertRun({
+      id, taskType: 'action', entryUrl: 'https://x.test',
+      status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+    })
+  }
+  const urlTemplate = normalizeUrlForTemplate('https://x.api/list?page=1').urlTemplate
+  const mergeKey = mergeKeyOf('GET', urlTemplate)
+  expect(mergeKey).toBe('GET /list:page')
+
+  const c1 = store.upsertCard('cap_a', { mergeKey, method: 'GET', urlTemplate, relatedPageUrls: ['https://x.test/a'] })
+  const c2 = store.upsertCard('cap_b', { mergeKey, method: 'GET', urlTemplate, relatedPageUrls: ['https://y.test/b'] })
+
+  // 回归：merge_key 曾全库唯一 —— 第二张卡会被并进第一张，后一个 run 的 cards 视图直接是空的
+  expect(c2).not.toBe(c1)
+  expect(store.listCards('cap_a')).toHaveLength(1)
+  expect(store.listCards('cap_b')).toHaveLength(1)
+  expect(store.getCard(c1)?.captureId).toBe('cap_a')
+  expect(store.getCard(c2)?.captureId).toBe('cap_b')
+  expect(store.getCard(c1)?.sampleCount).toBe(1)
+  expect(store.getCard(c2)?.relatedPageUrls).toEqual(['https://y.test/b'])
+
+  // 同一 run 内同接口仍然归并：追加页面引用 + 样本计数
+  const again = store.upsertCard('cap_a', { mergeKey, method: 'GET', urlTemplate, relatedPageUrls: ['https://x.test/a', 'https://x.test/c'] })
+  expect(again).toBe(c1)
+  expect(store.getCard(c1)?.sampleCount).toBe(2)
+  expect(store.getCard(c1)?.relatedPageUrls).toEqual(['https://x.test/a', 'https://x.test/c'])
+})
+
+it('老库迁移：merge_key 全库唯一的历史表重建为 (capture_id, merge_key)，旧卡保留且不再串味', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'capture-legacy-'))
+  const dbPath = join(dir, 'capture.sqlite')
+  const legacy = new Database(dbPath)
+  legacy.exec(`
+    CREATE TABLE capture_runs (
+      id TEXT PRIMARY KEY, task_type TEXT NOT NULL, entry_url TEXT NOT NULL,
+      status TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER,
+      stats_json TEXT NOT NULL DEFAULT '{}', error TEXT
+    );
+    CREATE TABLE interface_cards (
+      id TEXT PRIMARY KEY, capture_id TEXT REFERENCES capture_runs(id), merge_key TEXT UNIQUE NOT NULL,
+      name TEXT, url_template TEXT NOT NULL, method TEXT NOT NULL,
+      request_template_json TEXT, response_template_json TEXT, auth_json TEXT,
+      related_pages_json TEXT NOT NULL, sample_count INTEGER NOT NULL, created_at INTEGER NOT NULL
+    );
+    INSERT INTO capture_runs(id,task_type,entry_url,status,started_at,stats_json)
+      VALUES('cap_old','action','https://old.test/','done',1,'{}');
+    INSERT INTO interface_cards(id,capture_id,merge_key,name,url_template,method,related_pages_json,sample_count,created_at)
+      VALUES('card_old','cap_old','GET /api/legacy:q','旧卡','/api/legacy?q=1','GET','["https://old.test/"]',1,1);
+  `)
+  legacy.close()
+
+  const store = new CaptureStore(dbPath, join(dir, 'samples'), join(dir, 'events.ndjson'))
+  expect(store.listAllCards()).toHaveLength(1)
+  expect(store.getCard('card_old')?.name).toBe('旧卡')
+
+  // 迁移后另一个 run 能拿同一个 merge_key 建自己的卡（旧约束下这里会并进 card_old）
+  store.upsertRun({
+    id: 'cap_new', taskType: 'action', entryUrl: 'https://new.test',
+    status: 'running', startedAt: 2, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  const fresh = store.upsertCard('cap_new', {
+    mergeKey: 'GET /api/legacy:q', method: 'GET', urlTemplate: '/api/legacy?q=1', relatedPageUrls: ['https://new.test/'],
+  })
+  expect(fresh).not.toBe('card_old')
+  expect(store.listAllCards()).toHaveLength(2)
+  expect(store.getCard(fresh)?.captureId).toBe('cap_new')
+  expect(store.getCard('card_old')?.sampleCount).toBe(1)
+  store.close()
+})
+
+it('接口库分页：listAllCards LIMIT/OFFSET + countAllCards 与行数一致', async () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_p', taskType: 'action', entryUrl: 'https://x.test',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  for (let i = 1; i <= 3; i += 1) {
+    store.upsertCard('cap_p', {
+      mergeKey: `GET /api/p${i}`, method: 'GET', urlTemplate: `/api/p${i}`,
+      relatedPageUrls: [],
+    })
+    // created_at 毫秒粒度：退避让三张卡时间戳可区分（created_at DESC 排序才有确定性）
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  expect(store.countAllCards()).toBe(3)
+  expect(store.listAllCards(1)).toHaveLength(1)
+  expect(store.listAllCards(2).map((c) => c.urlTemplate)).toEqual(['/api/p3', '/api/p2'])
+  expect(store.listAllCards(2, 1).map((c) => c.urlTemplate)).toEqual(['/api/p2', '/api/p1'])
+  expect(store.listAllCards(2, 99)).toEqual([])
+  store.close()
+})
+
+it('关系表：同 (card,page,指纹) 幂等聚一行；指纹不同新增一行；listRelations 可追溯', () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_r', taskType: 'single_page', entryUrl: 'https://x.test',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  const cardId = store.upsertCard('cap_r', { mergeKey: 'GET /list:type', method: 'GET', urlTemplate: '/list?type=1', relatedPageUrls: [] })
+  const pageId = store.upsertPage('cap_r', 'https://x.test/', 0, 'ok')
+
+  const fp1 = store.upsertRelation('cap_r', cardId, 'https://x.test/', 'fp_type1', pageId)
+  const fp1Again = store.upsertRelation('cap_r', cardId, 'https://x.test/', 'fp_type1')
+  expect(fp1Again).toBe(fp1)
+  const fp2 = store.upsertRelation('cap_r', cardId, 'https://x.test/', 'fp_type2')
+  expect(fp2).not.toBe(fp1)
+
+  const rels = store.listRelations('cap_r')
+  expect(rels).toHaveLength(2)
+  const first = rels.find((r) => r.id === fp1)
+  expect(first).toMatchObject({
+    cardId, pageId, pageUrl: 'https://x.test/', paramsFingerprint: 'fp_type1', sampleCount: 2,
+  })
+  expect(first?.lastSeenAt).toBeGreaterThanOrEqual(first?.firstSeenAt ?? 0)
+  expect(first?.pageId).toBe(pageId)
+  const second = rels.find((r) => r.id === fp2)
+  expect(second?.paramsFingerprint).toBe('fp_type2')
+  expect(second?.sampleCount).toBe(1)
+})
+
+it('样本回指关系行：attachSampleRelation 写 relation_id，listSamples/listRelationsByCard 可回溯', () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_s', taskType: 'single_page', entryUrl: 'https://x.test',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  const pageId = store.upsertPage('cap_s', 'https://x.test/a', 0, 'ok')
+  const cardId = store.upsertCard('cap_s', {
+    mergeKey: 'GET /list:type', method: 'GET', urlTemplate: '/list?type=1', relatedPageUrls: ['https://x.test/a'],
+  })
+  const sampleId = store.upsertSample('cap_s', pageId, {
+    url: 'https://x.test/list?type=1', method: 'GET', requestHeaders: {}, responseHeaders: {}, bodyLimit: 262_144,
+  })
+  const relationId = store.upsertRelation('cap_s', cardId, 'https://x.test/a', 'fp_a', pageId)
+  expect(store.listSamples('cap_s')[0]?.relationId).toBeUndefined()
+
+  store.attachSampleRelation(sampleId, relationId)
+  expect(store.listSamples('cap_s')[0]?.relationId).toBe(relationId)
+  const byCard = store.listRelationsByCard(cardId)
+  expect(byCard.map((r) => r.id)).toEqual([relationId])
+  expect(store.listRelationsByCard('card_none')).toEqual([])
+})
+
+it('老卡 legacy 关系回填：无关系行的历史卡按 related_pages_json 补 legacy 行，重复打开不重复', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'capture-legacy-rel-'))
+  const dbPath = join(dir, 'capture.sqlite')
+  const samplesDir = join(dir, 'samples')
+
+  const first = new CaptureStore(dbPath, samplesDir)
+  first.upsertRun({
+    id: 'cap_old', taskType: 'single_page', entryUrl: 'https://old.test',
+    status: 'done', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  const pageId = first.upsertPage('cap_old', 'https://old.test/a', 0, 'ok')
+  const cardId = first.upsertCard('cap_old', {
+    mergeKey: 'GET /api/a:q', method: 'GET', urlTemplate: '/api/a?q=1',
+    relatedPageUrls: ['https://old.test/a', 'https://old.test/not-recorded'],
+  })
+  expect(first.listRelations('cap_old')).toEqual([])
+  first.close()
+
+  // 关系模型上线前的库：开库时应自动补 legacy 关系行（页面能对上就带 pageId，对不上留空）
+  const second = new CaptureStore(dbPath, samplesDir)
+  const rels = second.listRelations('cap_old')
+  expect(rels).toHaveLength(2)
+  expect(rels.map((r) => r.paramsFingerprint)).toEqual(['legacy', 'legacy'])
+  expect(rels.find((r) => r.pageUrl === 'https://old.test/a')?.pageId).toBe(pageId)
+  expect(rels.find((r) => r.pageUrl === 'https://old.test/not-recorded')?.pageId).toBeUndefined()
+  expect(rels.every((r) => r.cardId === cardId)).toBe(true)
+  second.close()
+
+  // 幂等：再开一次不重复补行
+  const third = new CaptureStore(dbPath, samplesDir)
+  expect(third.listRelations('cap_old')).toHaveLength(2)
+  third.close()
+})
+
+it('鉴权标志写卡：authType/authEvidence 入 auth_json，读回时不丢 legacy authBinding', () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_auth', taskType: 'single_page', entryUrl: 'https://x.test',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  const id = store.upsertCard('cap_auth', {
+    mergeKey: 'GET /api', method: 'GET', urlTemplate: '/api', relatedPageUrls: [],
+    authType: 'token-header', authEvidence: 'header:authorization',
+  })
+  const card = store.getCard(id)
+  expect(card?.authType).toBe('token-header')
+  expect(card?.authEvidence).toBe('header:authorization')
+
+  const updated = store.upsertCard('cap_auth', {
+    mergeKey: 'GET /api', method: 'GET', urlTemplate: '/api', relatedPageUrls: [],
+    authBinding: { cookies: 2, storageKeys: 3 },
+  })
+  expect(updated).toBe(id)
+  const merged = store.getCard(id)
+  expect(merged?.authType).toBe('token-header')
+  expect(merged?.authBinding).toEqual({ cookies: 2, storageKeys: 3 })
+  expect(merged?.authEvidence).toBe('header:authorization')
+})
+
+it('notice：中途 setRunNotice 落取，finishRun 收口时保留', () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_n', taskType: 'single_page', entryUrl: 'https://x.test',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  store.setRunNotice('cap_n', '样本上限 1000 已达，超出部分如实弃采')
+  expect(store.getRun('cap_n')?.notice).toContain('样本上限')
+  store.finishRun('cap_n', 'done')
+  expect(store.getRun('cap_n')?.status).toBe('done')
+  expect(store.getRun('cap_n')?.notice).toContain('样本上限')
+})
+
+it('notice 列迁移：无 notice 列的旧库打开后 ALTER 补齐，数据不丢', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'capture-legacy-notice-'))
+  const dbPath = join(dir, 'capture.sqlite')
+  const legacy = new Database(dbPath)
+  legacy.exec(`
+    CREATE TABLE capture_runs (
+      id TEXT PRIMARY KEY, task_type TEXT NOT NULL, entry_url TEXT NOT NULL,
+      status TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER,
+      stats_json TEXT NOT NULL DEFAULT '{}', error TEXT
+    );
+    INSERT INTO capture_runs(id,task_type,entry_url,status,started_at,stats_json)
+      VALUES('cap_old','single_page','https://old.test/','running',1,'{}');
+  `)
+  legacy.close()
+  const store = new CaptureStore(dbPath, join(dir, 'samples'))
+  store.setRunNotice('cap_old', '迁移后写入提醒')
+  expect(store.getRun('cap_old')?.notice).toBe('迁移后写入提醒')
+  store.close()
 })
 

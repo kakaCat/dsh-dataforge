@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>采集网站 · 页面原型</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --line: #e4e7ec;
+    --ink: #1d2129;
+    --ink-2: #4e5969;
+    --ink-3: #86909c;
+    --accent: #3b6ef0;
+    --accent-soft: #eaf0fe;
+    --ok: #16a34a;
+    --ok-soft: #e8f8f0;
+    --warn: #d97706;
+    --warn-soft: #fff4e5;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
+
+  /* ── 顶栏 ─────────────────────────────── */
+  .topbar { background: var(--card); border-bottom: 1px solid var(--line); padding: 0 28px; display: flex; align-items: center; gap: 28px; height: 52px; position: sticky; top: 0; z-index: 10; }
+  .brand { font-weight: 700; font-size: 14px; }
+  .brand em { font-style: normal; color: var(--accent); }
+  .tabs { display: flex; gap: 4px; height: 100%; }
+  .tab { display: flex; align-items: center; padding: 0 14px; color: var(--ink-2); text-decoration: none; border-bottom: 2px solid transparent; font-size: 13px; }
+  .tab.active { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+
+  .page { max-width: 1080px; margin: 0 auto; padding: 24px 28px 64px; }
+
+  .view-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
+  .view-head h1 { font-size: 17px; font-weight: 700; }
+  .view-head .sub { color: var(--ink-3); font-size: 12px; max-width: 560px; text-align: right; }
+  .view-head .sub b { color: var(--accent); font-weight: 600; }
+
+  /* ── 工具条 ───────────────────────────── */
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .search { flex: 1; max-width: 340px; border: 1px solid #d4d8df; border-radius: 8px; padding: 7px 12px; font-size: 13px; background: var(--card); }
+  .search:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .toolbar select { border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; font-size: 12px; color: var(--ink-2); background: var(--card); cursor: pointer; }
+  .sync { margin-left: auto; font-size: 11px; color: var(--ink-3); display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .btn-ghost { border: 1px solid var(--line); background: var(--card); border-radius: 6px; padding: 4px 10px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
+  .btn-ghost:hover { border-color: #b8c3d9; color: var(--ink); }
+
+  /* ═══ 网站行（一级）：状态标签 + 概要 + 可展开 ═══ */
+  .lv { font-size: 10px; font-weight: 700; letter-spacing: .05em; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+  .lv-1 { background: #eef2ff; color: #4f46e5; }
+  .lv-2 { background: #ecfdf5; color: #059669; }
+  .auto-tag { font-size: 10px; color: var(--warn); background: var(--warn-soft); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+  .mono { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+
+  .site { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 12px; overflow: hidden; transition: border-color .15s; }
+  .site:hover { border-color: #b8c3d9; }
+  .site.open { border-color: var(--accent); }
+  .site > header { display: flex; align-items: center; gap: 10px; padding: 13px 18px; cursor: pointer; flex-wrap: wrap; }
+  .site.open > header { background: linear-gradient(90deg, #f8faff, #fff); border-bottom: 1px solid var(--line); }
+  .site .name { font-size: 14.5px; font-weight: 700; }
+  .site .host { font: 11.5px var(--mono); color: var(--ink-3); }
+  .site .stats { margin-left: auto; display: flex; gap: 14px; font-size: 11.5px; color: var(--ink-3); flex-wrap: wrap; }
+  .site .stats b { color: var(--ink-2); }
+  .caret { color: var(--ink-3); font-size: 11px; transition: transform .15s; }
+  .site:not(.open) .caret { transform: rotate(-90deg); }
+  .site .time { width: 100%; font-size: 11px; color: var(--ink-3); display: flex; gap: 16px; padding-top: 4px; border-top: 1px dashed var(--line); margin-top: 8px; }
+
+  /* ── 页面清单（二级）：导轨线 + 页面卡 ── */
+  .site-body { display: none; border-top: 1px dashed var(--line); padding: 14px 18px 16px; background: #fdfdff; }
+  .site.open .site-body { display: block; }
+  .site-body h3 { font-size: 12px; color: var(--ink-2); font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .site-body h3 small { color: var(--ink-3); font-weight: 400; font-size: 11px; }
+
+  .pages-rail { position: relative; margin-left: 18px; padding-left: 16px; border-left: 2px solid var(--line); }
+  .pgcard { border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 10px 14px; transition: border-color .15s; }
+  .pgcard:hover { border-color: #b8c3d9; }
+  .pgcard + .pgcard { margin-top: 8px; }
+  .pg-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .pg-head .pname { font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+  .pg-head a.purl { font: 11.5px var(--mono); color: var(--accent); text-decoration: none; word-break: break-all; flex: 1; min-width: 220px; }
+  .pg-head a.purl:hover { text-decoration: underline; }
+  .pg-head a.purl::after { content: " ↗"; font-size: 10px; }
+  .pg-acts { display: flex; gap: 6px; white-space: nowrap; }
+  .pact { font-size: 11px; font-weight: 600; color: var(--accent); text-decoration: none; border: 1px solid var(--line); border-radius: 6px; padding: 2px 9px; background: #fff; }
+  .pact:hover { border-color: var(--accent); background: var(--accent-soft); }
+  .pg-chips { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--ink-3); flex-wrap: wrap; }
+  .pg-chips b { color: var(--ink-2); }
+
+  /* ── 空态 ─────────────────────────────── */
+  .empty { display: none; border: 1px dashed #d4d8df; border-radius: var(--radius); background: var(--card); text-align: center; padding: 44px 20px; color: var(--ink-3); }
+  .empty b { display: block; font-size: 14px; color: var(--ink-2); margin-bottom: 4px; }
+
+  /* ── 分页条 ───────────────────────────── */
+  .pagerbar { display: flex; align-items: center; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
+  .pagerbar .total { font-size: 12px; color: var(--ink-3); }
+  .pagerbar .pages { display: flex; gap: 4px; margin-left: auto; }
+  .pagerbar .pg-nav { min-width: 30px; text-align: center; border: 1px solid var(--line); background: var(--card); border-radius: 6px; padding: 3px 8px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
+  .pagerbar .pg-nav.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .pagerbar .pg-nav:disabled { opacity: .45; cursor: default; }
+  .pagerbar select { border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font-size: 12px; color: var(--ink-2); background: var(--card); }
+
+  .legend { position: fixed; right: 22px; bottom: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 11px; color: var(--ink-3); box-shadow: 0 4px 18px rgba(20,30,60,.08); }
+  .legend div { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+
+  @media (max-width: 980px) { .legend { display: none; } .view-head .sub { text-align: left; } }
+  @media (max-width: 640px) { .toolbar .sync { margin-left: 0; width: 100%; } .site .time { flex-wrap: wrap; gap: 6px 12px; } .pg-acts { width: 100%; } }
+</style>
+</head>
+<body>
+
+<nav class="topbar">
+  <div class="brand">Data<em>Forge</em> · 数据采集</div>
+  <div class="tabs">
+    <a class="tab" href="quick-capture.html">快速采集</a>
+    <a class="tab" href="api-library.html">接口库</a>
+    <a class="tab active" href="#">采集网站</a>
+    <a class="tab" href="orchestration.html">编排</a>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="view-head">
+    <h1>采集网站</h1>
+    <div class="sub">所有采集过的网站档案 · 按 Host 自动归档、自动取名 · 展开看页面清单：地址可直接<b>回访</b>，「接口」进接口库，「重采」回快速采集并预填地址</div>
+  </div>
+
+  <div class="toolbar">
+    <input class="search" id="q" placeholder="搜索网站名 / Host / 页面…">
+    <select id="sort" title="排序方式">
+      <option value="recent">按最近采集</option>
+      <option value="iface">按接口最多</option>
+      <option value="name">按名称</option>
+    </select>
+    <button class="btn-ghost" id="toggle-all">全部展开</button>
+    <div class="sync">刷新于 <span id="sync-at">12:05:02</span> <button class="btn-ghost" id="refresh">刷新</button></div>
+  </div>
+
+  <div id="site-list">
+
+    <!-- ── 网站 ①（展开，演示二级页面卡） ── -->
+    <article class="site open" data-name="智慧供应链 SCM" data-host="scm.example.com" data-last="202610171204" data-iface="8">
+      <header onclick="this.parentElement.classList.toggle('open')">
+        <span class="lv lv-1">网站</span>
+        <span class="name">智慧供应链 SCM</span>
+        <span class="auto-tag">自动取名</span>
+        <span class="host">scm.example.com</span>
+        <span class="stats">
+          <span>页面 <b>6</b></span><span>接口 <b>8</b></span><span>形态 <b>42</b></span><span>采集 <b>5</b> 次</span>
+        </span>
+        <span class="caret">▼</span>
+        <span class="time"><span>首次采集 10-12 09:31</span><span>最近采集 10-17 12:04</span></span>
+      </header>
+      <div class="site-body">
+        <h3><span class="lv lv-2">页面</span> 采集过的页面（6）<small>点击地址回访原页面 · 同一页可在接口库查看其接口文档</small></h3>
+
+        <div class="pages-rail">
+
+          <div class="pgcard">
+            <div class="pg-head">
+              <span class="pname">采购订单列表</span>
+              <a class="purl" href="https://scm.example.com/purchase/order/list" target="_blank" rel="noopener">https://scm.example.com/purchase/order/list</a>
+              <span class="pg-acts">
+                <a class="pact" href="api-library.html">接口 →</a>
+                <a class="pact" href="quick-capture.html?url=https%3A%2F%2Fscm.example.com%2Fpurchase%2Forder%2Flist">重采</a>
+              </span>
+            </div>
+            <div class="pg-chips">
+              <span>接口 <b>3</b></span><span>样本 <b>17</b></span><span>最近 10-17 12:04</span>
+            </div>
+          </div>
+
+          <div class="pgcard">
+            <div class="pg-head">
+              <span class="pname">采购订单详情</span>
+              <a class="purl" href="https://scm.example.com/purchase/order/detail?orderNo=PO20251017008" target="_blank" rel="noopener">https://scm.example.com/purchase/order/detail?orderNo=PO20251017008</a>
+              <span class="pg-acts">
+                <a class="pact" href="api-library.html">接口 →</a>
+                <a class="pact" href="quick-capture.html?url=https%3A%2F%2Fscm.example.com%2Fpurchase%2Forder%2Fdetail%3ForderNo%3DPO20251017008">重采</a>
+              </span>
+            </div>
+            <div class="pg-chips">
+              <span>接口 <b>2</b></span><span>样本 <b>10</b></span><span>最近 10-17 12:03</span>
+            </div>
+          </div>
+
+          <div class="pgcard">
+            <div class="pg-head">
+              <span class="pname">供应商管理</span>
+              <a class="purl" href="https://scm.example.com/purchase/supplier/index" target="_blank" rel="noopener">https://scm.example.com/purchase/supplier/index</a>
+              <span class="pg-acts">
+                <a class="pact" href="api-library.html">接口 →</a>
+                <a class="pact" href="quick-capture.html?url=https%3A%2F%2Fscm.example.com%2Fpurchase%2Fsupplier%2Findex">重采</a>
+              </span>
+            </div>
+            <div class="pg-chips">
+              <span>接口 <b>3</b></span><span>样本 <b>21</b></span><span>最近 10-15 16:40</span>
+            </div>
+          </div>
+
+          <div class="pgcard">
+            <div class="pg-head">
+              <span class="pname">物料主数据</span>
+              <a class="purl" href="https://scm.example.com/master/material/list" target="_blank" rel="noopener">https://scm.example.com/master/material/list</a>
+              <span class="pg-acts">
+                <a class="pact" href="api-library.html">接口 →</a>
+                <a class="pact" href="quick-capture.html?url=https%3A%2F%2Fscm.example.com%2Fmaster%2Fmaterial%2Flist">重采</a>
+              </span>
+            </div>
+            <div class="pg-chips">
+              <span>接口 <b>2</b></span><span>样本 <b>14</b></span><span>最近 10-14 10:12</span>
+            </div>
+          </div>
+
+          <div class="pgcard">
+            <div class="pg-head">
+              <span class="pname">库存查询</span>
+              <a class="purl" href="https://scm.example.com/stock/query" target="_blank" rel="noopener">https://scm.example.com/stock/query</a>
+              <span class="pg-acts">
+                <a class="pact" href="api-library.html">接口 →</a>
+                <a class="pact" href="quick-capture.html?url=https%3A%2F%2Fscm.example.com%2Fstock%2Fquery">重采</a>
+              </span>
+            </div>
+            <div class="pg-chips">
+              <span>接口 <b>1</b></span><span>样本 <b>8</b></span><span>最近 10-13 14:05</span>
+            </div>
+          </div>
+
+          <div class="pgcard">
+            <div class="pg-head">
+              <span class="pname">首页工作台</span>
+              <a class="purl" href="https://scm.example.com/dashboard" target="_blank" rel="noopener">https://scm.example.com/dashboard</a>
+              <span class="pg-acts">
+                <a class="pact" href="api-library.html">接口 →</a>
+                <a class="pact" href="quick-capture.html?url=https%3A%2F%2Fscm.example.com%2Fdashboard">重采</a>
+              </span>
+            </div>
+            <div class="pg-chips">
+              <span>接口 <b>4</b></span><span>样本 <b>26</b></span><span>最近 10-12 09:31</span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </article>
+
+    <!-- ── 网站 ②（收起） ── -->
+    <article class="site" data-name="BPM 审批中心" data-host="bpm.example.com" data-last="202610171148" data-iface="6">
+      <header onclick="this.parentElement.classList.toggle('open')">
+        <span class="lv lv-1">网站</span>
+        <span class="name">BPM 审批中心</span>
+        <span class="auto-tag">自动取名</span>
+        <span class="host">bpm.example.com</span>
+        <span class="stats">
+          <span>页面 <b>4</b></span><span>接口 <b>6</b></span><span>形态 <b>19</b></span><span>采集 <b>3</b> 次</span>
+        </span>
+        <span class="caret">▼</span>
+        <span class="time"><span>首次采集 10-14 15:02</span><span>最近采集 10-17 11:48</span></span>
+      </header>
+      <div class="site-body">
+        <h3><span class="lv lv-2">页面</span> 采集过的页面（4）<small>点击地址回访原页面 · 同一页可在接口库查看其接口文档</small></h3>
+        <div class="pages-rail">
+          <div class="pgcard">
+            <div class="pg-head">
+              <span class="pname">待办审批列表</span>
+              <a class="purl" href="https://bpm.example.com/todo" target="_blank" rel="noopener">https://bpm.example.com/todo</a>
+              <span class="pg-acts">
+                <a class="pact" href="api-library.html">接口 →</a>
+                <a class="pact" href="quick-capture.html?url=https%3A%2F%2Fbpm.example.com%2Ftodo">重采</a>
+              </span>
+            </div>
+            <div class="pg-chips">
+              <span>接口 <b>3</b></span><span>样本 <b>12</b></span><span>最近 10-17 11:48</span>
+            </div>
+          </div>
+          <div class="pgcard">
+            <div class="pg-head">
+              <span class="pname">审批单详情</span>
+              <a class="purl" href="https://bpm.example.com/detail?id=BP20251017042" target="_blank" rel="noopener">https://bpm.example.com/detail?id=BP20251017042</a>
+              <span class="pg-acts">
+                <a class="pact" href="api-library.html">接口 →</a>
+                <a class="pact" href="quick-capture.html?url=https%3A%2F%2Fbpm.example.com%2Fdetail%3Fid%3DBP20251017042">重采</a>
+              </span>
+            </div>
+            <div class="pg-chips">
+              <span>接口 <b>2</b></span><span>样本 <b>5</b></span><span>最近 10-16 09:20</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <!-- ── 网站 ③（收起） ── -->
+    <article class="site" data-name="统一认证平台" data-host="sso.example.com" data-last="202610161822" data-iface="4">
+      <header onclick="this.parentElement.classList.toggle('open')">
+        <span class="lv lv-1">网站</span>
+        <span class="name">统一认证平台</span>
+        <span class="auto-tag">自动取名</span>
+        <span class="host">sso.example.com</span>
+        <span class="stats">
+          <span>页面 <b>2</b></span><span>接口 <b>4</b></span><span>形态 <b>6</b></span><span>采集 <b>1</b> 次</span>
+        </span>
+        <span class="caret">▼</span>
+        <span class="time"><span>首次采集 10-16 18:22</span><span>最近采集 10-16 18:22</span></span>
+      </header>
+      <div class="site-body">
+        <h3><span class="lv lv-2">页面</span> 采集过的页面（2）<small>点击地址回访原页面 · 同一页可在接口库查看其接口文档</small></h3>
+        <div class="pages-rail">
+          <div class="pgcard">
+            <div class="pg-head">
+              <span class="pname">统一登录页</span>
+              <a class="purl" href="https://sso.example.com/login" target="_blank" rel="noopener">https://sso.example.com/login</a>
+              <span class="pg-acts">
+                <a class="pact" href="api-library.html">接口 →</a>
+                <a class="pact" href="quick-capture.html?url=https%3A%2F%2Fsso.example.com%2Flogin">重采</a>
+              </span>
+            </div>
+            <div class="pg-chips">
+              <span>接口 <b>2</b></span><span>样本 <b>3</b></span><span>最近 10-16 18:22</span>
+            </div>
+          </div>
+          <div class="pgcard">
+            <div class="pg-head">
+              <span class="pname">统一门户</span>
+              <a class="purl" href="https://sso.example.com/portal" target="_blank" rel="noopener">https://sso.example.com/portal</a>
+              <span class="pg-acts">
+                <a class="pact" href="api-library.html">接口 →</a>
+                <a class="pact" href="quick-capture.html?url=https%3A%2F%2Fsso.example.com%2Fportal">重采</a>
+              </span>
+            </div>
+            <div class="pg-chips">
+              <span>接口 <b>2</b></span><span>样本 <b>3</b></span><span>最近 10-16 18:22</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+
+  </div>
+
+  <!-- ── 搜索空态 ── -->
+  <div class="empty" id="empty">
+    <b>没有匹配的网站或页面</b>
+    换个关键词试试，或点击「重采」直接发起该页快速采集。
+  </div>
+
+  <!-- ── 分页条：网站列表分页 ── -->
+  <div class="pagerbar">
+    <span class="total">共 <b id="c-sites">3</b> 个网站 · <b id="c-pages">12</b> 个页面</span>
+    <select><option>10 网站/页</option><option>20 网站/页</option></select>
+    <div class="pages">
+      <button class="pg-nav" disabled>‹</button>
+      <button class="pg-nav on">1</button>
+      <button class="pg-nav" disabled>›</button>
+    </div>
+  </div>
+
+</div>
+
+<div class="legend">
+  <b>层级图例</b>
+  <div><span class="lv lv-1">网站</span> 一级：按 Host 归档的采集档案（分页载体）</div>
+  <div><span class="lv lv-2">页面</span> 二级：该站采集过的页面，地址可跳转回访</div>
+  <div><span class="pact" style="pointer-events:none">接口 →</span> 进接口库看该页接口文档</div>
+  <div><span class="pact" style="pointer-events:none">重采</span> 回快速采集并预填该页地址</div>
+</div>
+
+<script>
+(function () {
+  var sites = Array.prototype.slice.call(document.querySelectorAll('#site-list .site'));
+  var q = document.getElementById('q');
+  var sort = document.getElementById('sort');
+  var empty = document.getElementById('empty');
+  var toggleAll = document.getElementById('toggle-all');
+  var refresh = document.getElementById('refresh');
+  var syncAt = document.getElementById('sync-at');
+  var cSites = document.getElementById('c-sites');
+  var cPages = document.getElementById('c-pages');
+  var allOpen = true;
+
+  function eachPage(site) { return Array.prototype.slice.call(site.querySelectorAll('.pgcard')); }
+
+  /* 搜索：站点名/Host 命中 → 全量页面；仅页面命中 → 强制展开并只留命中页 */
+  q.addEventListener('input', function () {
+    var term = q.value.trim().toLowerCase();
+    var hitSites = 0, hitPages = 0;
+    sites.forEach(function (site) {
+      var kw = (site.dataset.name + ' ' + site.dataset.host).toLowerCase();
+      var siteHit = !term || kw.indexOf(term) !== -1;
+      var pages = eachPage(site);
+      var pageHit = false;
+      pages.forEach(function (pg) {
+        var pk = (pg.querySelector('.pname').textContent + ' ' + pg.querySelector('.purl').textContent).toLowerCase();
+        var show = siteHit || (!!term && pk.indexOf(term) !== -1);
+        if (show) { pageHit = true; hitPages++; }
+        pg.style.display = show ? '' : 'none';
+      });
+      var visible = siteHit || pageHit;
+      site.style.display = visible ? '' : 'none';
+      if (visible) {
+        hitSites++;
+        if (!siteHit && pageHit) site.classList.add('open');
+      }
+    });
+    empty.style.display = hitSites === 0 ? 'block' : 'none';
+    cSites.textContent = hitSites;
+    cPages.textContent = hitPages;
+  });
+
+  /* 排序：最近采集 / 接口最多 / 名称 */
+  sort.addEventListener('change', function () {
+    var list = document.getElementById('site-list');
+    var sorted = sites.slice().sort(function (a, b) {
+      if (sort.value === 'iface') return (+b.dataset.iface) - (+a.dataset.iface);
+      if (sort.value === 'name') return a.dataset.name.localeCompare(b.dataset.name, 'zh-Hans-CN');
+      return (+b.dataset.last) - (+a.dataset.last);
+    });
+    sorted.forEach(function (s) { list.appendChild(s); });
+  });
+
+  /* 全部展开 / 收起 */
+  toggleAll.addEventListener('click', function () {
+    allOpen = !allOpen;
+    sites.forEach(function (s) {
+      if (s.style.display === 'none') return;
+      s.classList.toggle('open', allOpen);
+    });
+    toggleAll.textContent = allOpen ? '全部收起' : '全部展开';
+  });
+
+  /* 刷新（原型：仅推进时间戳文案） */
+  refresh.addEventListener('click', function () {
+    syncAt.textContent = new Date().toTimeString().slice(0, 8);
+  });
+})();
+</script>
+
+</body>
+</html>

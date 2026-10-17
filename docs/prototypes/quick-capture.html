@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>快速采集 · 页面原型</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --line: #e4e7ec;
+    --ink: #1d2129;
+    --ink-2: #4e5969;
+    --ink-3: #86909c;
+    --accent: #3b6ef0;
+    --accent-soft: #eaf0fe;
+    --ok: #16a34a;
+    --ok-soft: #e8f8f0;
+    --warn: #d97706;
+    --warn-soft: #fff4e5;
+    --err: #dc2626;
+    --err-soft: #fdecec;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
+
+  /* ── 顶栏 ─────────────────────────────── */
+  .topbar { background: var(--card); border-bottom: 1px solid var(--line); padding: 0 28px; display: flex; align-items: center; gap: 28px; height: 52px; position: sticky; top: 0; z-index: 10; }
+  .brand { font-weight: 700; font-size: 14px; }
+  .brand em { font-style: normal; color: var(--accent); }
+  .tabs { display: flex; gap: 4px; height: 100%; }
+  .tab { display: flex; align-items: center; padding: 0 14px; color: var(--ink-2); text-decoration: none; border-bottom: 2px solid transparent; font-size: 13px; }
+  .tab.active { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+
+  .page { max-width: 1280px; margin: 0 auto; padding: 24px 28px 64px; display: grid; grid-template-columns: 360px 1fr; gap: 20px; align-items: start; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+  .card + .card { margin-top: 14px; }
+  .card h2 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .card .sub { color: var(--ink-3); font-size: 12px; margin-bottom: 12px; }
+
+  /* ── 左列：发起 ───────────────────────── */
+  .url-input { width: 100%; border: 1px solid #d4d8df; border-radius: 8px; padding: 8px 12px; font: 12px var(--mono); color: var(--ink); }
+  .url-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .mode-tag { display: inline-flex; align-items: center; gap: 5px; background: var(--accent-soft); color: var(--accent); border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 600; margin-top: 10px; }
+  .btn-primary { margin-top: 12px; width: 100%; border: none; background: var(--accent); color: #fff; border-radius: 8px; padding: 9px 0; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .btn-primary:hover { filter: brightness(1.06); }
+
+  /* ── 左列：进度 ───────────────────────── */
+  .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0 14px; }
+  .stat { background: #f7f8fa; border: 1px solid var(--line); border-radius: 8px; padding: 8px 4px; text-align: center; }
+  .stat b { display: block; font-size: 17px; font-weight: 700; }
+  .stat span { font-size: 11px; color: var(--ink-3); }
+
+  .steps { list-style: none; }
+  .steps li { position: relative; padding: 0 0 16px 26px; font-size: 12px; color: var(--ink-2); }
+  .steps li:last-child { padding-bottom: 0; }
+  .steps li::before { content: ""; position: absolute; left: 6px; top: 4px; width: 9px; height: 9px; border-radius: 50%; background: #d4d8df; }
+  .steps li::after { content: ""; position: absolute; left: 10px; top: 16px; bottom: 0; width: 1px; background: var(--line); }
+  .steps li:last-child::after { display: none; }
+  .steps li.done { color: var(--ink); }
+  .steps li.done::before { background: var(--ok); }
+  .steps li.doing { color: var(--accent); font-weight: 600; }
+  .steps li.doing::before { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+  .steps li small { display: block; color: var(--ink-3); font-size: 11px; }
+
+  .badge { display: inline-block; border-radius: 5px; padding: 1px 8px; font-size: 11px; font-weight: 600; }
+  .badge.running { background: var(--accent-soft); color: var(--accent); }
+  .badge.done { background: var(--ok-soft); color: var(--ok); }
+
+  .note { background: var(--warn-soft); border: 1px solid #f5dfa8; border-radius: 8px; padding: 8px 12px; font-size: 12px; color: var(--warn); }
+
+  /* ── 右列：结果文档（三层级） ─────────── */
+  .doc-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+  .doc-head h1 { font-size: 17px; font-weight: 700; }
+  .doc-head .summary { color: var(--ink-3); font-size: 12px; }
+
+  /* 层级标识小标签 */
+  .lv { font-size: 10px; font-weight: 700; letter-spacing: .05em; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+  .lv-1 { background: #eef2ff; color: #4f46e5; }
+  .lv-2 { background: #ecfdf5; color: #059669; }
+  .lv-3 { background: #fff7ed; color: #ea580c; }
+
+  /* L1 页面 */
+  .page-node { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 16px; overflow: hidden; }
+  .page-node > header { display: flex; align-items: center; gap: 10px; padding: 13px 18px; background: linear-gradient(90deg, #f8faff, #fff); border-bottom: 1px solid var(--line); cursor: pointer; }
+  .page-node > header .url { font: 12px var(--mono); color: var(--ink); word-break: break-all; flex: 1; }
+  .page-node > header .meta { color: var(--ink-3); font-size: 11px; white-space: nowrap; }
+  .caret { color: var(--ink-3); font-size: 11px; transition: transform .15s; }
+  .page-node.collapsed .caret { transform: rotate(-90deg); }
+  .page-node.collapsed .page-body { display: none; }
+  .page-body { padding: 14px 18px 16px; }
+
+  /* L2 接口卡：缩进 + 左导轨线表达从属 */
+  .iface { position: relative; margin-left: 18px; padding-left: 18px; border-left: 2px solid var(--line); }
+  .iface + .iface { margin-top: 12px; }
+  .iface-card { border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; cursor: pointer; transition: border-color .15s; }
+  .iface-card:hover { border-color: #b8c3d9; }
+  .iface.open .iface-card { border-color: var(--accent); border-radius: 10px 10px 0 0; border-bottom-style: dashed; }
+  .iface-head { display: flex; align-items: center; gap: 10px; }
+  .iface-head .name { font-weight: 600; flex: 1; }
+  .iface-url { font: 11.5px var(--mono); color: var(--ink-2); word-break: break-all; margin-top: 3px; }
+  .iface-chips { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--ink-3); flex-wrap: wrap; }
+  .method { font: 700 10.5px var(--mono); border-radius: 5px; padding: 1px 7px; }
+  .method.GET { background: var(--ok-soft); color: var(--ok); }
+  .method.POST { background: var(--warn-soft); color: var(--warn); }
+
+  /* L3 接口详情：再缩进一层 */
+  .iface-detail { display: none; margin-left: 0; border: 1px solid var(--accent); border-top: none; border-radius: 0 0 10px 10px; padding: 14px 16px; background: #fdfdff; }
+  .iface.open .iface-detail { display: block; }
+  .detail-sec { margin-left: 14px; padding-left: 14px; border-left: 2px dashed #ead9c2; margin-bottom: 14px; }
+  .detail-sec:last-child { margin-bottom: 0; }
+  .detail-sec h3 { font-size: 12px; color: var(--ink-2); font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+
+  table.fields { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.fields th, table.fields td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; vertical-align: top; }
+  table.fields th { background: #f7f8fa; color: var(--ink-2); font-weight: 600; white-space: nowrap; }
+  table.fields td.mono, .mono { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+  .tag-unverified { color: var(--warn); font-size: 11px; }
+
+  .shape-list { display: flex; flex-direction: column; gap: 6px; }
+  .shape { display: flex; align-items: baseline; gap: 10px; background: #f7f8fa; border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; font-size: 12px; }
+  .shape .fp { font: 11px var(--mono); color: var(--ink-2); }
+  .shape .kv { color: var(--ink-3); font-size: 11px; flex: 1; }
+
+  .legend { position: fixed; right: 22px; bottom: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 11px; color: var(--ink-3); box-shadow: 0 4px 18px rgba(20,30,60,.08); }
+  .legend div { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+
+  @media (max-width: 980px) { .page { grid-template-columns: 1fr; } .legend { display: none; } }
+</style>
+</head>
+<body>
+
+<nav class="topbar">
+  <div class="brand">Data<em>Forge</em> · 数据采集</div>
+  <div class="tabs">
+    <a class="tab active" href="#">快速采集</a>
+    <a class="tab" href="api-library.html">接口库</a>
+    <a class="tab" href="sites.html">采集网站</a>
+    <a class="tab" href="orchestration.html">编排</a>
+  </div>
+</nav>
+
+<div class="page">
+
+  <!-- ═══ 左列：发起 + 进度 ═══ -->
+  <aside>
+    <section class="card">
+      <h2>发起采集</h2>
+      <p class="sub">粘贴一个页面地址，采集它加载期间发出的 XHR / fetch 请求，沉淀为接口卡。</p>
+      <input class="url-input" type="url" value="https://scm.example.com/purchase/order/list" spellcheck="false">
+      <span class="mode-tag">单页 · 只读 · 约 30 秒</span>
+      <button class="btn-primary">发起采集</button>
+    </section>
+
+    <section class="card">
+      <h2>本次进度 <span class="badge running">进行中</span></h2>
+      <p class="sub">captureId cap_20251017_0031 · 每 2 秒自动刷新，收口后停止</p>
+      <div class="stat-grid">
+        <div class="stat"><b>1</b><span>页面</span></div>
+        <div class="stat"><b>27</b><span>请求样本</span></div>
+        <div class="stat"><b>5</b><span>接口卡</span></div>
+        <div class="stat"><b>2</b><span>凭证来源</span></div>
+      </div>
+      <ul class="steps">
+        <li class="done">启动浏览器会话<small>12:02:11 · 无头 Chrome</small></li>
+        <li class="done">加载页面<small>12:02:14 · DOM ready，2.8s</small></li>
+        <li class="doing">静止期监听 XHR / fetch<small>已捕获 27 个请求，监听中…</small></li>
+        <li>归并接口卡<small>同接口按 URL 模板 + 方法归并</small></li>
+        <li>收口出文档<small>页面 → 接口 → 形态</small></li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>边界说明</h2>
+      <p class="sub" style="margin-bottom:0">面板只发起<b>单页只读</b>采集。整站爬取、搜索 / 翻页 / 提交等写操作，请在 agent 会话里用 <span class="mono">dataforge_capture</span>，写操作会先经你确认。</p>
+    </section>
+  </aside>
+
+  <!-- ═══ 右列：采集结果文档（页面 → 接口 → 形态） ═══ -->
+  <main>
+    <div class="doc-head">
+      <h1>采集结果</h1>
+      <div class="summary">2 个页面 · 5 个接口 · 9 种调用形态 · 收口于 12:04:38 <span class="badge done">已完成</span></div>
+    </div>
+
+    <!-- L1：页面节点 ① -->
+    <section class="page-node">
+      <header onclick="this.parentElement.classList.toggle('collapsed')">
+        <span class="lv lv-1">页面</span>
+        <span class="url">https://scm.example.com/purchase/order/list</span>
+        <span class="meta">采购订单列表 · 3 个接口 · 17 样本</span>
+        <span class="caret">▼</span>
+      </header>
+      <div class="page-body">
+
+        <!-- L2：接口 ①（展开，含 L3） -->
+        <div class="iface open">
+          <div class="iface-card" onclick="this.parentElement.classList.toggle('open')">
+            <div class="iface-head">
+              <span class="lv lv-2">接口</span>
+              <span class="method POST">POST</span>
+              <span class="name">采购订单分页查询</span>
+              <span class="caret">▼</span>
+            </div>
+            <div class="iface-url">/api/scm/purchase/order/page</div>
+            <div class="iface-chips">
+              <span>3 种形态 · 9 样本</span>
+              <span>鉴权 header:cookie:JSESSIONID</span>
+              <span>归并键 POST /api/scm/purchase/order/page</span>
+            </div>
+          </div>
+          <div class="iface-detail">
+
+            <!-- L3：调用形态 -->
+            <div class="detail-sec">
+              <h3><span class="lv lv-3">形态</span>调用形态（3）<small style="color:var(--ink-3);font-weight:400">同接口的不同入参指纹 = 不同业务调用方式</small></h3>
+              <div class="shape-list">
+                <div class="shape"><span class="fp">a1f3…9c</span><span class="kv">pageNum=1, pageSize=20, status=已审批</span><span>5 样本</span></div>
+                <div class="shape"><span class="fp">b77e…21</span><span class="kv">pageNum=1, pageSize=20, status=待审批, orgCode=2120</span><span>3 样本</span></div>
+                <div class="shape"><span class="fp">c90a…4d</span><span class="kv">pageNum=2, pageSize=20</span><span>1 样本</span></div>
+              </div>
+            </div>
+
+            <!-- L3：请求模板 -->
+            <div class="detail-sec">
+              <h3><span class="lv lv-3">模板</span>请求模板</h3>
+              <table class="fields">
+                <tr><th>字段</th><th>位置</th><th>类型</th><th>示例</th><th>备注</th></tr>
+                <tr><td class="mono">pageNum</td><td>body</td><td>number</td><td class="mono">1</td><td></td></tr>
+                <tr><td class="mono">pageSize</td><td>body</td><td>number</td><td class="mono">20</td><td></td></tr>
+                <tr><td class="mono">status</td><td>body</td><td>string</td><td class="mono">已审批</td><td>枚举，<span class="tag-unverified">取值未验证</span></td></tr>
+                <tr><td class="mono">orgCode</td><td>body</td><td>string?</td><td class="mono">2120</td><td>可选，仅形态 b77e…21 出现</td></tr>
+              </table>
+            </div>
+
+            <!-- L3：响应模板 -->
+            <div class="detail-sec">
+              <h3><span class="lv lv-3">模板</span>响应模板</h3>
+              <table class="fields">
+                <tr><th>字段</th><th>类型</th><th>备注</th></tr>
+                <tr><td class="mono">code</td><td>number</td><td>0 = 成功</td></tr>
+                <tr><td class="mono">data.total</td><td>number</td><td>总条数</td></tr>
+                <tr><td class="mono">data.list[]</td><td>array&lt;object&gt;</td><td>订单行：orderNo / supplierCode / amount / status …</td></tr>
+              </table>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- L2：接口 ②（收起） -->
+        <div class="iface">
+          <div class="iface-card" onclick="this.parentElement.classList.toggle('open')">
+            <div class="iface-head">
+              <span class="lv lv-2">接口</span>
+              <span class="method GET">GET</span>
+              <span class="name">订单状态字典</span>
+              <span class="caret">▼</span>
+            </div>
+            <div class="iface-url">/api/scm/dict/orderStatus</div>
+            <div class="iface-chips"><span>1 种形态 · 2 样本</span><span>鉴权 header:cookie:JSESSIONID</span></div>
+          </div>
+          <div class="iface-detail"></div>
+        </div>
+
+        <!-- L2：接口 ③（收起） -->
+        <div class="iface">
+          <div class="iface-card" onclick="this.parentElement.classList.toggle('open')">
+            <div class="iface-head">
+              <span class="lv lv-2">接口</span>
+              <span class="method GET">GET</span>
+              <span class="name">供应商联想搜索</span>
+              <span class="caret">▼</span>
+            </div>
+            <div class="iface-url">/api/scm/supplier/suggest?keyword={keyword}</div>
+            <div class="iface-chips"><span>2 种形态 · 6 样本</span><span>未探测到鉴权</span></div>
+          </div>
+          <div class="iface-detail"></div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- L1：页面节点 ②（收起态） -->
+    <section class="page-node collapsed">
+      <header onclick="this.parentElement.classList.toggle('collapsed')">
+        <span class="lv lv-1">页面</span>
+        <span class="url">https://scm.example.com/purchase/order/detail?orderNo=PO20251017008</span>
+        <span class="meta">采购订单详情 · 2 个接口 · 10 样本</span>
+        <span class="caret">▼</span>
+      </header>
+      <div class="page-body"></div>
+    </section>
+
+  </main>
+</div>
+
+<div class="legend">
+  <b>层级图例</b>
+  <div><span class="lv lv-1">页面</span> 采集到的页面（结果第一级分组）</div>
+  <div><span class="lv lv-2">接口</span> 页面下沉淀的接口卡（归并后）</div>
+  <div><span class="lv lv-3">形态/模板</span> 接口的调用形态与请求/响应字段</div>
+</div>
+
+</body>
+</html>

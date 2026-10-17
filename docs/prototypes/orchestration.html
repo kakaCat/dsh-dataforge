@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>编排（DAG）· 页面原型</title>
+
+<!-- React Flow 样式（CDN） -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xyflow/react@12/dist/style.css">
+
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --line: #e4e7ec;
+    --ink: #1d2129;
+    --ink-2: #4e5969;
+    --ink-3: #86909c;
+    --accent: #3b6ef0;
+    --accent-soft: #eaf0fe;
+    --ok: #16a34a;
+    --ok-soft: #e8f8f0;
+    --warn: #d97706;
+    --warn-soft: #fff4e5;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
+
+  /* ── 顶栏 ─────────────────────────────── */
+  .topbar { background: var(--card); border-bottom: 1px solid var(--line); padding: 0 28px; display: flex; align-items: center; gap: 28px; height: 52px; position: sticky; top: 0; z-index: 10; }
+  .brand { font-weight: 700; font-size: 14px; }
+  .brand em { font-style: normal; color: var(--accent); }
+  .tabs { display: flex; gap: 4px; height: 100%; }
+  .tab { display: flex; align-items: center; padding: 0 14px; color: var(--ink-2); text-decoration: none; border-bottom: 2px solid transparent; font-size: 13px; }
+  .tab.active { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+
+  .page { max-width: 1180px; margin: 0 auto; padding: 24px 28px 64px; }
+
+  .lv { font-size: 10px; font-weight: 700; letter-spacing: .05em; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+  .lv-1 { background: #eef2ff; color: #4f46e5; }
+  .lv-2 { background: #ecfdf5; color: #059669; }
+  .lv-3 { background: #fff7ed; color: #ea580c; }
+  .auto-tag { font-size: 10px; color: var(--warn); background: var(--warn-soft); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+  .mono { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+
+  .view-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+  .view-head h1 { font-size: 17px; font-weight: 700; }
+  .view-head .sub { color: var(--ink-3); font-size: 12px; }
+
+  /* ═══ 视图 A：选网站（一级） ═══ */
+  .site-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+  .site-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+  .site-card:hover { border-color: var(--accent); box-shadow: 0 4px 16px rgba(59,110,240,.10); }
+  .site-card .title { display: flex; align-items: center; gap: 8px; }
+  .site-card .title b { font-size: 14.5px; flex: 1; }
+  .site-card .host { font: 11.5px var(--mono); color: var(--ink-3); margin-top: 3px; }
+  .site-card .stats { display: flex; gap: 14px; margin-top: 12px; font-size: 11.5px; color: var(--ink-3); flex-wrap: wrap; }
+  .site-card .stats b { color: var(--ink-2); }
+  .site-card .foot { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--ink-3); }
+  .site-card .enter { color: var(--accent); font-weight: 600; font-size: 12px; }
+
+  /* ═══ 视图 B：编排类型 + 业务流程三级列表 ═══ */
+  .crumb { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 12.5px; color: var(--ink-3); }
+  .crumb a { color: var(--accent); text-decoration: none; cursor: pointer; font-weight: 600; }
+
+  .kind-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .kind-tab { border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 6px 18px; font-size: 13px; color: var(--ink-2); cursor: pointer; display: flex; align-items: center; gap: 8px; }
+  .kind-tab.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .kind-tab small { font-size: 11px; color: var(--ink-3); font-weight: 400; }
+  .kind-tab.on small { color: var(--accent); }
+
+  /* 三级列表：业务域(L1) → 流程(L2) → 版本(L3) */
+  .domain { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 14px; overflow: hidden; }
+  .domain > header { display: flex; align-items: center; gap: 10px; padding: 12px 18px; background: linear-gradient(90deg, #f8faff, #fff); border-bottom: 1px solid var(--line); cursor: pointer; }
+  .domain > header .dname { font-weight: 700; flex: 1; }
+  .domain > header .meta { color: var(--ink-3); font-size: 11px; }
+  .caret { color: var(--ink-3); font-size: 11px; transition: transform .15s; }
+  .edit-btn { border: none; background: none; cursor: pointer; color: var(--ink-3); font-size: 12px; padding: 0 3px; opacity: 0; transition: opacity .15s; }
+  .domain > header:hover .edit-btn, .flow > header:hover .edit-btn { opacity: 1; }
+  .edit-btn:hover { color: var(--accent); }
+  .rename-input { border: 1px solid var(--accent); border-radius: 6px; padding: 2px 8px; font-size: 13px; font-family: inherit; flex: 1; min-width: 0; }
+  .domain.collapsed .caret { transform: rotate(-90deg); }
+  .domain.collapsed .domain-body { display: none; }
+  .domain-body { padding: 10px 18px 14px; }
+
+  .flow { margin-left: 18px; padding-left: 16px; border-left: 2px solid var(--line); }
+  .flow + .flow { margin-top: 10px; }
+  .flow > header { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; background: #fff; }
+  .flow > header:hover { border-color: #b8c3d9; }
+  .flow > header .fname { font-weight: 600; flex: 1; }
+  .flow > header .meta { color: var(--ink-3); font-size: 11px; }
+  .flow.collapsed .flow-body { display: none; }
+  .flow-body { padding: 8px 0 2px; }
+
+  .ver { margin-left: 26px; padding-left: 16px; border-left: 2px dashed #ead9c2; display: flex; align-items: center; gap: 10px; padding-top: 7px; padding-bottom: 7px; }
+  .ver .vtag { font: 700 11px var(--mono); background: #f2f4f7; border-radius: 5px; padding: 1px 8px; }
+  .ver .vtag.cur { background: var(--ok-soft); color: var(--ok); }
+  .ver .vmeta { font-size: 11px; color: var(--ink-3); flex: 1; }
+  .btn-view { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 6px; padding: 3px 12px; font-size: 12px; cursor: pointer; }
+  .btn-ghost { border: 1px solid var(--line); background: var(--card); border-radius: 6px; padding: 3px 10px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
+
+  /* ═══ 视图 C：编排图（React Flow 画布） ═══ */
+  .canvas-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .canvas-head .fname { font-size: 15px; font-weight: 700; }
+  .canvas-head .fmeta { font-size: 11.5px; color: var(--ink-3); }
+  .canvas-head .ops { margin-left: auto; display: flex; gap: 8px; }
+  .flow-wrap { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; height: 560px; }
+  #dag-root { width: 100%; height: 100%; }
+
+  /* React Flow 自定义节点 */
+  .rf-page-node { border: 1.5px solid var(--accent); background: #fff; border-radius: 10px; padding: 8px 14px; min-width: 170px; box-shadow: 0 2px 8px rgba(30,50,120,.08); }
+  .rf-page-node .t { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12.5px; }
+  .rf-page-node .u { font: 10.5px var(--mono); color: var(--ink-3); margin-top: 2px; }
+  .rf-api-node { border: 1.5px solid #059669; background: #fff; border-radius: 10px; padding: 8px 14px; min-width: 190px; box-shadow: 0 2px 8px rgba(30,50,120,.08); }
+  .rf-api-node .t { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12.5px; }
+  .rf-api-node .u { font: 10.5px var(--mono); color: var(--ink-3); margin-top: 2px; }
+  .rf-pill-node { border: 1.5px solid #94a3b8; background: #f8fafc; color: var(--ink-2); border-radius: 999px; padding: 5px 20px; font-weight: 700; font-size: 12px; }
+  .rf-node-selected { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .method { font: 700 10px var(--mono); border-radius: 5px; padding: 1px 6px; }
+  .method.GET { background: var(--ok-soft); color: var(--ok); }
+  .method.POST { background: var(--warn-soft); color: var(--warn); }
+
+  /* 画布内编辑面板与工具条（React Flow Panel） */
+  .rf-edit-panel { width: 264px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 28px rgba(20,30,60,.12); font-size: 12px; }
+  .rf-edit-panel h3 { font-size: 13px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+  .rf-edit-panel .close { border: none; background: none; cursor: pointer; color: var(--ink-3); font-size: 13px; }
+  .rf-edit-panel label { display: block; font-size: 11px; color: var(--ink-3); margin: 8px 0 3px; }
+  .rf-edit-panel input, .rf-edit-panel select, .rf-edit-panel textarea { width: 100%; border: 1px solid #d4d8df; border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; box-sizing: border-box; }
+  .rf-edit-panel input:focus, .rf-edit-panel select:focus, .rf-edit-panel textarea:focus { outline: none; border-color: var(--accent); }
+  .rf-edit-panel .row { display: flex; gap: 8px; margin-top: 12px; }
+  .rf-toolbar-panel { display: flex; gap: 6px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; box-shadow: 0 2px 10px rgba(20,30,60,.08); }
+  .rf-toolbar-panel button { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 3px 10px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
+  .rf-toolbar-panel button:hover { border-color: var(--accent); color: var(--accent); }
+  .rf-hint { font-size: 10.5px; color: var(--ink-3); padding: 0 6px; }
+  .btn-danger { border: 1px solid #f3c2c2; background: #fff; color: #dc2626; border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+  .btn-danger:hover { background: #fdecec; }
+
+  .canvas-box { position: relative; }
+
+  .legend { position: fixed; right: 22px; bottom: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 11px; color: var(--ink-3); box-shadow: 0 4px 18px rgba(20,30,60,.08); }
+  .legend div { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+  @media (max-width: 980px) { .legend { display: none; } }
+
+  /* 分页条 */
+  .pagerbar { display: flex; align-items: center; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
+  .pagerbar .total { font-size: 12px; color: var(--ink-3); }
+  .pagerbar .pages { display: flex; gap: 4px; margin-left: auto; }
+  .pagerbar .pg { min-width: 30px; text-align: center; border: 1px solid var(--line); background: var(--card); border-radius: 6px; padding: 3px 8px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
+  .pagerbar .pg.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .pagerbar .pg:disabled { opacity: .45; cursor: default; }
+  .pagerbar select { border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font-size: 12px; color: var(--ink-2); background: var(--card); }
+
+  /* 工具条（检索 + 新建 + 导入） */
+  .ob-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .ob-toolbar .search { flex: 1; min-width: 220px; max-width: 380px; border: 1px solid #d4d8df; border-radius: 8px; padding: 7px 12px; font-size: 13px; background: var(--card); }
+  .ob-toolbar .search:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .ob-toolbar .ops { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .fmt-tag { font-size: 10.5px; color: var(--ink-3); border: 1px dashed var(--line); border-radius: 5px; padding: 2px 7px; }
+
+  /* 新建流程弹窗 */
+  .modal-mask { position: fixed; inset: 0; background: rgba(20,28,45,.38); display: none; align-items: center; justify-content: center; z-index: 100; }
+  .modal-mask.show { display: flex; }
+  .modal { width: 440px; background: var(--card); border-radius: 14px; padding: 20px 22px; box-shadow: 0 18px 60px rgba(15,25,55,.25); }
+  .modal h2 { font-size: 15px; margin-bottom: 4px; }
+  .modal .sub { color: var(--ink-3); font-size: 12px; margin-bottom: 14px; }
+  .modal .field { margin-bottom: 12px; }
+  .modal .field label { display: block; font-size: 12px; color: var(--ink-2); margin-bottom: 4px; }
+  .modal .field label b { color: #dc2626; }
+  .modal .field input, .modal .field select, .modal .field textarea { width: 100%; border: 1px solid #d4d8df; border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: inherit; background: #fff; }
+  .modal .field input:focus, .modal .field select:focus, .modal .field textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .modal .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .modal .modal-ops { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+  /* 编排图列表（分页载体） */
+  .graph { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 10px; display: flex; align-items: center; gap: 16px; padding: 12px 16px; transition: border-color .15s; }
+  .graph:hover { border-color: #b8c3d9; }
+  .graph .thumb { width: 132px; height: 64px; border: 1px solid var(--line); border-radius: 8px; background: #fafbfd; flex-shrink: 0; }
+  .graph .info { flex: 1; min-width: 0; }
+  .graph .info .gname { font-weight: 700; font-size: 13.5px; display: flex; align-items: center; gap: 8px; }
+  .graph .info .gmeta { font-size: 11.5px; color: var(--ink-3); margin-top: 3px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .graph .info .gmeta b { color: var(--ink-2); }
+  .graph .gops { display: flex; gap: 8px; flex-shrink: 0; }
+
+  #view-flows, #view-graphs, #view-canvas { display: none; }
+  .cdn-note { font-size: 11px; color: var(--ink-3); margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<nav class="topbar">
+  <div class="brand">Data<em>Forge</em> · 数据采集</div>
+  <div class="tabs">
+    <a class="tab" href="quick-capture.html">快速采集</a>
+    <a class="tab" href="api-library.html">接口库</a>
+    <a class="tab" href="sites.html">采集网站</a>
+    <a class="tab active" href="#">编排</a>
+  </div>
+</nav>
+
+<div class="page">
+
+  <!-- ═══ 视图 A：先选网站（一级） ═══ -->
+  <div id="view-sites">
+    <div class="view-head">
+      <h1>编排（DAG）</h1>
+      <div class="sub">把采集到的页面与接口编排成业务流程 · 先选择一个网站</div>
+    </div>
+    <div class="site-grid">
+      <div class="site-card" onclick="enterSite('智慧供应链 SCM', 'scm.example.com')">
+        <div class="title"><span class="lv lv-1">网站</span><b>智慧供应链 SCM</b><span class="auto-tag">自动取名</span></div>
+        <div class="host">scm.example.com</div>
+        <div class="stats"><span>页面编排 <b>2</b></span><span>接口编排 <b>3</b></span></div>
+        <div class="foot"><span>最近更新 10-17 12:10</span><span class="enter">进入 →</span></div>
+      </div>
+      <div class="site-card" onclick="enterSite('BPM 审批中心', 'bpm.example.com')">
+        <div class="title"><span class="lv lv-1">网站</span><b>BPM 审批中心</b><span class="auto-tag">自动取名</span></div>
+        <div class="host">bpm.example.com</div>
+        <div class="stats"><span>页面编排 <b>1</b></span><span>接口编排 <b>1</b></span></div>
+        <div class="foot"><span>最近更新 10-17 11:50</span><span class="enter">进入 →</span></div>
+      </div>
+    </div>
+
+    <!-- 分页条：网站列表分页 -->
+    <div class="pagerbar">
+      <span class="total">共 <b>2</b> 个网站 · <b>7</b> 条编排流程</span>
+      <select><option>9 网站/页</option><option>18 网站/页</option></select>
+      <div class="pages">
+        <button class="pg" disabled>‹</button>
+        <button class="pg on">1</button>
+        <button class="pg" disabled>›</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 视图 B：编排类型（二级）+ 业务流程三级列表 ═══ -->
+  <div id="view-flows">
+    <div class="crumb">
+      <a onclick="backToSites()">← 返回网站列表</a>
+      <span>/</span><span>编排</span><span>/</span><b id="crumb-site" style="color:var(--ink)">智慧供应链 SCM</b>
+    </div>
+
+    <div class="kind-tabs">
+      <button class="kind-tab on" id="tab-page" onclick="switchKind('page')">页面编排 <small>跨页面的业务流程</small></button>
+      <button class="kind-tab" id="tab-api" onclick="switchKind('api')">接口编排 <small>接口调用依赖 DAG</small></button>
+    </div>
+
+    <!-- 工具条：检索 + 新建流程（流程名称在此创建）+ 导入 -->
+    <div class="ob-toolbar">
+      <input class="search" placeholder="搜索流程名 / 业务域 / 版本说明…">
+      <div class="ops">
+        <span class="fmt-tag">导入格式：YAML</span>
+        <button class="btn-ghost" onclick="alert('原型占位：选择 .yaml 编排定义文件')">导入编排</button>
+        <button class="btn-view" onclick="openNewFlow()">+ 新建流程</button>
+      </div>
+    </div>
+
+    <!-- 页面编排的三级列表 -->
+    <div id="list-page">
+      <div class="domain">
+        <header onclick="this.parentElement.classList.toggle('collapsed')">
+          <span class="lv lv-1">业务域</span>
+          <span class="dname">采购域</span><button class="edit-btn" title="重命名" onclick="event.stopPropagation();renameEl(this.previousElementSibling)">✎</button>
+          <span class="meta">2 条流程</span>
+          <span class="caret">▼</span>
+        </header>
+        <div class="domain-body">
+          <div class="flow">
+            <header onclick="this.parentElement.classList.toggle('collapsed')">
+              <span class="lv lv-2">流程</span>
+              <span class="fname">采购下单动线</span><button class="edit-btn" title="重命名" onclick="event.stopPropagation();renameEl(this.previousElementSibling)">✎</button>
+              <span class="meta">5 页面节点 · 更新于 10-17 12:10</span>
+              <span class="caret">▼</span>
+            </header>
+            <div class="flow-body">
+              <div class="ver">
+                <span class="lv lv-3">版本</span>
+                <span class="vtag cur">v3 · 当前</span>
+                <span class="vmeta">12:10 由 agent 会话保存 · 新增供应商管理分支</span>
+                <button class="btn-view" onclick="openGraphs('page')">查看编排图</button>
+              </div>
+              <div class="ver">
+                <span class="lv lv-3">版本</span>
+                <span class="vtag">v2</span>
+                <span class="vmeta">10-15 16:44 · 直线动线（登录 → 列表 → 详情）</span>
+                <button class="btn-ghost">查看编排图</button>
+              </div>
+            </div>
+          </div>
+          <div class="flow collapsed">
+            <header onclick="this.parentElement.classList.toggle('collapsed')">
+              <span class="lv lv-2">流程</span>
+              <span class="fname">库存盘点动线</span><button class="edit-btn" title="重命名" onclick="event.stopPropagation();renameEl(this.previousElementSibling)">✎</button>
+              <span class="meta">3 页面节点 · 更新于 10-14 10:30</span>
+              <span class="caret">▼</span>
+            </header>
+            <div class="flow-body"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 分页条：页面编排流程分页 -->
+      <div class="pagerbar">
+        <span class="total">共 <b>2</b> 条页面编排流程</span>
+        <select><option>10 条/页</option><option>20 条/页</option></select>
+        <div class="pages">
+          <button class="pg" disabled>‹</button>
+          <button class="pg on">1</button>
+          <button class="pg" disabled>›</button>
+        </div>
+      </div>
+    </div>
+    <div id="list-api" style="display:none">
+      <div class="domain">
+        <header onclick="this.parentElement.classList.toggle('collapsed')">
+          <span class="lv lv-1">业务域</span>
+          <span class="dname">采购域</span><button class="edit-btn" title="重命名" onclick="event.stopPropagation();renameEl(this.previousElementSibling)">✎</button>
+          <span class="meta">2 条流程</span>
+          <span class="caret">▼</span>
+        </header>
+        <div class="domain-body">
+          <div class="flow">
+            <header onclick="this.parentElement.classList.toggle('collapsed')">
+              <span class="lv lv-2">流程</span>
+              <span class="fname">采购订单创建接口链</span><button class="edit-btn" title="重命名" onclick="event.stopPropagation();renameEl(this.previousElementSibling)">✎</button>
+              <span class="meta">6 接口节点 · 更新于 10-17 12:08</span>
+              <span class="caret">▼</span>
+            </header>
+            <div class="flow-body">
+              <div class="ver">
+                <span class="lv lv-3">版本</span>
+                <span class="vtag cur">v2 · 当前</span>
+                <span class="vmeta">12:08 · 字典与联想改为并行加载</span>
+                <button class="btn-view" onclick="openGraphs('api')">查看编排图</button>
+              </div>
+              <div class="ver">
+                <span class="lv lv-3">版本</span>
+                <span class="vtag">v1</span>
+                <span class="vmeta">10-16 09:20 · 串行调用链</span>
+                <button class="btn-ghost">查看编排图</button>
+              </div>
+            </div>
+          </div>
+          <div class="flow collapsed">
+            <header onclick="this.parentElement.classList.toggle('collapsed')">
+              <span class="lv lv-2">流程</span>
+              <span class="fname">供应商建档接口链</span><button class="edit-btn" title="重命名" onclick="event.stopPropagation();renameEl(this.previousElementSibling)">✎</button>
+              <span class="meta">4 接口节点 · 更新于 10-15 17:01</span>
+              <span class="caret">▼</span>
+            </header>
+            <div class="flow-body"></div>
+          </div>
+        </div>
+      </div>
+      <div class="domain collapsed">
+        <header onclick="this.parentElement.classList.toggle('collapsed')">
+          <span class="lv lv-1">业务域</span>
+          <span class="dname">审批域</span><button class="edit-btn" title="重命名" onclick="event.stopPropagation();renameEl(this.previousElementSibling)">✎</button>
+          <span class="meta">1 条流程</span>
+          <span class="caret">▼</span>
+        </header>
+        <div class="domain-body"></div>
+      </div>
+
+      <!-- 分页条：接口编排流程分页 -->
+      <div class="pagerbar">
+        <span class="total">共 <b>3</b> 条接口编排流程</span>
+        <select><option>10 条/页</option><option>20 条/页</option></select>
+        <div class="pages">
+          <button class="pg" disabled>‹</button>
+          <button class="pg on">1</button>
+          <button class="pg" disabled>›</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 视图 C：编排图列表（分页） ═══ -->
+  <div id="view-graphs">
+    <div class="crumb">
+      <a onclick="backToFlows()">← 返回流程列表</a>
+      <span>/</span><span>编排</span><span>/</span><b id="crumb-site3" style="color:var(--ink)">智慧供应链 SCM</b><span>/</span><b id="crumb-flow2" style="color:var(--ink)"></b>
+    </div>
+
+    <div class="view-head">
+      <h1>编排图 <span class="lv" style="background:var(--accent-soft);color:var(--accent)" id="graphs-kind">页面编排</span></h1>
+      <div class="sub">该流程版本下的编排图 · 分页列表 · 点「打开画布」进入编辑</div>
+    </div>
+
+    <!-- 编排图 ① -->
+    <div class="graph">
+      <svg class="thumb" viewBox="0 0 132 64">
+        <rect x="6" y="24" width="22" height="14" rx="4" fill="#fff" stroke="#3b6ef0"/>
+        <rect x="46" y="10" width="26" height="14" rx="4" fill="#fff" stroke="#3b6ef0"/>
+        <rect x="46" y="40" width="26" height="14" rx="4" fill="#fff" stroke="#3b6ef0"/>
+        <rect x="92" y="24" width="28" height="14" rx="4" fill="#fff" stroke="#3b6ef0"/>
+        <path d="M28 31 L46 17 M28 31 L46 47 M72 17 L92 29 M72 47 L92 33" stroke="#86909c" fill="none"/>
+      </svg>
+      <div class="info">
+        <div class="gname">采购下单动线 · 主图 <span class="vtag cur" style="font:700 11px var(--mono);background:var(--ok-soft);color:var(--ok);border-radius:5px;padding:1px 8px">v3 · 当前</span></div>
+        <div class="gmeta"><span>节点 <b>5</b></span><span>边 <b>4</b></span><span>更新于 <b>10-17 12:10</b></span><span>来源 <b>agent 会话保存</b></span></div>
+      </div>
+      <div class="gops">
+        <button class="btn-ghost" onclick="alert('原型占位：导出 YAML 编排定义')">导出 YAML</button>
+        <button class="btn-view" onclick="openCanvas('page')">打开画布</button>
+      </div>
+    </div>
+
+    <!-- 编排图 ② -->
+    <div class="graph">
+      <svg class="thumb" viewBox="0 0 132 64">
+        <rect x="6" y="24" width="22" height="14" rx="4" fill="#fff" stroke="#3b6ef0"/>
+        <rect x="52" y="24" width="26" height="14" rx="4" fill="#fff" stroke="#3b6ef0"/>
+        <rect x="98" y="24" width="26" height="14" rx="4" fill="#fff" stroke="#3b6ef0"/>
+        <path d="M28 31 L52 31 M78 31 L98 31" stroke="#86909c" fill="none"/>
+      </svg>
+      <div class="info">
+        <div class="gname">直线动线（旧） <span class="vtag" style="font:700 11px var(--mono);background:#f2f4f7;border-radius:5px;padding:1px 8px">v2</span></div>
+        <div class="gmeta"><span>节点 <b>3</b></span><span>边 <b>2</b></span><span>更新于 <b>10-15 16:44</b></span><span>已被 v3 取代</span></div>
+      </div>
+      <div class="gops">
+        <button class="btn-ghost" onclick="alert('原型占位：导出 YAML 编排定义')">导出 YAML</button>
+        <button class="btn-ghost" onclick="openCanvas('page')">打开画布</button>
+      </div>
+    </div>
+
+    <!-- 分页条：编排图分页 -->
+    <div class="pagerbar">
+      <span class="total">共 <b>2</b> 张编排图</span>
+      <select><option>10 张/页</option><option>20 张/页</option></select>
+      <div class="pages">
+        <button class="pg" disabled>‹</button>
+        <button class="pg on">1</button>
+        <button class="pg" disabled>›</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 视图 D：编排图（@xyflow/react 画布） ═══ -->
+  <div id="view-canvas">
+    <div class="crumb">
+      <a onclick="backToGraphs()">← 返回编排图列表</a>
+      <span>/</span><span>编排</span><span>/</span><b id="crumb-site2" style="color:var(--ink)">智慧供应链 SCM</b><span>/</span><b id="crumb-flow" style="color:var(--ink)"></b>
+    </div>
+    <div class="canvas-head">
+      <span class="fname" id="canvas-title">采购下单动线</span>
+      <span class="fmeta" id="canvas-meta">页面编排 · v3 · 5 节点 4 边 · 更新于 10-17 12:10</span>
+      <div class="ops">
+        <button class="btn-ghost" onclick="alert('原型占位：导出 YAML 编排定义')">导出 YAML</button>
+        <button class="btn-ghost">导出 PNG</button>
+        <button class="btn-view" onclick="alert('原型占位：画布序列化为 YAML，保存为该流程的新版本')">保存为新版本</button>
+      </div>
+    </div>
+    <div class="canvas-box">
+      <div class="flow-wrap"><div id="dag-root"></div></div>
+    </div>
+    <div class="cdn-note">编排图由 @xyflow/react（React Flow v12）渲染：<b>可编辑</b>——左上角添加节点、拖节点边缘圆点连线、点节点/连线右侧改属性、Delete 键删除选中；原型从 CDN 加载，需联网。</div>
+  </div>
+
+</div>
+
+<!-- ═══ 新建流程弹窗：流程名称在此创建 ═══ -->
+<div class="modal-mask" id="modal-newflow" onclick="if(event.target===this)closeNewFlow()">
+  <div class="modal">
+    <h2>新建流程</h2>
+    <p class="sub">在当前网站（<span id="nf-site">智慧供应链 SCM</span>）下创建一条编排流程；创建后进入空白画布编排节点。</p>
+    <div class="field">
+      <label>流程名称 <b>*</b></label>
+      <input id="nf-name" placeholder="例如：采购下单动线">
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>编排类型 <b>*</b></label>
+        <select id="nf-kind">
+          <option value="page">页面编排（跨页面业务流程）</option>
+          <option value="api">接口编排（接口调用依赖 DAG）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>业务域 <b>*</b></label>
+        <select id="nf-domain">
+          <option>采购域</option>
+          <option>审批域</option>
+          <option>+ 新建业务域…</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label>备注</label>
+      <textarea id="nf-note" rows="2" placeholder="流程用途、上下游约定…"></textarea>
+    </div>
+    <div class="modal-ops">
+      <button class="btn-ghost" onclick="closeNewFlow()">取消</button>
+      <button class="btn-view" onclick="createFlow()">创建并进入画布</button>
+    </div>
+  </div>
+</div>
+
+<div class="legend">
+  <b>层级图例</b>
+  <div><span class="lv lv-1">网站 / 业务域</span> 一级：先选网站，流程按业务域分组</div>
+  <div><span class="lv lv-2">流程</span> 二级：页面编排 / 接口编排下的业务流程</div>
+  <div><span class="lv lv-3">版本</span> 三级：流程的版本快照，点「查看编排图」进编排图列表（分页）→ 打开画布</div>
+</div>
+
+<script type="module">
+  import React from 'https://esm.sh/react@18.3.1'
+  import { createRoot } from 'https://esm.sh/react-dom@18.3.1/client'
+  import htm from 'https://esm.sh/htm@3.1.1'
+  import { ReactFlow, Background, Controls, MiniMap, Handle, Position, MarkerType, Panel, applyNodeChanges, applyEdgeChanges, addEdge } from 'https://esm.sh/@xyflow/react@12.3.6?deps=react@18.3.1,react-dom@18.3.1'
+
+  const html = htm.bind(React.createElement)
+
+  /* ── 自定义节点 ─────────────────────────── */
+  function PageNode({ data, selected }) {
+    return html`
+      <div class="rf-page-node ${selected ? 'rf-node-selected' : ''}">
+        <${Handle} type="target" position=${Position.Left} />
+        <div class="t"><span class="lv lv-2">页面</span>${data.label}</div>
+        <div class="u">${data.url}</div>
+        <${Handle} type="source" position=${Position.Right} />
+      </div>`
+  }
+  function ApiNode({ data, selected }) {
+    return html`
+      <div class="rf-api-node ${selected ? 'rf-node-selected' : ''}">
+        <${Handle} type="target" position=${Position.Left} />
+        <div class="t"><span class="method ${data.method}">${data.method}</span>${data.label}</div>
+        <div class="u">${data.url}</div>
+        <${Handle} type="source" position=${Position.Right} />
+      </div>`
+  }
+  function PillNode({ data }) {
+    return html`
+      <div class="rf-pill-node">
+        <${Handle} type="target" position=${Position.Left} />
+        ${data.label}
+        <${Handle} type="source" position=${Position.Right} />
+      </div>`
+  }
+  const nodeTypes = { page: PageNode, api: ApiNode, pill: PillNode }
+
+  /* ── 数据集：页面编排 DAG ────────────────── */
+  const pageDag = {
+    title: '采购下单动线',
+    meta: '页面编排 · v3 · 5 节点 4 边 · 更新于 10-17 12:10',
+    nodes: [
+      { id: 'login',    type: 'page', position: { x: 0,   y: 170 }, data: { label: '登录页',       url: 'sso.example.com/login',        desc: '统一认证登录，成功后跳转工作台' } },
+      { id: 'dash',     type: 'page', position: { x: 260, y: 170 }, data: { label: '首页工作台',   url: '/dashboard',                    desc: '登录后落地页，加载待办与统计' } },
+      { id: 'orderLst', type: 'page', position: { x: 540, y: 60  }, data: { label: '采购订单列表', url: '/purchase/order/list',          desc: '分页查询采购订单' } },
+      { id: 'orderDtl', type: 'page', position: { x: 820, y: 60  }, data: { label: '采购订单详情', url: '/purchase/order/detail',        desc: '查看订单明细与审批状态' } },
+      { id: 'supplier', type: 'page', position: { x: 540, y: 290 }, data: { label: '供应商管理',   url: '/purchase/supplier/index',      desc: '供应商建档与维护' } },
+    ],
+    edges: [
+      { id: 'e1', source: 'login', target: 'dash',     label: '登录成功' },
+      { id: 'e2', source: 'dash',  target: 'orderLst', label: '菜单进入' },
+      { id: 'e3', source: 'orderLst', target: 'orderDtl', label: '点订单行' },
+      { id: 'e4', source: 'dash',  target: 'supplier', label: '菜单进入' },
+    ],
+  }
+
+  /* ── 数据集：接口编排 DAG ────────────────── */
+  const apiDag = {
+    title: '采购订单创建接口链',
+    meta: '接口编排 · v2 · 7 节点 7 边 · 更新于 10-17 12:08',
+    nodes: [
+      { id: 'start',    type: 'pill', position: { x: 0,    y: 185 }, data: { label: '开始', url: '', desc: '流程入口' } },
+      { id: 'dict',     type: 'api',  position: { x: 230,  y: 60  }, data: { label: '订单状态字典', method: 'GET',  url: '/api/scm/dict/orderStatus',        desc: '并行加载：状态枚举' } },
+      { id: 'suggest',  type: 'api',  position: { x: 230,  y: 310 }, data: { label: '供应商联想',   method: 'GET',  url: '/api/scm/supplier/suggest',        desc: '并行加载：供应商候选' } },
+      { id: 'page',     type: 'api',  position: { x: 500,  y: 185 }, data: { label: '订单分页查询', method: 'POST', url: '/api/scm/purchase/order/page',     desc: '依赖字典枚举渲染筛选' } },
+      { id: 'create',   type: 'api',  position: { x: 770,  y: 185 }, data: { label: '采购订单创建', method: 'POST', url: '/api/scm/purchase/order/create',   desc: '写操作：需用户确认' } },
+      { id: 'approval', type: 'api',  position: { x: 1040, y: 185 }, data: { label: '审批流发起',   method: 'POST', url: '/api/bpm/process/start',           desc: '创建成功后自动发起审批' } },
+      { id: 'end',      type: 'pill', position: { x: 1290, y: 185 }, data: { label: '结束', url: '', desc: '流程收口' } },
+    ],
+    edges: [
+      { id: 'a1', source: 'start', target: 'dict' },
+      { id: 'a2', source: 'start', target: 'suggest' },
+      { id: 'a3', source: 'dict', target: 'page', label: 'status 枚举' },
+      { id: 'a4', source: 'suggest', target: 'page', label: 'supplierCode' },
+      { id: 'a5', source: 'page', target: 'create', label: '确认提交' },
+      { id: 'a6', source: 'create', target: 'approval', label: 'orderNo', animated: true },
+      { id: 'a7', source: 'approval', target: 'end' },
+    ],
+  }
+
+  /* ── React Flow 画布（可编辑） ──────────── */
+  let root = null
+  const EDGE_PROPS = {
+    type: 'smoothstep',
+    markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18, color: '#86909c' },
+    style: { stroke: '#86909c', strokeWidth: 1.5 },
+    labelStyle: { fontSize: 11, fill: '#4e5969' },
+    labelBgStyle: { fill: '#fff', fillOpacity: 0.9 },
+  }
+
+  window.renderDag = function (kind) {
+    const dag = kind === 'api' ? apiDag : pageDag
+    const initNodes = dag.nodes.map((n) => ({ ...n, data: { ...n.data } }))
+    const initEdges = dag.edges.map((e) => ({ ...e, ...EDGE_PROPS }))
+
+    function FlowApp() {
+      const [nodes, setNodes] = React.useState(initNodes)
+      const [edges, setEdges] = React.useState(initEdges)
+      const [selNodeId, setSelNodeId] = React.useState(null)
+      const [selEdgeId, setSelEdgeId] = React.useState(null)
+
+      const onNodesChange = React.useCallback((chs) => setNodes((ns) => applyNodeChanges(chs, ns)), [])
+      const onEdgesChange = React.useCallback((chs) => setEdges((es) => applyEdgeChanges(chs, es)), [])
+      const onConnect = React.useCallback((conn) =>
+        setEdges((es) => addEdge({ id: `e${Date.now()}`, ...conn, ...EDGE_PROPS }, es)), [])
+
+      const selNode = nodes.find((n) => n.id === selNodeId)
+      const selEdge = edges.find((e) => e.id === selEdgeId)
+
+      const updateNode = (field, value) =>
+        setNodes((ns) => ns.map((n) => n.id === selNodeId ? { ...n, data: { ...n.data, [field]: value } } : n))
+      const deleteNode = (id) => {
+        setNodes((ns) => ns.filter((n) => n.id !== id))
+        setEdges((es) => es.filter((e) => e.source !== id && e.target !== id))
+        setSelNodeId(null)
+      }
+      const updateEdgeLabel = (value) =>
+        setEdges((es) => es.map((e) => e.id === selEdgeId ? { ...e, label: value } : e))
+      const deleteEdge = (id) => {
+        setEdges((es) => es.filter((e) => e.id !== id))
+        setSelEdgeId(null)
+      }
+      const addNode = (type) => {
+        const id = `n${Date.now()}`
+        const data = type === 'page'
+          ? { label: '新页面', url: '/new-page', desc: '' }
+          : { label: '新接口', method: 'GET', url: '/api/new', desc: '' }
+        setNodes((ns) => ns.concat({
+          id, type,
+          position: { x: 140 + Math.random() * 180, y: 120 + Math.random() * 180 },
+          data,
+        }))
+      }
+
+      return html`
+        <${ReactFlow}
+          nodes=${nodes}
+          edges=${edges}
+          nodeTypes=${nodeTypes}
+          onNodesChange=${onNodesChange}
+          onEdgesChange=${onEdgesChange}
+          onConnect=${onConnect}
+          onNodeClick=${(_e, n) => { setSelNodeId(n.id); setSelEdgeId(null) }}
+          onEdgeClick=${(_e, ed) => { setSelEdgeId(ed.id); setSelNodeId(null) }}
+          onPaneClick=${() => { setSelNodeId(null); setSelEdgeId(null) }}
+          deleteKeyCode=${['Delete', 'Backspace']}
+          fitView
+          fitViewOptions=${{ padding: 0.25 }}
+          minZoom=${0.3}
+          maxZoom=${1.6}
+          proOptions=${{ hideAttribution: true }}
+          nodesDraggable=${true}
+          nodesConnectable=${true}
+          edgesFocusable=${true}
+        >
+          <${Background} gap=${18} size=${1} color="#dfe3ea" />
+          <${Controls} showInteractive=${false} />
+          <${MiniMap} pannable zoomable style=${{ width: 140, height: 90 }} />
+
+          <${Panel} position="top-left">
+            <div class="rf-toolbar-panel">
+              <button onClick=${() => addNode('page')}>+ 页面节点</button>
+              <button onClick=${() => addNode('api')}>+ 接口节点</button>
+              <span class="rf-hint">拖节点边缘圆点连线 · Delete 删除选中 · 双击空白处平移</span>
+            </div>
+          <//>
+
+          ${selNode && html`
+          <${Panel} position="top-right">
+            <div class="rf-edit-panel">
+              <h3>编辑节点 <button class="close" onClick=${() => setSelNodeId(null)}>✕</button></h3>
+              <label>名称</label>
+              <input value=${selNode.data.label} onChange=${(e) => updateNode('label', e.target.value)} />
+              ${selNode.type === 'api' && html`
+                <label>方法</label>
+                <select value=${selNode.data.method} onChange=${(e) => updateNode('method', e.target.value)}>
+                  <option>GET</option>
+                  <option>POST</option>
+                </select>`}
+              ${selNode.type !== 'pill' && html`
+                <label>地址</label>
+                <input value=${selNode.data.url} onChange=${(e) => updateNode('url', e.target.value)} />`}
+              <label>说明</label>
+              <textarea rows="2" value=${selNode.data.desc || ''} onChange=${(e) => updateNode('desc', e.target.value)}></textarea>
+              <div class="row"><button class="btn-danger" onClick=${() => deleteNode(selNode.id)}>删除节点</button></div>
+            </div>
+          <//>`}
+
+          ${selEdge && html`
+          <${Panel} position="top-right">
+            <div class="rf-edit-panel">
+              <h3>编辑连线 <button class="close" onClick=${() => setSelEdgeId(null)}>✕</button></h3>
+              <label>依赖标签（如 orderNo、status 枚举）</label>
+              <input value=${selEdge.label || ''} onChange=${(e) => updateEdgeLabel(e.target.value)} />
+              <div class="row"><button class="btn-danger" onClick=${() => deleteEdge(selEdge.id)}>删除连线</button></div>
+            </div>
+          <//>`}
+        <//>`
+    }
+    if (root === null) root = createRoot(document.getElementById('dag-root'))
+    root.render(html`<${FlowApp} />`)
+  }
+</script>
+
+<script>
+  /* ── 视图切换（纯静态原型交互） ─────────── */
+  let curKind = 'page'
+  let curFlowTitle = ''
+  function show(id) {
+    for (const v of ['view-sites', 'view-flows', 'view-graphs', 'view-canvas']) {
+      document.getElementById(v).style.display = v === id ? 'block' : 'none'
+    }
+    window.scrollTo(0, 0)
+  }
+  function enterSite(name, host) {
+    document.getElementById('crumb-site').textContent = name
+    document.getElementById('crumb-site2').textContent = name
+    document.getElementById('crumb-site3').textContent = name
+    document.getElementById('nf-site').textContent = name
+    show('view-flows')
+  }
+  function backToSites() { show('view-sites') }
+  function backToFlows() { show('view-flows') }
+  function backToGraphs() { show('view-graphs') }
+  function switchKind(kind) {
+    curKind = kind
+    document.getElementById('tab-page').classList.toggle('on', kind === 'page')
+    document.getElementById('tab-api').classList.toggle('on', kind === 'api')
+    document.getElementById('list-page').style.display = kind === 'page' ? 'block' : 'none'
+    document.getElementById('list-api').style.display = kind === 'api' ? 'block' : 'none'
+  }
+  function flowMeta(kind) {
+    return kind === 'api'
+      ? { title: '采购订单创建接口链', kindLabel: '接口编排', meta: '接口编排 · v2 · 7 节点 7 边 · 更新于 10-17 12:08' }
+      : { title: '采购下单动线', kindLabel: '页面编排', meta: '页面编排 · v3 · 5 节点 4 边 · 更新于 10-17 12:10' }
+  }
+  function openGraphs(kind) {
+    curKind = kind
+    const f = flowMeta(kind)
+    curFlowTitle = f.title
+    document.getElementById('crumb-flow2').textContent = f.title
+    document.getElementById('graphs-kind').textContent = f.kindLabel
+    show('view-graphs')
+  }
+  function openCanvas(kind) {
+    curKind = kind
+    const f = flowMeta(kind)
+    curFlowTitle = f.title
+    document.getElementById('canvas-title').textContent = f.title
+    document.getElementById('canvas-meta').textContent = f.meta
+    document.getElementById('crumb-flow').textContent = f.title
+    show('view-canvas')
+    // React Flow 需要在容器可见后渲染
+    requestAnimationFrame(() => window.renderDag && window.renderDag(kind))
+  }
+
+  /* ── 业务域 / 流程名称内联编辑 ─────────── */
+  function renameEl(el) {
+    const old = el.textContent
+    const input = document.createElement('input')
+    input.className = 'rename-input'
+    input.value = old
+    el.style.display = 'none'
+    el.after(input)
+    input.focus()
+    input.select()
+    const done = (keep) => {
+      if (keep) {
+        const v = input.value.trim()
+        el.textContent = v.length > 0 ? v : old
+      }
+      input.remove()
+      el.style.display = ''
+    }
+    input.addEventListener('blur', () => done(true))
+    input.addEventListener('click', (e) => e.stopPropagation())
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation()
+      if (e.key === 'Enter') { e.preventDefault(); done(true) }
+      if (e.key === 'Escape') done(false)
+    })
+  }
+
+  /* ── 新建流程弹窗 ─────────────────────── */
+  function openNewFlow() { document.getElementById('modal-newflow').classList.add('show') }
+  function closeNewFlow() { document.getElementById('modal-newflow').classList.remove('show') }
+  function createFlow() {
+    const name = document.getElementById('nf-name').value.trim() || '未命名流程'
+    const kind = document.getElementById('nf-kind').value
+    closeNewFlow()
+    // 原型：创建后直接进入空白画布（这里仍渲染样例数据演示）
+    openCanvas(kind)
+    document.getElementById('canvas-title').textContent = name
+    document.getElementById('crumb-flow').textContent = name
+  }
+</script>
+
+</body>
+</html>

@@ -34,3 +34,17 @@ it('fetch POST：请求体进 requestBody', () => {
   const out = responseToRawSample(post, 262_144)
   expect(out?.requestBody).toBe('{"a":1}')
 })
+
+it('xhr POST：请求体同样进 requestBody（回归：曾只对 fetch 取，业务 POST 入参全丢）', () => {
+  const post: WireSample = { ...small, method: 'POST', resourceType: 'xhr', requestPostData: '{"prNo":"PR001","items":[1,2]}' }
+  const out = responseToRawSample(post, 262_144)
+  expect(out?.requestBody).toBe('{"prNo":"PR001","items":[1,2]}')
+  expect(out?.truncated).toBe(false)
+})
+
+it('超限请求体：不挂正文，但 truncated 如实置 true（不假装没有入参）', () => {
+  const post: WireSample = { ...small, method: 'POST', resourceType: 'xhr', requestPostData: 'x'.repeat(300_000) }
+  const out = responseToRawSample(post, 262_144)
+  expect(out?.requestBody).toBeUndefined()
+  expect(out?.truncated).toBe(true)
+})

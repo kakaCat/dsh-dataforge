@@ -11,21 +11,29 @@ export type CaptureTaskType = 'single_page' | 'site_crawl' | 'action'
 
 export type FieldRole = 'constant' | 'input' | 'chain' | 'credential'
 
+export type FieldLocation = 'path' | 'query' | 'header' | 'body'
+
 export type TemplateField = {
   field: string
   type: 'string' | 'number' | 'boolean' | 'object' | 'array' | 'null'
   sample: string
   role: FieldRole
-  /** 单样本未验证（无法 diff）；多样本 diff 后 false。 */
   unverified: boolean
+  location?: FieldLocation
 }
 
 export type Template = {
   fields: TemplateField[]
   codePath?: string
+  pathParams?: string[]
 }
 
 export type CaptureStatus = 'running' | 'done' | 'failed' | 'cancelled'
+
+/**
+ * 鉴权标志 v1.3(FR-3.7):探测只记触发来源,凭证值永不入卡、永不入回执(红线)。
+ */
+export type AuthType = 'none' | 'token-header' | 'token-param' | 'cookie-session' | 'unknown'
 
 /** type 别名 == 隐式索引签名。 */
 export type CardRow = {
@@ -37,9 +45,23 @@ export type CardRow = {
   requestTemplate?: Template
   responseTemplate?: Template
   authBinding?: { cookies: number; storageKeys: number }
+  authType?: AuthType
+  authEvidence?: string
   relatedPageUrls: string[]
   sampleCount: number
   createdAt: number
+}
+
+export type RelationRow = {
+  id: string
+  captureId: string
+  cardId: string
+  pageId?: string
+  pageUrl: string
+  paramsFingerprint: string
+  firstSeenAt: number
+  lastSeenAt: number
+  sampleCount: number
 }
 
 export type SampleRow = {
@@ -58,6 +80,8 @@ export type SampleRow = {
   responsePreview?: string
   truncated: boolean
   ts: number
+  /** 回指「页面 × 接口 × 形态」关系行（关系模型引入前的历史样本缺省）。 */
+  relationId?: string
 }
 
 export type CredentialRow = {
@@ -87,4 +111,6 @@ export type CaptureRunRow = {
   endedAt?: number
   stats: { pages: number; requests: number; cards: number; credentials: number }
   error?: string
+  /** 诚实边界提示（如样本上限截断、降级执行）；狀态机不变，仅附注。 */
+  notice?: string
 }

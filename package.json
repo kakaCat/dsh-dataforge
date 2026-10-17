@@ -16,19 +16,28 @@
       "import": "./dist/index.mjs",
       "default": "./dist/index.mjs"
     },
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "lib",
     "cordis.patch.yml",
     "README.md"
   ],
   "scripts": {
-    "build": "tsdown",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsdown && pnpm build:client",
+    "build:client": "tsdown -c tsdown.client.config.mjs && node scripts/wrap-client.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.client.json",
     "test": "vitest run --passWithNoTests"
   },
   "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots"
+      ]
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
@@ -45,6 +54,7 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.11.0",
+    "@types/react": "^19.3.0",
     "tsdown": "^0.22.14",
     "typescript": "^5.3.3",
     "vitest": "^2.0.0"
