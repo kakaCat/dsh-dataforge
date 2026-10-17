@@ -38,6 +38,21 @@ export interface CapturePanelDeps {
   store: CaptureStore
   /** POST /captures 出口：单页采集的发起入口（FR-7.6：面板只开 single_page，写操作走 agent 会话）。 */
   startCapture?: (args: { taskType: 'single_page'; entryUrl: string }) => Promise<CaptureToolValue>
+  /**
+   * 编排子路由（同一前缀下的 `/orchestration/*`），由入口装配。
+   *
+   * 为什么塞进这里而不是各自 register 一次：宿主的 prefix 路由**匹配语义没有契约**
+   * （是首个命中还是最长前缀，本地 checkout 看不到实现）。两个 handler 挂同一前缀、
+   * 靠一条更长的路径去抢，就是在赌宿主实现；赌错了 /orchestration/* 会被采集 handler
+   * 当 unknown-path 吃掉。所以前缀只注册一次，子路径在**我们自己的代码里**分派。
+   */
+  orchestration?: (req: IncomingMessage, res: ServerResponse) => void
+}
+
+/** 是不是该交给编排子路由（看路径里有没有 /dataforge/orchestration）。 */
+export function isOrchestrationRequest(url: string | undefined): boolean {
+  const path = new URL(url ?? '/', 'http://panel.localhost').pathname
+  return path.includes('/dataforge/orchestration')
 }
 
 /**
@@ -239,10 +254,18 @@ export function registerCapturePanelRoutes(
   webServer: PanelRouteRegistrar,
   deps: CapturePanelDeps,
 ): () => void {
+  const captureHandler = createCapturePanelHandler(deps)
+  const orchestration = deps.orchestration
+  const handler = orchestration === undefined
+    ? captureHandler
+    : (req: IncomingMessage, res: ServerResponse): void => {
+        if (isOrchestrationRequest(req.url)) orchestration(req, res)
+        else captureHandler(req, res)
+      }
   const dispose = webServer.register({
     kind: 'prefix',
     path: PANEL_API_PREFIX,
-    handler: createCapturePanelHandler(deps),
+    handler,
   })
   let disposed = false
   return () => {

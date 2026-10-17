@@ -12,9 +12,11 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { CardsLibraryPage } from './board-cards.js'
 import { attachRunsBoard } from './board-runs.js'
 import { QuickCapturePage } from './page-capture.js'
+import { OrchestrationPage } from './page-orchestration.js'
 import {
   CAPTURE_TAB_ID, CAPTURE_TAB_LABEL,
   CARDS_TAB_ID, CARDS_TAB_LABEL,
+  ORCH_TAB_ID, ORCH_TAB_LABEL,
   PANEL_ID,
   RUNS_TAB_ID, RUNS_TAB_LABEL,
   SITES_TAB_ID, SITES_TAB_LABEL,
@@ -36,6 +38,7 @@ const TABS: readonly TabEntry[] = [
   { id: CAPTURE_TAB_ID, label: CAPTURE_TAB_LABEL },
   { id: CARDS_TAB_ID, label: CARDS_TAB_LABEL },
   { id: SITES_TAB_ID, label: SITES_TAB_LABEL },
+  { id: ORCH_TAB_ID, label: ORCH_TAB_LABEL },
 ]
 
 /** 兜底 hook：槽位未注入 usePanelInfo 时恒判「本面板在看」（host.ts 同款）。 */
@@ -102,6 +105,7 @@ export function DataforgePanelApp(props: DataforgePanelAppProps): ReactNode {
       {activeTab === SITES_TAB_ID && (
         <SitesBoardPage visible={visible} onRecapture={recapture} onOpenInLibrary={openInLibrary} />
       )}
+      {activeTab === ORCH_TAB_ID && <OrchestrationPage visible={visible} />}
     </div>
   )
 }

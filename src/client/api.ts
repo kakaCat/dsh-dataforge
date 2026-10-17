@@ -4,7 +4,9 @@
  *
  * @module dsh-dataforge/client/api
  */
-import type { CaptureStartResult, CardRow, RunDetail, RunRow } from './types.js'
+import type {
+  CaptureStartResult, CardRow, ChainDocLike, ChainGraph, ChainSaveResult, OrchestrationOverview, RunDetail, RunRow,
+} from './types.js'
 
 export const PANEL_API_PREFIX = '/dashboard/api/dataforge'
 
@@ -86,4 +88,27 @@ export async function postPanelData<T>(suffix: string, body: unknown): Promise<T
 
 export function postCapture(taskType: 'single_page', entryUrl: string): Promise<CaptureStartResult> {
   return postPanelData<CaptureStartResult>('/captures', { taskType, entryUrl })
+}
+
+/* ───────────────────────────── 编排页（R-2） ───────────────────────────── */
+
+export async function fetchOrchestrationOverview(): Promise<OrchestrationOverview> {
+  return fetchPanelData<OrchestrationOverview>('/orchestration/overview')
+}
+
+export async function fetchChainGraph(site: string, flow: string, version?: number): Promise<ChainGraph> {
+  const query = new URLSearchParams({ site, flow })
+  if (version !== undefined) query.set('version', String(version))
+  return fetchPanelData<ChainGraph>(`/orchestration/graph?${query.toString()}`)
+}
+
+/**
+ * 画布保存：走 POST 而不是又一条只读 GET。回执用 `ok:false + issues` 表达「校验不过」——
+ * 那是**用户可修的操作反馈**，不是异常，所以不抛（与 postPanelData 的采集入口同款取舍）。
+ *
+ * 传 `doc` 而不是 YAML：客户端没有 YAML 序列化器（不为它把 js-yaml 打进 bundle），
+ * 且整份 doc 回传能保证 inputs / 未知键零丢失。
+ */
+export async function saveChainGraph(doc: ChainDocLike): Promise<ChainSaveResult> {
+  return postPanelData<ChainSaveResult>('/orchestration/graph', { doc })
 }

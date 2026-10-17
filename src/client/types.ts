@@ -103,3 +103,111 @@ export type CaptureStartResult = {
 
 /** 站点页「重采」跨页动线的种子：url 预填快速采集输入框；nonce 让重复点同页也能再次预填。 */
 export type RecaptureSeed = { url: string; nonce: number }
+
+/* ───────────────────────────── 编排页（R-2） ───────────────────────────── */
+
+/** 版本来源（服务端 meta.source 的原样投影）。 */
+export type ChainSource = 'agent' | 'canvas' | 'import'
+
+export type OrchestrationVersion = {
+  version: number
+  created?: string
+  source?: ChainSource
+  nodeCount?: number
+  edgeCount?: number
+  /** 是否已被更新的版本取代（非最新版）。 */
+  superseded: boolean
+  unreadable?: string
+}
+
+export type OrchestrationFlow = {
+  site: string
+  flow: string
+  kind?: 'interface-chain' | 'page-chain'
+  domain?: string
+  note?: string
+  latest?: number
+  updatedAt?: string
+  nodeCount?: number
+  edgeCount?: number
+  versions: OrchestrationVersion[]
+  unreadable?: string
+}
+
+export type OrchestrationSite = {
+  site: string
+  pageFlows: number
+  apiFlows: number
+  flows: number
+  updatedAt?: string
+  domains: string[]
+}
+
+export type OrchestrationOverview = {
+  sites: OrchestrationSite[]
+  flows: OrchestrationFlow[]
+  chainsRootHint: string
+}
+
+export type CanvasNode = {
+  id: string
+  card?: string
+  page?: string
+  constants: Record<string, string>
+  layout?: { x: number; y: number }
+}
+
+export type CanvasEdge = { from: string; to: string; suggested?: boolean }
+
+/** 链级入参槽位（画布原样带回，不解释）。 */
+export type ChainInputSlot = {
+  name: string
+  type: string
+  required: boolean
+  example?: string
+}
+
+/** 画布的可编辑链文档副本（服务端给的完整 JSON，保存时原样带回）。 */
+export type ChainDocLike = {
+  apiVersion: string
+  kind: 'interface-chain' | 'page-chain'
+  meta: {
+    site: string
+    flow: string
+    version: number
+    created: string
+    domain?: string
+    note?: string
+    source?: ChainSource
+  }
+  inputs: ChainInputSlot[]
+  nodes: CanvasNode[]
+  edges: CanvasEdge[]
+}
+
+/** GET /orchestration/graph 的回执（画布渲染输入）。 */
+export type ChainGraph = {
+  site: string
+  flow: string
+  version: number
+  kind: 'interface-chain' | 'page-chain'
+  domain?: string
+  note?: string
+  source?: ChainSource
+  created?: string
+  chainYaml: string
+  doc: ChainDocLike
+  /** 节点引用的卡身份（只 method/url/name，零凭证）；读不到就没有该键。 */
+  cards: Record<string, { name?: string; method: string; urlTemplate: string }>
+  versions: number[]
+}
+
+/** POST /orchestration/graph 的回执。 */
+export type ChainSaveResult = {
+  ok: boolean
+  version?: number
+  path?: string
+  code?: string
+  issues?: Array<{ target: string; code: string; reason: string }>
+  warnings?: Array<{ target: string; code: string; reason: string }>
+}

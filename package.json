@@ -29,7 +29,8 @@
     "build": "tsdown && pnpm build:client",
     "build:client": "tsdown -c tsdown.client.config.mjs && node scripts/wrap-client.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.client.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "gen:xyflow-css": "node scripts/gen-xyflow-css.mjs"
   },
   "dsh": {
     "client": {

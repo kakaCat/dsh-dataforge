@@ -3331,13 +3331,23 @@ const ConstantValueSchema = Schema.union([
 	Schema.number(),
 	Schema.boolean()
 ]);
+/**
+* 画布坐标。内层 x/y **刻意不 required**：schemastery 对可选的对象字段会先实例化成
+* `{}` 再往里校验，写 required 就成了「没坐标的链一律校验失败」。是否算有效坐标由
+* normalizeDoc 判（两个都是有限数才算），这样缺坐标 = 没有 layout，而不是坏链。
+*/
+const LayoutSchema = Schema.object({
+	x: Schema.number(),
+	y: Schema.number()
+});
 const NodeSchema = Schema.object({
 	id: Schema.string().required(),
 	card: Schema.string(),
 	page: Schema.string(),
 	constants: Schema.dict(ConstantValueSchema).default({}),
 	retry: Schema.number().min(0),
-	timeoutSeconds: Schema.number().min(0)
+	timeoutSeconds: Schema.number().min(0),
+	layout: LayoutSchema
 });
 const EdgeSchema = Schema.object({
 	from: Schema.string().required(),
@@ -3354,7 +3364,14 @@ const MetaSchema = Schema.object({
 	site: Schema.string().required(),
 	flow: Schema.string().required(),
 	version: Schema.number().min(1).required(),
-	created: Schema.string().required()
+	created: Schema.string().required(),
+	domain: Schema.string(),
+	note: Schema.string(),
+	source: Schema.union([
+		Schema.const("agent"),
+		Schema.const("canvas"),
+		Schema.const("import")
+	])
 });
 const ChainSchema = Schema.object({
 	apiVersion: Schema.string().required(),
@@ -3440,7 +3457,10 @@ function normalizeDoc(raw) {
 			site: doc.meta.site,
 			flow: doc.meta.flow,
 			version: doc.meta.version,
-			created: toIsoString(doc.meta.created)
+			created: toIsoString(doc.meta.created),
+			...doc.meta.domain === void 0 ? {} : { domain: doc.meta.domain },
+			...doc.meta.note === void 0 ? {} : { note: doc.meta.note },
+			...doc.meta.source === void 0 ? {} : { source: doc.meta.source }
 		},
 		inputs: (doc.inputs ?? []).map((input) => ({
 			...unknownKeysOf(input),
@@ -3449,15 +3469,21 @@ function normalizeDoc(raw) {
 			required: input.required === true,
 			...input.example === void 0 ? {} : { example: input.example }
 		})),
-		nodes: (doc.nodes ?? []).map((node) => ({
-			...unknownKeysOf(node),
-			id: node.id,
-			...node.card === void 0 ? {} : { card: node.card },
-			...node.page === void 0 ? {} : { page: node.page },
-			constants: Object.fromEntries(Object.entries(node.constants ?? {}).map(([key, value]) => [key, String(value)])),
-			...node.retry === void 0 ? {} : { retry: node.retry },
-			...node.timeoutSeconds === void 0 ? {} : { timeoutSeconds: node.timeoutSeconds }
-		})),
+		nodes: (doc.nodes ?? []).map((node) => {
+			const rest = unknownKeysOf(node);
+			delete rest.layout;
+			const layout = nodeLayoutOf(node.layout);
+			return {
+				...rest,
+				id: node.id,
+				...node.card === void 0 ? {} : { card: node.card },
+				...node.page === void 0 ? {} : { page: node.page },
+				constants: Object.fromEntries(Object.entries(node.constants ?? {}).map(([key, value]) => [key, String(value)])),
+				...node.retry === void 0 ? {} : { retry: node.retry },
+				...node.timeoutSeconds === void 0 ? {} : { timeoutSeconds: node.timeoutSeconds },
+				...layout === void 0 ? {} : { layout }
+			};
+		}),
 		edges: (doc.edges ?? []).map((edge) => ({
 			...unknownKeysOf(edge),
 			from: edge.from,
@@ -3465,6 +3491,20 @@ function normalizeDoc(raw) {
 			...edge.suggested === true ? { suggested: true } : {}
 		}))
 	};
+}
+/**
+* 画布坐标的有效性判定：x/y 都是有限数才算有坐标。
+*
+* schemastery 会把缺省的对象字段实例化成 `{}`，所以这里必须挡住"半个坐标"与空对象——
+* 否则无坐标的链会被写成 `layout: {x: null, y: null}`。
+*/
+function nodeLayoutOf(layout) {
+	if (layout === null || typeof layout !== "object") return void 0;
+	const { x, y } = layout;
+	return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y) ? {
+		x,
+		y
+	} : void 0;
 }
 /**
 * 只留 schema 不认识的键：schemastery 的 object 会把未知键**丢掉**（不报错），
@@ -3948,6 +3988,96 @@ function latestChainVersion(workspaceRoot, site, flow) {
 function nextChainVersion(workspaceRoot, site, flow) {
 	return (latestChainVersion(workspaceRoot, site, flow) ?? 0) + 1;
 }
+/**
+* 逐版本读文件头。编排页要显示「v3 · 当前 / v2 已被 v3 取代 / 来源 / 更新时间」，
+* 这些只有打开每个版本文件才知道；文件坏了照常给出行，只是带 unreadable。
+*/
+function listChainVersionInfos(workspaceRoot, site, flow) {
+	return listChainVersions(workspaceRoot, site, flow).map((version) => {
+		try {
+			const doc = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, version), "utf8"));
+			if (!doc.ok) return {
+				version,
+				unreadable: doc.issues.map((issue) => `${issue.target}：${issue.reason}`).join("；")
+			};
+			const { meta, nodes, edges } = doc.doc;
+			return {
+				version,
+				...meta.created === void 0 ? {} : { created: meta.created },
+				...meta.source === void 0 ? {} : { source: meta.source },
+				...meta.domain === void 0 ? {} : { domain: meta.domain },
+				...meta.note === void 0 ? {} : { note: meta.note },
+				nodeCount: nodes.length,
+				edgeCount: edges.length
+			};
+		} catch (error) {
+			return {
+				version,
+				unreadable: `读取失败：${error instanceof Error ? error.message : String(error)}`
+			};
+		}
+	});
+}
+/**
+* 列工作区里所有链（两层目录扫描；坏 slug 的目录跳过）。
+*
+* 会读一遍最新版本的头部来补 kind/domain/updatedAt/节点边数——编排页要按这三样
+* 分组与排序。坏文件不抛：整条链照常出现，只是带 `unreadable` 说明。
+*/
+function listChains(workspaceRoot) {
+	const root = chainsRoot(workspaceRoot);
+	if (!existsSync(root)) return [];
+	const result = [];
+	for (const site of safeDirs(root)) for (const flow of safeDirs(join(root, site))) {
+		let versions = [];
+		try {
+			versions = listChainVersions(workspaceRoot, site, flow);
+		} catch {
+			continue;
+		}
+		if (versions.length === 0) continue;
+		const latest = versions[versions.length - 1];
+		result.push({
+			site,
+			flow,
+			versions,
+			latest,
+			...summarize(workspaceRoot, site, flow, latest)
+		});
+	}
+	return result;
+}
+/** 最新版本文件头 → 列表要的元数据（读失败返回 unreadable，不抛）。 */
+function summarize(workspaceRoot, site, flow, version) {
+	try {
+		const doc = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, version), "utf8"));
+		if (!doc.ok) return { unreadable: doc.issues.map((issue) => `${issue.target}：${issue.reason}`).join("；") };
+		const { meta, nodes, edges } = doc.doc;
+		return {
+			kind: doc.doc.kind,
+			...meta.domain === void 0 ? {} : { domain: meta.domain },
+			...meta.note === void 0 ? {} : { note: meta.note },
+			...meta.created === void 0 ? {} : { updatedAt: meta.created },
+			nodeCount: nodes.length,
+			edgeCount: edges.length
+		};
+	} catch (error) {
+		return { unreadable: `读取失败：${error instanceof Error ? error.message : String(error)}` };
+	}
+}
+function safeDirs(dir) {
+	try {
+		return readdirSync(dir).filter((entry) => {
+			try {
+				return statSync(join(dir, entry)).isDirectory();
+			} catch {
+				return false;
+			}
+		});
+	} catch {
+		return [];
+	}
+}
 /** 读某个版本（缺省最新）；文件被手改坏也如实报 invalid-chain。 */
 function loadChain(workspaceRoot, site, flow, options = {}) {
 	const availableVersions = listChainVersions(workspaceRoot, site, flow);
@@ -3995,6 +4125,9 @@ function readChainText(workspaceRoot, site, flow, version) {
 *
 * `input` 可以是已解析的 ChainDoc（画布/编译草稿确认后）或链 YAML 文本（agent 手写）。
 * 校验不过一律不落盘，把 issues 原样给回去。
+*
+* `source` 是**版本来源**（编排图列表要显示「agent 会话保存 / 画布保存 / 导入」）：
+* 由调用方声明，不猜。调用方没声明就保留输入里已有的值，都没有则该版本无来源标注。
 */
 function saveChain(workspaceRoot, input, options = {}) {
 	const resolveCard = options.resolveCard ?? defaultCardResolver(workspaceRoot);
@@ -4006,12 +4139,14 @@ function saveChain(workspaceRoot, input, options = {}) {
 	const { doc } = parsed;
 	const version = nextChainVersion(workspaceRoot, doc.meta.site, doc.meta.flow);
 	const created = isIsoInstant(doc.meta.created) ? doc.meta.created : (/* @__PURE__ */ new Date()).toISOString();
+	const source = options.source ?? doc.meta.source;
 	const finalDoc = {
 		...doc,
 		meta: {
 			...doc.meta,
 			version,
-			created
+			created,
+			...source === void 0 ? {} : { source }
 		}
 	};
 	const dir = chainDir(workspaceRoot, finalDoc.meta.site, finalDoc.meta.flow);
@@ -4146,7 +4281,7 @@ async function upsertChainForTool(deps, exec, args) {
 		message: "site 与 flow 不能为空：链按「站点 / 流程」归档"
 	};
 	try {
-		const saved = saveChain(workspaceRoot, args.chainYaml);
+		const saved = saveChain(workspaceRoot, args.chainYaml, { source: "agent" });
 		if (!saved.ok) return {
 			ok: false,
 			code: saved.issues.some((issue) => issue.code === "card-not-imported") ? "card-not-imported" : "invalid-chain",
@@ -5674,6 +5809,10 @@ const RUN_DETAIL_CARDS_LIMIT = 200;
 const RUN_DETAIL_RELATIONS_LIMIT = 500;
 /** 写入口请求体上限：面板只需要 {taskType, entryUrl}，超过这个尺寸一律 413。 */
 const MAX_CAPTURE_BODY_BYTES = 8192;
+/** 是不是该交给编排子路由（看路径里有没有 /dataforge/orchestration）。 */
+function isOrchestrationRequest(url) {
+	return new URL(url ?? "/", "http://panel.localhost").pathname.includes("/dataforge/orchestration");
+}
 /**
 * 构造面板数据 handler。
 *
@@ -5691,15 +5830,15 @@ function createCapturePanelHandler(deps) {
 					handleStartCapture(deps, req, res);
 					return;
 				}
-				fail(res, 405, `面板路由不支持 ${method} ${suffix}（写入口仅 POST /captures）`, "method-not-allowed");
+				fail$1(res, 405, `面板路由不支持 ${method} ${suffix}（写入口仅 POST /captures）`, "method-not-allowed");
 				return;
 			}
 			if (method !== "GET") {
-				fail(res, 405, `面板路由只支持 GET/POST /captures，收到 ${method}`, "method-not-allowed");
+				fail$1(res, 405, `面板路由只支持 GET/POST /captures，收到 ${method}`, "method-not-allowed");
 				return;
 			}
 			if (suffix === "/runs") {
-				ok(res, {
+				ok$1(res, {
 					generatedAt: Date.now(),
 					runs: deps.store.listRuns(clampLimit(url.searchParams.get("limit"), DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT))
 				});
@@ -5708,15 +5847,15 @@ function createCapturePanelHandler(deps) {
 			if (suffix.startsWith("/runs/")) {
 				const id = decodeURIComponent(suffix.slice(6));
 				if (id.length === 0 || id.includes("/")) {
-					fail(res, 404, `不认识的路径：${suffix}`, "unknown-path");
+					fail$1(res, 404, `不认识的路径：${suffix}`, "unknown-path");
 					return;
 				}
 				const run = deps.store.getRun(id);
 				if (run === void 0) {
-					fail(res, 404, `采集运行 ${id} 不存在`, "not-found");
+					fail$1(res, 404, `采集运行 ${id} 不存在`, "not-found");
 					return;
 				}
-				ok(res, {
+				ok$1(res, {
 					generatedAt: Date.now(),
 					run,
 					pages: deps.store.listPages(id, MAX_LIST_LIMIT),
@@ -5728,16 +5867,16 @@ function createCapturePanelHandler(deps) {
 				return;
 			}
 			if (suffix === "/cards") {
-				ok(res, {
+				ok$1(res, {
 					generatedAt: Date.now(),
 					cards: deps.store.listAllCards(clampLimit(url.searchParams.get("limit"), DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT), clampOffset(url.searchParams.get("offset"))),
 					total: deps.store.countAllCards()
 				});
 				return;
 			}
-			fail(res, 404, `不认识的路径：${suffix}`, "unknown-path");
+			fail$1(res, 404, `不认识的路径：${suffix}`, "unknown-path");
 		} catch (err) {
-			fail(res, 500, String(err?.message ?? err), "internal");
+			fail$1(res, 500, String(err?.message ?? err), "internal");
 		}
 	};
 }
@@ -5745,23 +5884,23 @@ function createCapturePanelHandler(deps) {
 async function handleStartCapture(deps, req, res) {
 	let body;
 	try {
-		body = JSON.parse(await readBody(req, MAX_CAPTURE_BODY_BYTES) || "{}");
+		body = JSON.parse(await readBody$1(req, MAX_CAPTURE_BODY_BYTES) || "{}");
 	} catch (err) {
 		if (err instanceof BodyTooLargeError) {
-			fail(res, 413, `请求体超过 ${MAX_CAPTURE_BODY_BYTES} 字节`, "body-too-large");
+			fail$1(res, 413, `请求体超过 ${MAX_CAPTURE_BODY_BYTES} 字节`, "body-too-large");
 			return;
 		}
-		fail(res, 400, "请求体不是合法 JSON", "bad-json");
+		fail$1(res, 400, "请求体不是合法 JSON", "bad-json");
 		return;
 	}
 	const record = typeof body === "object" && body !== null ? body : {};
 	const taskType = record["taskType"] === void 0 ? "single_page" : record["taskType"];
 	if (taskType !== "single_page") {
-		fail(res, 400, `面板只能发起 single_page 采集，收到 ${String(taskType)}（写操作/爬取走 agent 入口 dataforge_capture）`, "bad-task-type");
+		fail$1(res, 400, `面板只能发起 single_page 采集，收到 ${String(taskType)}（写操作/爬取走 agent 入口 dataforge_capture）`, "bad-task-type");
 		return;
 	}
 	if (typeof record["entryUrl"] !== "string" || record["entryUrl"].length === 0) {
-		fail(res, 400, "缺少 entryUrl（字符串）", "bad-entry-url");
+		fail$1(res, 400, "缺少 entryUrl（字符串）", "bad-entry-url");
 		return;
 	}
 	const entryUrl = record["entryUrl"];
@@ -5769,25 +5908,25 @@ async function handleStartCapture(deps, req, res) {
 	try {
 		entry = new URL(entryUrl);
 	} catch {
-		fail(res, 400, `entryUrl 不是合法 URL：${entryUrl.slice(0, 200)}`, "bad-entry-url");
+		fail$1(res, 400, `entryUrl 不是合法 URL：${entryUrl.slice(0, 200)}`, "bad-entry-url");
 		return;
 	}
 	if (entry.protocol !== "http:" && entry.protocol !== "https:") {
-		fail(res, 400, `只支持 http/https 入口，收到 ${entry.protocol}`, "bad-entry-url");
+		fail$1(res, 400, `只支持 http/https 入口，收到 ${entry.protocol}`, "bad-entry-url");
 		return;
 	}
 	const blocked = blockedTargetReason(entry.hostname);
 	if (blocked !== void 0) {
-		fail(res, 400, `拒绝采集 ${entry.hostname}：${blocked}`, "blocked-target");
+		fail$1(res, 400, `拒绝采集 ${entry.hostname}：${blocked}`, "blocked-target");
 		return;
 	}
 	const busy = deps.store.listRuns(200).find((run) => run.status === "running" && sameHost(run.entryUrl, entry));
 	if (busy !== void 0) {
-		fail(res, 409, `该站点已有进行中的采集（${busy.id}），等它收口后再发起`, "host-busy");
+		fail$1(res, 409, `该站点已有进行中的采集（${busy.id}），等它收口后再发起`, "host-busy");
 		return;
 	}
 	if (deps.startCapture === void 0) {
-		fail(res, 503, "采集发起未装配（startCapture 未注入）", "capture-not-wired");
+		fail$1(res, 503, "采集发起未装配（startCapture 未注入）", "capture-not-wired");
 		return;
 	}
 	let result;
@@ -5797,10 +5936,10 @@ async function handleStartCapture(deps, req, res) {
 			entryUrl
 		});
 	} catch (err) {
-		fail(res, 500, String(err?.message ?? err), "capture-start-failed");
+		fail$1(res, 500, String(err?.message ?? err), "capture-start-failed");
 		return;
 	}
-	ok(res, {
+	ok$1(res, {
 		accepted: result.accepted,
 		gate: result.gate,
 		captureId: result.captureId,
@@ -5824,7 +5963,7 @@ function sameHost(left, right) {
 	}
 }
 var BodyTooLargeError = class extends Error {};
-function readBody(req, maxBytes) {
+function readBody$1(req, maxBytes) {
 	return new Promise((resolve, reject) => {
 		let total = 0;
 		const chunks = [];
@@ -5848,10 +5987,16 @@ function readBody(req, maxBytes) {
 * 不留「没有 disposer 的泄漏注册」。
 */
 function registerCapturePanelRoutes(webServer, deps) {
+	const captureHandler = createCapturePanelHandler(deps);
+	const orchestration = deps.orchestration;
+	const handler = orchestration === void 0 ? captureHandler : (req, res) => {
+		if (isOrchestrationRequest(req.url)) orchestration(req, res);
+		else captureHandler(req, res);
+	};
 	const dispose = webServer.register({
 		kind: "prefix",
 		path: PANEL_API_PREFIX,
-		handler: createCapturePanelHandler(deps)
+		handler
 	});
 	let disposed = false;
 	return () => {
@@ -5860,8 +6005,8 @@ function registerCapturePanelRoutes(webServer, deps) {
 		dispose();
 	};
 }
-function ok(res, data) {
-	send(res, 200, {
+function ok$1(res, data) {
+	send$1(res, 200, {
 		success: true,
 		data
 	});
@@ -5882,6 +6027,262 @@ function sanitizeSample(sample) {
 		ts: sample.ts
 	};
 }
+function fail$1(res, status, error, code) {
+	send$1(res, status, code === void 0 ? {
+		success: false,
+		error
+	} : {
+		success: false,
+		error,
+		code
+	});
+}
+function send$1(res, status, body) {
+	res.writeHead(status, {
+		"content-type": "application/json; charset=utf-8",
+		"cache-control": "no-store"
+	});
+	res.end(JSON.stringify(body));
+}
+function clampLimit(raw, fallback, max) {
+	const parsed = Number.parseInt(raw ?? "", 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+	return Math.min(parsed, max);
+}
+function clampOffset(raw) {
+	const parsed = Number.parseInt(raw ?? "", 10);
+	if (!Number.isFinite(parsed) || parsed < 0) return 0;
+	return parsed;
+}
+
+//#endregion
+//#region src/orchestration/panel-routes.ts
+const ORCHESTRATION_API_PREFIX = "/orchestration";
+/** 画布保存请求体上限：链 YAML 可能不小，但也不该是任意大。 */
+const MAX_SAVE_BODY_BYTES = 524288;
+/** 构造编排面板 handler。 */
+function createOrchestrationPanelHandler(deps) {
+	return (req, res) => {
+		handle(deps, req, res);
+	};
+}
+async function handle(deps, req, res) {
+	try {
+		const method = (req.method ?? "GET").toUpperCase();
+		const url = new URL(req.url ?? "/", "http://panel.localhost");
+		const suffix = stripPrefix(url.pathname);
+		if (method === "POST") {
+			if (suffix === "/graph") {
+				await handleSave(deps, req, res);
+				return;
+			}
+			fail(res, 405, `编排路由不支持 POST ${suffix}（写入口仅 POST /orchestration/graph）`, "method-not-allowed");
+			return;
+		}
+		if (method !== "GET") {
+			fail(res, 405, `编排路由只支持 GET/POST，收到 ${method}`, "method-not-allowed");
+			return;
+		}
+		if (suffix === "/overview") {
+			ok(res, await buildOverview(deps, url));
+			return;
+		}
+		if (suffix === "/graph") {
+			await handleGraph(deps, url, res);
+			return;
+		}
+		fail(res, 404, `不认识的路径：${suffix}`, "unknown-path");
+	} catch (error) {
+		fail(res, 500, error instanceof Error ? error.message : String(error), "internal");
+	}
+}
+/** 前缀剥离：宿主可能传含前缀的完整路径，也可能传已剥好的剩余路径。 */
+function stripPrefix(pathname) {
+	const full = `/dashboard/api/dataforge${ORCHESTRATION_API_PREFIX}`;
+	if (pathname.startsWith(full)) return pathname.slice(full.length) || "/";
+	if (pathname.startsWith("/orchestration")) return pathname.slice(14) || "/";
+	return pathname;
+}
+async function buildOverview(deps, url) {
+	const workspaceRoot = await deps.resolveWorkspaceRoot();
+	const siteFilter = url.searchParams.get("site");
+	const chains = listChains(workspaceRoot);
+	const flows = [];
+	for (const chain of chains) {
+		if (siteFilter !== null && siteFilter.length > 0 && chain.site !== siteFilter) continue;
+		const infos = listChainVersionInfos(workspaceRoot, chain.site, chain.flow);
+		const latest = chain.latest;
+		flows.push({
+			site: chain.site,
+			flow: chain.flow,
+			...chain.kind === void 0 ? {} : { kind: chain.kind },
+			...chain.domain === void 0 ? {} : { domain: chain.domain },
+			...chain.note === void 0 ? {} : { note: chain.note },
+			...latest === void 0 ? {} : { latest },
+			...chain.updatedAt === void 0 ? {} : { updatedAt: chain.updatedAt },
+			...chain.nodeCount === void 0 ? {} : { nodeCount: chain.nodeCount },
+			...chain.edgeCount === void 0 ? {} : { edgeCount: chain.edgeCount },
+			...chain.unreadable === void 0 ? {} : { unreadable: chain.unreadable },
+			versions: infos.map((info) => ({
+				version: info.version,
+				...info.created === void 0 ? {} : { created: info.created },
+				...info.source === void 0 ? {} : { source: info.source },
+				...info.nodeCount === void 0 ? {} : { nodeCount: info.nodeCount },
+				...info.edgeCount === void 0 ? {} : { edgeCount: info.edgeCount },
+				superseded: latest !== void 0 && info.version < latest,
+				...info.unreadable === void 0 ? {} : { unreadable: info.unreadable }
+			}))
+		});
+	}
+	return {
+		sites: foldSites(flows),
+		flows,
+		chainsRootHint: `${workspaceRoot}/.dsh/dataforge/chains`
+	};
+}
+/**
+* 流程行 → 网站行。
+*
+* 站点名取链文件里的 meta.site（目录是 slug，可能与原名不同）——这里用目录名做 key、
+* 用任一版本的 meta 原名做展示名；两者不同时以文件为准（与 store 的说明一致）。
+*/
+function foldSites(flows) {
+	const bySite = /* @__PURE__ */ new Map();
+	for (const flow of flows) {
+		const row = bySite.get(flow.site) ?? {
+			site: flow.site,
+			pageFlows: 0,
+			apiFlows: 0,
+			flows: 0,
+			domains: []
+		};
+		row.flows += 1;
+		if (flow.kind === "page-chain") row.pageFlows += 1;
+		if (flow.kind === "interface-chain") row.apiFlows += 1;
+		if (flow.domain !== void 0 && !row.domains.includes(flow.domain)) row.domains.push(flow.domain);
+		if (flow.updatedAt !== void 0 && (row.updatedAt === void 0 || flow.updatedAt > row.updatedAt)) row.updatedAt = flow.updatedAt;
+		bySite.set(flow.site, row);
+	}
+	return [...bySite.values()].sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
+}
+async function handleGraph(deps, url, res) {
+	const site = url.searchParams.get("site") ?? "";
+	const flow = url.searchParams.get("flow") ?? "";
+	const rawVersion = url.searchParams.get("version");
+	const version = rawVersion === null || rawVersion.length === 0 ? void 0 : Number.parseInt(rawVersion, 10);
+	if (site.length === 0 || flow.length === 0) {
+		fail(res, 400, "缺少 site / flow 查询参数（链按「站点 / 流程」归档）", "missing-param");
+		return;
+	}
+	if (version !== void 0 && (!Number.isInteger(version) || version < 1)) {
+		fail(res, 400, `version 必须是正整数，收到 ${rawVersion}`, "bad-param");
+		return;
+	}
+	const workspaceRoot = await deps.resolveWorkspaceRoot();
+	const loaded = loadChain(workspaceRoot, site, flow, version === void 0 ? {} : { version });
+	if (!loaded.ok) {
+		fail(res, loaded.code === "chain-not-found" ? 404 : 422, loaded.message, loaded.code);
+		return;
+	}
+	const text = readChainText(workspaceRoot, site, flow, loaded.version);
+	const { meta } = loaded.doc;
+	ok(res, {
+		site: loaded.doc.meta.site,
+		flow: loaded.doc.meta.flow,
+		version: loaded.version,
+		kind: loaded.doc.kind,
+		...meta.domain === void 0 ? {} : { domain: meta.domain },
+		...meta.note === void 0 ? {} : { note: meta.note },
+		...meta.source === void 0 ? {} : { source: meta.source },
+		...meta.created === void 0 ? {} : { created: meta.created },
+		chainYaml: text?.text ?? "",
+		doc: loaded.doc,
+		cards: resolveCardIdentities(workspaceRoot, loaded.doc),
+		versions: listChainVersions(workspaceRoot, site, flow)
+	});
+}
+/** 节点引用的卡身份投影（读不到的卡不出现在表里，画布降级显示 cardId）。 */
+function resolveCardIdentities(workspaceRoot, doc) {
+	const cards = {};
+	for (const node of doc.nodes) {
+		if (node.card === void 0 || cards[node.card] !== void 0) continue;
+		const card = readCard(workspaceRoot, node.card);
+		if (card === void 0) continue;
+		cards[node.card] = {
+			...card.name === void 0 ? {} : { name: card.name },
+			method: card.identity.method,
+			urlTemplate: card.identity.urlTemplate
+		};
+	}
+	return cards;
+}
+/** 画布保存：只接受链 YAML 文本，交给 saveChain（唯一写入口），来源标 canvas。 */
+async function handleSave(deps, req, res) {
+	const body = await readBody(req);
+	if (body === void 0) {
+		fail(res, 413, `请求体超过 ${MAX_SAVE_BODY_BYTES} 字节上限`, "payload-too-large");
+		return;
+	}
+	let input;
+	try {
+		const parsed = JSON.parse(body);
+		if (typeof parsed.chainYaml === "string" && parsed.chainYaml.trim().length > 0) input = parsed.chainYaml;
+		else if (parsed.doc !== null && typeof parsed.doc === "object") input = parsed.doc;
+		else {
+			fail(res, 400, "请求体必须形如 {\"doc\": {…链文档…}} 或 {\"chainYaml\": \"<链 YAML 文本>\"}", "bad-param");
+			return;
+		}
+	} catch {
+		fail(res, 400, "请求体不是合法 JSON", "bad-json");
+		return;
+	}
+	const workspaceRoot = await deps.resolveWorkspaceRoot();
+	const saved = saveChain(workspaceRoot, input, { source: "canvas" });
+	if (!saved.ok) {
+		ok(res, {
+			ok: false,
+			code: saved.issues.some((issue) => issue.code === "card-not-imported") ? "card-not-imported" : "invalid-chain",
+			issues: toIssues(saved.issues)
+		});
+		return;
+	}
+	ok(res, {
+		ok: true,
+		version: saved.version,
+		path: saved.path,
+		warnings: toIssues(saved.warnings)
+	});
+}
+function toIssues(issues) {
+	return issues.map((issue) => ({
+		target: issue.target,
+		code: issue.code,
+		reason: issue.reason
+	}));
+}
+function readBody(req) {
+	return new Promise((resolve, reject) => {
+		const chunks = [];
+		let size = 0;
+		req.on("data", (chunk) => {
+			size += chunk.length;
+			if (size > MAX_SAVE_BODY_BYTES) {
+				resolve(void 0);
+				req.destroy();
+				return;
+			}
+			chunks.push(chunk);
+		});
+		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+		req.on("error", reject);
+	});
+}
+function ok(res, data) {
+	send(res, 200, {
+		success: true,
+		data
+	});
+}
 function fail(res, status, error, code) {
 	send(res, status, code === void 0 ? {
 		success: false,
@@ -5898,16 +6299,6 @@ function send(res, status, body) {
 		"cache-control": "no-store"
 	});
 	res.end(JSON.stringify(body));
-}
-function clampLimit(raw, fallback, max) {
-	const parsed = Number.parseInt(raw ?? "", 10);
-	if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-	return Math.min(parsed, max);
-}
-function clampOffset(raw) {
-	const parsed = Number.parseInt(raw ?? "", 10);
-	if (!Number.isFinite(parsed) || parsed < 0) return 0;
-	return parsed;
 }
 
 //#endregion
@@ -6117,11 +6508,12 @@ function apply(ctx, rawConfig) {
 		}
 		const install = () => registerCapturePanelRoutes(webServer, {
 			store: captureDeps.store,
-			startCapture: (args) => startCapture(captureDeps, args)
+			startCapture: (args) => startCapture(captureDeps, args),
+			orchestration: createOrchestrationPanelHandler({ resolveWorkspaceRoot: async () => await resolveWorkspaceRoot(void 0) ?? process.cwd() })
 		});
 		if (typeof effect === "function") effect(install, `${name}: capture panel routes`);
 		else install();
-		logger?.info?.(`采集面板数据路由已注册：${PANEL_API_PREFIX}（runs / cards / captures）`);
+		logger?.info?.(`采集面板数据路由已注册：${PANEL_API_PREFIX}（runs / cards / captures / orchestration）`);
 	});
 	anyCtx.inject?.(["tools"], (toolsService) => {
 		const tools = toolsService["tools"];

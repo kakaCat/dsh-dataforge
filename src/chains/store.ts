@@ -17,8 +17,8 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { CardResolver, ChainDoc, ChainIssue, InterfaceCardDoc } from './schema.js'
-import { chainToYaml, loadYamlValue, parseCardDoc } from './schema.js'
+import type { CardResolver, ChainDoc, ChainIssue, ChainKind, ChainSource, InterfaceCardDoc } from './schema.js'
+import { chainToYaml, loadYamlValue, parseCardDoc, parseChainYaml } from './schema.js'
 import type { ValidateOptions } from './validate.js'
 import { scanCredentialConstants, validateChain, validateChainYaml } from './validate.js'
 
@@ -93,15 +93,69 @@ export function nextChainVersion(workspaceRoot: string, site: string, flow: stri
   return (latestChainVersion(workspaceRoot, site, flow) ?? 0) + 1
 }
 
+/** 单个版本的文件头摘要（编排页的版本列表用；坏文件不抛，带 unreadable）。 */
+export type ChainVersionInfo = {
+  version: number
+  created?: string
+  source?: ChainSource
+  domain?: string
+  note?: string
+  nodeCount?: number
+  edgeCount?: number
+  unreadable?: string
+}
+
+/**
+ * 逐版本读文件头。编排页要显示「v3 · 当前 / v2 已被 v3 取代 / 来源 / 更新时间」，
+ * 这些只有打开每个版本文件才知道；文件坏了照常给出行，只是带 unreadable。
+ */
+export function listChainVersionInfos(workspaceRoot: string, site: string, flow: string): ChainVersionInfo[] {
+  return listChainVersions(workspaceRoot, site, flow).map((version) => {
+    try {
+      const doc = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, version), 'utf8'))
+      if (!doc.ok) {
+        return { version, unreadable: doc.issues.map((issue) => `${issue.target}：${issue.reason}`).join('；') }
+      }
+      const { meta, nodes, edges } = doc.doc
+      return {
+        version,
+        ...(meta.created === undefined ? {} : { created: meta.created }),
+        ...(meta.source === undefined ? {} : { source: meta.source }),
+        ...(meta.domain === undefined ? {} : { domain: meta.domain }),
+        ...(meta.note === undefined ? {} : { note: meta.note }),
+        nodeCount: nodes.length,
+        edgeCount: edges.length,
+      }
+    } catch (error) {
+      return { version, unreadable: `读取失败：${error instanceof Error ? error.message : String(error)}` }
+    }
+  })
+}
+
 export type ChainRef = {
   /** 目录名（slug 形态；原始名字以文件里的 meta.site / meta.flow 为准）。 */
   site: string
   flow: string
   versions: number[]
   latest?: number
+  /** 以下取自**最新版本**的文件头（编排页列表用）；文件坏了就只有目录信息。 */
+  kind?: ChainKind
+  domain?: string
+  note?: string
+  /** 最新版本的 meta.created（ISO）。 */
+  updatedAt?: string
+  nodeCount?: number
+  edgeCount?: number
+  /** 最新版本文件读不出来时的中文原因（列表照常展示，不因一份坏文件整页空白）。 */
+  unreadable?: string
 }
 
-/** 列工作区里所有链（两层目录扫描；坏 slug 的目录跳过）。 */
+/**
+ * 列工作区里所有链（两层目录扫描；坏 slug 的目录跳过）。
+ *
+ * 会读一遍最新版本的头部来补 kind/domain/updatedAt/节点边数——编排页要按这三样
+ * 分组与排序。坏文件不抛：整条链照常出现，只是带 `unreadable` 说明。
+ */
 export function listChains(workspaceRoot: string): ChainRef[] {
   const root = chainsRoot(workspaceRoot)
   if (!existsSync(root)) return []
@@ -115,10 +169,37 @@ export function listChains(workspaceRoot: string): ChainRef[] {
         continue
       }
       if (versions.length === 0) continue
-      result.push({ site, flow, versions, latest: versions[versions.length - 1] })
+      const latest = versions[versions.length - 1]
+      result.push({ site, flow, versions, latest, ...summarize(workspaceRoot, site, flow, latest) })
     }
   }
   return result
+}
+
+/** 最新版本文件头 → 列表要的元数据（读失败返回 unreadable，不抛）。 */
+function summarize(
+  workspaceRoot: string,
+  site: string,
+  flow: string,
+  version: number,
+): Pick<ChainRef, 'kind' | 'domain' | 'note' | 'updatedAt' | 'nodeCount' | 'edgeCount' | 'unreadable'> {
+  try {
+    const doc = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, version), 'utf8'))
+    if (!doc.ok) {
+      return { unreadable: doc.issues.map((issue) => `${issue.target}：${issue.reason}`).join('；') }
+    }
+    const { meta, nodes, edges } = doc.doc
+    return {
+      kind: doc.doc.kind,
+      ...(meta.domain === undefined ? {} : { domain: meta.domain }),
+      ...(meta.note === undefined ? {} : { note: meta.note }),
+      ...(meta.created === undefined ? {} : { updatedAt: meta.created }),
+      nodeCount: nodes.length,
+      edgeCount: edges.length,
+    }
+  } catch (error) {
+    return { unreadable: `读取失败：${error instanceof Error ? error.message : String(error)}` }
+  }
 }
 
 function safeDirs(dir: string): string[] {
@@ -233,11 +314,14 @@ export type ChainSaveResult =
  *
  * `input` 可以是已解析的 ChainDoc（画布/编译草稿确认后）或链 YAML 文本（agent 手写）。
  * 校验不过一律不落盘，把 issues 原样给回去。
+ *
+ * `source` 是**版本来源**（编排图列表要显示「agent 会话保存 / 画布保存 / 导入」）：
+ * 由调用方声明，不猜。调用方没声明就保留输入里已有的值，都没有则该版本无来源标注。
  */
 export function saveChain(
   workspaceRoot: string,
   input: ChainDoc | string,
-  options: Partial<ValidateOptions> = {},
+  options: Partial<ValidateOptions> & { source?: ChainSource } = {},
 ): ChainSaveResult {
   const resolveCard = options.resolveCard ?? defaultCardResolver(workspaceRoot)
   const parsed = typeof input === 'string' ? validateChainYaml(input, { resolveCard }) : validateChain(input, { resolveCard })
@@ -246,7 +330,11 @@ export function saveChain(
   const { doc } = parsed
   const version = nextChainVersion(workspaceRoot, doc.meta.site, doc.meta.flow)
   const created = isIsoInstant(doc.meta.created) ? doc.meta.created : new Date().toISOString()
-  const finalDoc: ChainDoc = { ...doc, meta: { ...doc.meta, version, created } }
+  const source = options.source ?? doc.meta.source
+  const finalDoc: ChainDoc = {
+    ...doc,
+    meta: { ...doc.meta, version, created, ...(source === undefined ? {} : { source }) },
+  }
 
   const dir = chainDir(workspaceRoot, finalDoc.meta.site, finalDoc.meta.flow)
   mkdirSync(dir, { recursive: true })

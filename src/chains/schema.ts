@@ -69,6 +69,13 @@ export type ChainNode = {
   /** FR-1.2 节点级配置预留位（本期只落盘不执行，R-3 消费）。 */
   retry?: number
   timeoutSeconds?: number
+  /**
+   * 画布坐标（R-2）：只有经画布保存的链才带。
+   *
+   * 缺省**不是损坏**：agent 手写、编译草稿产出的链天然没有坐标，画布按拓扑顺序
+   * 自动布局即可。所以这里是可选字段，校验不因它缺失而失败。
+   */
+  layout?: { x: number; y: number }
 }
 
 /** 边 = 绑定声明（FR-1.3）；`suggested: true` 只出现在编译草稿里。 */
@@ -83,7 +90,24 @@ export type ChainMeta = {
   flow: string
   version: number
   created: string
+  /**
+   * 业务域（R-2 编排页的分组维度）：采购域 / 审批域 ……
+   *
+   * 可选：没有就归到「未分组」，不强迫 agent 写它。用 string 而不是枚举——
+   * 业务域是用户词汇，枚举一上来就会挡人。
+   */
+  domain?: string
+  /** 流程用途备注（「新建流程」弹窗的备注栏，画布不消费，列表展示用）。 */
+  note?: string
+  /**
+   * 版本来源：谁写下的这一版。由写入方声明（saveChain 的 source 选项），不靠猜。
+   * 缺省 = 无标注（老版本、手改文件都属此类）——列表如实显示「未标注」。
+   */
+  source?: ChainSource
 }
+
+/** 版本来源词表。 */
+export type ChainSource = 'agent' | 'canvas' | 'import'
 
 /** 一份链文件（= 一个版本快照）。 */
 export type ChainDoc = {
@@ -203,6 +227,16 @@ export const InterfaceCardSchema = Schema.object({
 /** 常量值允许裸写数字/布尔（YAML 里 2120 不是字符串），落地时统一成字符串。 */
 const ConstantValueSchema = Schema.union([Schema.string(), Schema.number(), Schema.boolean()])
 
+/**
+ * 画布坐标。内层 x/y **刻意不 required**：schemastery 对可选的对象字段会先实例化成
+ * `{}` 再往里校验，写 required 就成了「没坐标的链一律校验失败」。是否算有效坐标由
+ * normalizeDoc 判（两个都是有限数才算），这样缺坐标 = 没有 layout，而不是坏链。
+ */
+const LayoutSchema = Schema.object({
+  x: Schema.number(),
+  y: Schema.number(),
+})
+
 const NodeSchema = Schema.object({
   id: Schema.string().required(),
   card: Schema.string(),
@@ -210,6 +244,7 @@ const NodeSchema = Schema.object({
   constants: Schema.dict(ConstantValueSchema).default({}),
   retry: Schema.number().min(0),
   timeoutSeconds: Schema.number().min(0),
+  layout: LayoutSchema,
 })
 
 const EdgeSchema = Schema.object({
@@ -230,6 +265,13 @@ const MetaSchema = Schema.object({
   flow: Schema.string().required(),
   version: Schema.number().min(1).required(),
   created: Schema.string().required(),
+  domain: Schema.string(),
+  note: Schema.string(),
+  source: Schema.union([
+    Schema.const('agent' as const),
+    Schema.const('canvas' as const),
+    Schema.const('import' as const),
+  ]),
 })
 
 export const ChainSchema = Schema.object({
@@ -387,6 +429,9 @@ function normalizeDoc(raw: unknown): ChainDoc {
       flow: doc.meta.flow,
       version: doc.meta.version,
       created: toIsoString(doc.meta.created),
+      ...(doc.meta.domain === undefined ? {} : { domain: doc.meta.domain }),
+      ...(doc.meta.note === undefined ? {} : { note: doc.meta.note }),
+      ...(doc.meta.source === undefined ? {} : { source: doc.meta.source }),
     },
     inputs: (doc.inputs ?? []).map((input) => ({
       ...unknownKeysOf(input),
@@ -395,17 +440,25 @@ function normalizeDoc(raw: unknown): ChainDoc {
       required: input.required === true,
       ...(input.example === undefined ? {} : { example: input.example }),
     })),
-    nodes: (doc.nodes ?? []).map((node) => ({
-      ...unknownKeysOf(node),
-      id: node.id,
-      ...(node.card === undefined ? {} : { card: node.card }),
-      ...(node.page === undefined ? {} : { page: node.page }),
-      constants: Object.fromEntries(
-        Object.entries(node.constants ?? {}).map(([key, value]) => [key, String(value)]),
-      ),
-      ...(node.retry === undefined ? {} : { retry: node.retry }),
-      ...(node.timeoutSeconds === undefined ? {} : { timeoutSeconds: node.timeoutSeconds }),
-    })),
+    nodes: (doc.nodes ?? []).map((node) => {
+      // schemastery 会把缺省的对象字段实例化成 `{}`，`unknownKeysOf` 又会把它捞回来；
+      // 先剔除，再由下面的 nodeLayoutOf 决定要不要保留坐标。
+      const rest = unknownKeysOf(node)
+      delete rest.layout
+      const layout = nodeLayoutOf(node.layout)
+      return {
+        ...rest,
+        id: node.id,
+        ...(node.card === undefined ? {} : { card: node.card }),
+        ...(node.page === undefined ? {} : { page: node.page }),
+        constants: Object.fromEntries(
+          Object.entries(node.constants ?? {}).map(([key, value]) => [key, String(value)]),
+        ),
+        ...(node.retry === undefined ? {} : { retry: node.retry }),
+        ...(node.timeoutSeconds === undefined ? {} : { timeoutSeconds: node.timeoutSeconds }),
+        ...(layout === undefined ? {} : { layout }),
+      }
+    }),
     edges: (doc.edges ?? []).map((edge) => ({
       ...unknownKeysOf(edge),
       from: edge.from,
@@ -413,6 +466,20 @@ function normalizeDoc(raw: unknown): ChainDoc {
       ...(edge.suggested === true ? { suggested: true } : {}),
     })),
   }
+}
+
+/**
+ * 画布坐标的有效性判定：x/y 都是有限数才算有坐标。
+ *
+ * schemastery 会把缺省的对象字段实例化成 `{}`，所以这里必须挡住"半个坐标"与空对象——
+ * 否则无坐标的链会被写成 `layout: {x: null, y: null}`。
+ */
+function nodeLayoutOf(layout: unknown): { x: number; y: number } | undefined {
+  if (layout === null || typeof layout !== 'object') return undefined
+  const { x, y } = layout as { x?: unknown; y?: unknown }
+  return typeof x === 'number' && Number.isFinite(x) && typeof y === 'number' && Number.isFinite(y)
+    ? { x, y }
+    : undefined
 }
 
 /**

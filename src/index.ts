@@ -34,6 +34,7 @@ import { openCapturingPage } from './capture/browser.js'
 import { CaptureStore } from './capture/store.js'
 import { startCapture } from './capture/application.js'
 import { PANEL_API_PREFIX, registerCapturePanelRoutes, type PanelRouteRegistrar } from './capture/panel-routes.js'
+import { createOrchestrationPanelHandler } from './orchestration/panel-routes.js'
 import { SessionRegistry } from './capture/session.js'
 import type { CaptureDeps } from './capture/application.js'
 import type { DataforgeDeps } from './application.js'
@@ -144,13 +145,18 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       store: captureDeps.store,
       // FR-7.6：面板唯一写入口 = 单页采集；action/爬取只走 agent 会话入口。
       startCapture: (args) => startCapture(captureDeps, args),
+      // 编排子路由：同一前缀下由采集 handler 分派（见 CapturePanelDeps.orchestration 的说明）。
+      orchestration: createOrchestrationPanelHandler({
+        // 面板请求没有 exec 上下文：以注册时的工作区为准（面板本就属于当前工作区）。
+        resolveWorkspaceRoot: async () => (await resolveWorkspaceRoot(undefined)) ?? process.cwd(),
+      }),
     })
     if (typeof effect === 'function') {
       effect(install, `${name}: capture panel routes`)
     } else {
       install()
     }
-    logger?.info?.(`采集面板数据路由已注册：${PANEL_API_PREFIX}（runs / cards / captures）`)
+    logger?.info?.(`采集面板数据路由已注册：${PANEL_API_PREFIX}（runs / cards / captures / orchestration）`)
   })
 
   anyCtx.inject?.(['tools'], (toolsService) => {

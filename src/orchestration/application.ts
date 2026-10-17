@@ -131,7 +131,8 @@ export async function upsertChainForTool(
     return { ok: false, code: 'invalid-chain', message: 'site 与 flow 不能为空：链按「站点 / 流程」归档' }
   }
   try {
-    const saved = saveChain(workspaceRoot, args.chainYaml)
+    // 来源标注由写入方声明：这是 agent 会话保存的版本（画布保存走面板路由，标 canvas）。
+    const saved = saveChain(workspaceRoot, args.chainYaml, { source: 'agent' })
     if (!saved.ok) {
       return {
         ok: false,

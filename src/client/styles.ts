@@ -315,6 +315,168 @@ const CSS = `
 .dsh-df-pre { font: 11px var(--dsh-df-mono); background: #f7f8fa; border: 1px solid var(--dsh-df-line);
   border-radius: 8px; padding: 8px 10px; margin: 4px 0 10px; white-space: pre-wrap;
   word-break: break-all; max-height: 220px; overflow: auto; }
+
+/* ── 编排：视图头 / 面包屑 / 工具条（原型 .view-head .crumb .ob-toolbar） ── */
+.dsh-df-view-head { display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 14px; gap: 10px; flex-wrap: wrap; }
+.dsh-df-view-head h1 { font-size: 17px; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 8px; }
+.dsh-df-view-head .dsh-df-sub { margin: 0; }
+.dsh-df-crumb { display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+  font-size: 12.5px; color: var(--dsh-df-ink-3); flex-wrap: wrap; }
+.dsh-df-crumb button { border: none; background: none; padding: 0; cursor: pointer;
+  color: var(--dsh-df-accent); font-weight: 600; font-size: 12.5px; }
+.dsh-df-ob-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.dsh-df-ob-toolbar .dsh-df-search { flex: 1; min-width: 220px; max-width: 380px;
+  border: 1px solid #d4d8df; border-radius: 8px; padding: 7px 12px; font-size: 13px;
+  background: var(--dsh-df-card); font-family: inherit; }
+.dsh-df-ob-toolbar .dsh-df-search:focus { outline: none; border-color: var(--dsh-df-accent);
+  box-shadow: 0 0 0 3px var(--dsh-df-accent-soft); }
+.dsh-df-ob-toolbar .dsh-df-ops { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dsh-df-fmt-tag { font-size: 10.5px; color: var(--dsh-df-ink-3); border: 1px dashed var(--dsh-df-line);
+  border-radius: 5px; padding: 2px 7px; white-space: nowrap; }
+
+/* ── 编排：网站格子（原型 .site-grid） ── */
+.dsh-df-site-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.dsh-df-site-card { background: var(--dsh-df-card); border: 1px solid var(--dsh-df-line);
+  border-radius: var(--dsh-df-radius); padding: 16px 18px; cursor: pointer; text-align: left;
+  font-family: inherit; transition: border-color .15s, box-shadow .15s; }
+.dsh-df-site-card:hover { border-color: var(--dsh-df-accent); box-shadow: 0 4px 16px rgba(59,110,240,.10); }
+.dsh-df-site-card .dsh-df-title { display: flex; align-items: center; gap: 8px; }
+.dsh-df-site-card .dsh-df-title b { font-size: 14.5px; flex: 1; }
+.dsh-df-site-card .dsh-df-host { font: 11.5px var(--dsh-df-mono); color: var(--dsh-df-ink-3); margin-top: 3px; }
+.dsh-df-site-card .dsh-df-stats { display: flex; gap: 14px; margin-top: 12px; font-size: 11.5px;
+  color: var(--dsh-df-ink-3); flex-wrap: wrap; }
+.dsh-df-site-card .dsh-df-stats b { color: var(--dsh-df-ink-2); }
+.dsh-df-site-card .dsh-df-foot { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--dsh-df-line);
+  display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--dsh-df-ink-3); }
+.dsh-df-site-card .dsh-df-enter { color: var(--dsh-df-accent); font-weight: 600; font-size: 12px; }
+
+/* ── 编排：类型标签（原型 .kind-tabs） ── */
+.dsh-df-kind-tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+.dsh-df-kind-tab { border: 1px solid var(--dsh-df-line); background: var(--dsh-df-card);
+  border-radius: 999px; padding: 6px 18px; font-size: 13px; color: var(--dsh-df-ink-2);
+  cursor: pointer; display: flex; align-items: center; gap: 8px; font-family: inherit; }
+.dsh-df-kind-tab[aria-pressed="true"] { background: var(--dsh-df-accent-soft);
+  border-color: var(--dsh-df-accent); color: var(--dsh-df-accent); font-weight: 600; }
+.dsh-df-kind-tab small { font-size: 11px; color: var(--dsh-df-ink-3); font-weight: 400; }
+.dsh-df-kind-tab[aria-pressed="true"] small { color: var(--dsh-df-accent); }
+
+/* ── 编排：业务域 → 流程 → 版本 三级 ── */
+.dsh-df-domain { background: var(--dsh-df-card); border: 1px solid var(--dsh-df-line);
+  border-radius: var(--dsh-df-radius); margin-bottom: 14px; overflow: hidden; }
+.dsh-df-domain-head { display: flex; align-items: center; gap: 10px; padding: 12px 18px;
+  background: linear-gradient(90deg, #f8faff, #fff); border-bottom: 1px solid var(--dsh-df-line);
+  cursor: pointer; border: none; width: 100%; text-align: left; font-family: inherit; }
+.dsh-df-domain-head .dsh-df-dname { font-weight: 700; flex: 1; font-size: 13px; }
+.dsh-df-domain-head .dsh-df-meta { color: var(--dsh-df-ink-3); font-size: 11px; }
+.dsh-df-domain.dsh-df-collapsed .dsh-df-domain-body { display: none; }
+.dsh-df-domain.dsh-df-collapsed .dsh-df-caret { transform: rotate(-90deg); }
+.dsh-df-domain-body { padding: 10px 18px 14px; }
+.dsh-df-flow { margin-left: 18px; padding-left: 16px; border-left: 2px solid var(--dsh-df-line); }
+.dsh-df-flow + .dsh-df-flow { margin-top: 10px; }
+.dsh-df-flow-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+  border: 1px solid var(--dsh-df-line); border-radius: 10px; cursor: pointer; background: #fff;
+  width: 100%; text-align: left; font-family: inherit; }
+.dsh-df-flow-head:hover { border-color: #b8c3d9; }
+.dsh-df-flow-head .dsh-df-fname { font-weight: 600; flex: 1; font-size: 13px; }
+.dsh-df-flow-head .dsh-df-meta { color: var(--dsh-df-ink-3); font-size: 11px; }
+.dsh-df-flow.dsh-df-collapsed .dsh-df-flow-body { display: none; }
+.dsh-df-flow-body { padding: 8px 0 2px; }
+.dsh-df-ver { margin-left: 26px; padding: 7px 0 7px 16px; border-left: 2px dashed #ead9c2;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dsh-df-ver .dsh-df-vtag { font: 700 11px var(--dsh-df-mono); background: #f2f4f7;
+  border-radius: 5px; padding: 1px 8px; }
+.dsh-df-ver .dsh-df-vtag.dsh-df-cur { background: var(--dsh-df-ok-soft); color: var(--dsh-df-ok); }
+.dsh-df-ver .dsh-df-vmeta { font-size: 11px; color: var(--dsh-df-ink-3); flex: 1; min-width: 160px; }
+
+/* ── 编排：编排图行（原型 .graph） ── */
+.dsh-df-graph { background: var(--dsh-df-card); border: 1px solid var(--dsh-df-line);
+  border-radius: var(--dsh-df-radius); margin-bottom: 10px; display: flex; align-items: center;
+  gap: 16px; padding: 12px 16px; transition: border-color .15s; }
+.dsh-df-graph:hover { border-color: #b8c3d9; }
+.dsh-df-graph .dsh-df-thumb { width: 132px; height: 64px; flex-shrink: 0; }
+.dsh-df-graph .dsh-df-info { flex: 1; min-width: 0; }
+.dsh-df-graph .dsh-df-gname { font-weight: 700; font-size: 13.5px; display: flex;
+  align-items: center; gap: 8px; flex-wrap: wrap; }
+.dsh-df-graph .dsh-df-gmeta { font-size: 11.5px; color: var(--dsh-df-ink-3); margin-top: 3px;
+  display: flex; gap: 14px; flex-wrap: wrap; }
+.dsh-df-graph .dsh-df-gmeta b { color: var(--dsh-df-ink-2); }
+.dsh-df-graph .dsh-df-gops { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+
+/* ── 编排：分页条（原型 .pagerbar） ── */
+.dsh-df-pagerbar { display: flex; align-items: center; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
+.dsh-df-pagerbar .dsh-df-total { font-size: 12px; color: var(--dsh-df-ink-3); }
+.dsh-df-pagerbar .dsh-df-pages { display: flex; gap: 4px; margin-left: auto; }
+.dsh-df-pagerbar .dsh-df-pg { min-width: 30px; text-align: center; border: 1px solid var(--dsh-df-line);
+  background: var(--dsh-df-card); border-radius: 6px; padding: 3px 8px; font-size: 12px;
+  color: var(--dsh-df-ink-2); cursor: pointer; font-family: inherit; }
+.dsh-df-pagerbar .dsh-df-pg[aria-current="true"] { background: var(--dsh-df-accent);
+  border-color: var(--dsh-df-accent); color: #fff; font-weight: 600; }
+.dsh-df-pagerbar .dsh-df-pg:disabled { opacity: .45; cursor: default; }
+
+/* ── 编排：画布 ── */
+.dsh-df-canvas-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.dsh-df-canvas-name { font-size: 15px; font-weight: 700; }
+.dsh-df-canvas-meta { font-size: 11.5px; color: var(--dsh-df-ink-3); }
+.dsh-df-canvas-ops { margin-left: auto; display: flex; gap: 8px; }
+.dsh-df-canvas-notice { white-space: pre-wrap; font: 11.5px var(--dsh-df-mono); background: #f7f8fa;
+  border: 1px solid var(--dsh-df-line); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }
+.dsh-df-canvas-hint { font-size: 11px; color: var(--dsh-df-ink-3); margin-top: 8px; }
+.dsh-df-flow-wrap { background: var(--dsh-df-card); border: 1px solid var(--dsh-df-line);
+  border-radius: var(--dsh-df-radius); overflow: hidden; height: 560px; }
+
+/* React Flow 自定义节点（原型 .rf-page-node / .rf-api-node / .rf-pill-node） */
+.dsh-df-rf-node { background: #fff; border-radius: 10px; padding: 8px 14px; min-width: 170px;
+  box-shadow: 0 2px 8px rgba(30,50,120,.08); }
+.dsh-df-rf-page { border: 1.5px solid var(--dsh-df-accent); }
+.dsh-df-rf-api { border: 1.5px solid #059669; min-width: 190px; }
+.dsh-df-rf-t { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12.5px; }
+.dsh-df-rf-u { font: 10.5px var(--dsh-df-mono); color: var(--dsh-df-ink-3); margin-top: 2px;
+  word-break: break-all; }
+.dsh-df-rf-pill { border: 1.5px solid #94a3b8; background: #f8fafc; color: var(--dsh-df-ink-2);
+  border-radius: 999px; padding: 5px 20px; font-weight: 700; font-size: 12px; }
+.dsh-df-rf-selected { outline: 2px solid var(--dsh-df-accent); outline-offset: 2px; }
+.dsh-df-rf-toolbar { display: flex; gap: 6px; align-items: center; background: var(--dsh-df-card);
+  border: 1px solid var(--dsh-df-line); border-radius: 10px; padding: 6px 8px;
+  box-shadow: 0 2px 10px rgba(20,30,60,.08); flex-wrap: wrap; }
+.dsh-df-rf-toolbar button { border: 1px solid var(--dsh-df-line); background: #fff; border-radius: 6px;
+  padding: 3px 10px; font-size: 12px; color: var(--dsh-df-ink-2); cursor: pointer; font-family: inherit; }
+.dsh-df-rf-toolbar button:hover { border-color: var(--dsh-df-accent); color: var(--dsh-df-accent); }
+.dsh-df-rf-hint { font-size: 10.5px; color: var(--dsh-df-ink-3); padding: 0 6px; }
+.dsh-df-rf-panel { width: 264px; background: var(--dsh-df-card); border: 1px solid var(--dsh-df-line);
+  border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 28px rgba(20,30,60,.12); font-size: 12px; }
+.dsh-df-rf-panel h3 { font-size: 13px; margin: 0 0 4px; display: flex; justify-content: space-between;
+  align-items: center; gap: 8px; }
+.dsh-df-rf-close { border: none; background: none; cursor: pointer; color: var(--dsh-df-ink-3);
+  font-size: 13px; padding: 0; }
+.dsh-df-rf-panel label { display: block; font-size: 11px; color: var(--dsh-df-ink-3); margin: 8px 0 3px; }
+.dsh-df-rf-panel input, .dsh-df-rf-panel textarea { width: 100%; border: 1px solid #d4d8df;
+  border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; box-sizing: border-box; }
+.dsh-df-rf-panel input:focus, .dsh-df-rf-panel textarea:focus { outline: none;
+  border-color: var(--dsh-df-accent); }
+.dsh-df-rf-panel input[readonly] { background: #f7f8fa; color: var(--dsh-df-ink-3); }
+.dsh-df-rf-row { display: flex; gap: 8px; }
+.dsh-df-rf-row > div { flex: 1; min-width: 0; }
+
+/* ── 编排：新建流程弹窗（原型 .modal） ── */
+.dsh-df-modal-mask { position: fixed; inset: 0; background: rgba(20,28,45,.38);
+  display: flex; align-items: center; justify-content: center; z-index: 100; }
+.dsh-df-modal { width: 440px; max-width: calc(100vw - 40px); background: var(--dsh-df-card);
+  border-radius: 14px; padding: 20px 22px; box-shadow: 0 18px 60px rgba(15,25,55,.25); }
+.dsh-df-modal h2 { font-size: 15px; margin: 0 0 4px; }
+.dsh-df-modal .dsh-df-sub { margin-bottom: 14px; }
+.dsh-df-field { margin-bottom: 12px; }
+.dsh-df-field label { display: block; font-size: 12px; color: var(--dsh-df-ink-2); margin-bottom: 4px; }
+.dsh-df-field input, .dsh-df-field select, .dsh-df-field textarea { width: 100%;
+  border: 1px solid #d4d8df; border-radius: 8px; padding: 7px 10px; font-size: 13px;
+  font-family: inherit; background: #fff; box-sizing: border-box; }
+.dsh-df-field input:focus, .dsh-df-field select:focus, .dsh-df-field textarea:focus {
+  outline: none; border-color: var(--dsh-df-accent); box-shadow: 0 0 0 3px var(--dsh-df-accent-soft); }
+.dsh-df-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.dsh-df-modal-ops { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.dsh-df-errline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: var(--dsh-df-err-soft); color: var(--dsh-df-err); border: 1px solid #f3c2c2;
+  border-radius: 8px; padding: 8px 12px; font-size: 12px; margin-bottom: 12px; }
 `
 
 /**
@@ -325,5 +487,25 @@ export function injectStyles(): void {
   const style = document.createElement('style')
   style.id = STYLE_ID
   style.textContent = CSS
+  document.head.appendChild(style)
+}
+
+/* ══════════════════════════ 编排页（R-2） ══════════════════════════ */
+
+/** React Flow 结构样式（自动生成的字符串，见 scripts/gen-xyflow-css.mjs）。 */
+export const XYFLOW_STYLE_ID = 'dsh-dataforge-xyflow-styles'
+
+/**
+ * 幂等注入一段 CSS（id 去重）。
+ *
+ * React Flow 的样式只能这样进来：client 半边只会分发一个 .cjs，CSS 文件没人加载。
+ * 与 injectStyles 同一套路，只是内容来源不同（那边是手写 tokens，这边是上游产物）。
+ */
+export function injectCssOnce(id: string, css: string): void {
+  if (typeof document === 'undefined') return
+  if (document.getElementById(id) !== null) return
+  const style = document.createElement('style')
+  style.id = id
+  style.textContent = css
   document.head.appendChild(style)
 }

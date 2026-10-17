@@ -93,6 +93,38 @@ describe('版本快照', () => {
     if (!replaced.ok) return
     expect(Number.isNaN(Date.parse(replaced.doc.meta.created))).toBe(false)
   })
+
+  it('业务域与画布坐标落盘后回读仍在（R-2 编排页依赖它们）', () => {
+    const doc = chainDoc({
+      meta: { ...chainDoc().meta, domain: '采购域' },
+      nodes: [
+        node({ id: 'query-material', card: 'card_000123', constants: { 'query.orgId': '2120' }, layout: { x: 120, y: 40 } }),
+        node({ id: 'create-order', card: 'card_000457', constants: { 'body.lines[0].quantity': '10' } }),
+      ],
+    })
+    const saved = save(doc)
+    expect(saved.ok).toBe(true)
+    if (!saved.ok) return
+    const text = readFileSync(saved.path, 'utf8')
+    expect(text).toContain('domain: 采购域')
+    expect(text).toContain('layout:')
+
+    const loaded = loadChain(workspace(), SITE, FLOW, { resolveCard: allCards })
+    expect(loaded.ok).toBe(true)
+    if (!loaded.ok) return
+    expect(loaded.doc.meta.domain).toBe('采购域')
+    expect(loaded.doc.nodes[0]?.layout).toEqual({ x: 120, y: 40 })
+    // 没有坐标的节点不编造坐标（画布侧自动布局，而不是随便给 0,0）
+    expect(loaded.doc.nodes[1]?.layout).toBeUndefined()
+  })
+
+  it('没有业务域的老链照常读（domain 是可选，不是必填）', () => {
+    save(chainDoc())
+    const loaded = loadChain(workspace(), SITE, FLOW, { resolveCard: allCards })
+    expect(loaded.ok).toBe(true)
+    if (!loaded.ok) return
+    expect(loaded.doc.meta.domain).toBeUndefined()
+  })
 })
 
 describe('回读', () => {
@@ -231,6 +263,33 @@ describe('路径与目录名', () => {
 
   it('没有链目录时 listChains 是空数组', () => {
     expect(listChains(workspace())).toEqual([])
+  })
+
+  it('listChains 带上编排页要的元数据（kind / 业务域 / 更新时间 / 节点边数）', () => {
+    save({
+      ...chainDoc(),
+      meta: { ...chainDoc().meta, domain: '采购域', note: '含审批分支' },
+    })
+    const [chain] = listChains(workspace())
+    expect(chain).toMatchObject({
+      kind: 'interface-chain',
+      domain: '采购域',
+      note: '含审批分支',
+      updatedAt: '2026-10-17T12:00:00Z',
+      nodeCount: 2,
+      edgeCount: 1,
+    })
+    expect(chain?.unreadable).toBeUndefined()
+  })
+
+  it('最新版本文件被手改坏时 listChains 照常列出并标注 unreadable', () => {
+    save(chainDoc())
+    writeFileSync(chainFilePath(workspace(), SITE, FLOW, 1), 'nodes: [ 这不是映射', 'utf8')
+    const [chain] = listChains(workspace())
+    expect(chain).toMatchObject({ site: '智慧供应链-scm', flow: '采购下单', versions: [1] })
+    expect(chain?.unreadable).toBeTruthy()
+    // 坏文件下 kind/节点数无从得知，但目录与版本号必须如实给出
+    expect(chain?.kind).toBeUndefined()
   })
 })
 

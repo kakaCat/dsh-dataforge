@@ -21,6 +21,9 @@ export const CARDS_TAB_ID = 'dataforge-interfaces'
 export const CARDS_TAB_LABEL = '接口库'
 export const SITES_TAB_ID = 'dataforge-sites'
 export const SITES_TAB_LABEL = '采集网站'
+/** R-2 编排页签：原型四段动线（网站 → 流程 → 编排图 → 画布）。 */
+export const ORCH_TAB_ID = 'dataforge-orchestration'
+export const ORCH_TAB_LABEL = '编排'
 
 export const REFRESH_MS = 15_000
 /** 采集页的进度轮询（进行中才 2 秒一次；收口即停）。 */
