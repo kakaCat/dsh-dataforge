@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import type { ChainDoc, ChainIssue, ChainValueType } from '../../src/chains/schema.js'
 import { chainErrorCode } from '../../src/chains/schema.js'
 import {
+  dependencyPairs,
   scanCredentialConstants,
   topoOrder,
   validateChain,
@@ -328,5 +329,48 @@ describe('卡解析器可注入（解耦缝）', () => {
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.issues[0]).toMatchObject({ target: 'nodes[1]', code: 'card-not-imported' })
+  })
+})
+
+describe('依赖对（拓扑消费者）', () => {
+  /** 槽位边 + 一条真绑定边：槽位边不该出现在依赖对里。 */
+  const withSlotEdge = (): ChainDoc => chainDoc({
+    inputs: [{ name: 'orgId', type: 'string', required: true }],
+    nodes: [
+      node({ id: 'query-material', card: 'card_000123', constants: { 'query.orgId': '$inputs.orgId' } }),
+      node({ id: 'create-order', card: 'card_000457', constants: { 'body.lines[0].quantity': '10' } }),
+    ],
+    edges: [
+      { from: 'query-material.body.items[0].internalId', to: 'create-order.body.lines[0].materialId' },
+      { from: '$inputs.orgId', to: 'create-order.body.orgId' },
+    ],
+  })
+
+  it('槽位边不产出依赖对：splitBindingPath 会把 $inputs 当节点名，必须显式跳过', () => {
+    const pairs = dependencyPairs(withSlotEdge())
+    expect(pairs).toEqual([{ from: 'query-material', to: 'create-order' }])
+    // 幻影边（from='$inputs'）会让执行引擎的调度去等一个不存在的上游节点。
+    expect(pairs.some((pair) => pair.from === '$inputs')).toBe(false)
+  })
+
+  it('槽位边不影响拓扑序，链本身仍然合法', () => {
+    const doc = withSlotEdge()
+    expect(validateChain(doc, { resolveCard: allCards }).ok).toBe(true)
+    expect(topoOrder(doc)).toEqual({ order: ['query-material', 'create-order'], cycle: [] })
+  })
+
+  it('只有槽位边时依赖对为空，两节点都不进环', () => {
+    const doc = chainDoc({
+      inputs: [{ name: 'orgId', type: 'string', required: true }],
+      nodes: [
+        node({ id: 'query-material', card: 'card_000123', constants: { 'query.orgId': '$inputs.orgId' } }),
+        node({ id: 'create-order', card: 'card_000457', constants: { 'body.lines[0].quantity': '10' } }),
+      ],
+      edges: [{ from: '$inputs.orgId', to: 'create-order.body.orgId' }],
+    })
+    expect(dependencyPairs(doc)).toEqual([])
+    const topo = topoOrder(doc)
+    expect(topo.cycle).toEqual([])
+    expect(topo.order.sort()).toEqual(['create-order', 'query-material'])
   })
 })

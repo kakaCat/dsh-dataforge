@@ -23,6 +23,7 @@ import {
   fieldSegments,
   inputSlotNameOf,
   isFieldDeclared,
+  isInputSlotRef,
   parseChainDoc,
   parseChainYaml,
   splitBindingPath,
@@ -309,6 +310,11 @@ export function dependencyPairs(doc: ChainDoc): Array<{ from: string; to: string
     }
     const from = splitBindingPath(edge.from)
     const to = splitBindingPath(edge.to)
+    // 槽位边（`from: $inputs.x`）不是节点依赖。别看 `splitBindingPath` 会把它解析成
+    // `{nodeId:'$inputs'}`，漏了这一句就会吐出 `{from:'$inputs'}` 的幻影依赖：拓扑那边
+    // 靠 `indegree.has` 侥幸躲过，但任何直接用依赖对的消费者（执行引擎的调度/就绪队列）
+    // 都会去等一个永不存在的上游节点。
+    if (isInputSlotRef(edge.from)) continue
     if (from && to) pairs.push({ from: from.nodeId, to: to.nodeId })
   }
   return pairs
