@@ -345,7 +345,8 @@ export type ChainRunToolArgs = {
 }
 
 /** 链执行节点的卡：逐 cardId 解析（默认解析器直读接口库，单次调用内缓存）。 */
-function cardsForChain(workspaceRoot: string, doc: ChainDoc): Map<string, InterfaceCardDoc> {
+/** 逐 cardId 解析卡（probe/整链共用；单次调用内缓存）。 */
+export function cardsForChain(workspaceRoot: string, doc: ChainDoc): Map<string, InterfaceCardDoc> {
   const resolve = defaultCardResolver(workspaceRoot)
   const cards = new Map<string, InterfaceCardDoc>()
   for (const node of doc.nodes) {
@@ -384,7 +385,7 @@ function validateChainInputs(
   return { ok: true }
 }
 
-type ChainBaseCandidate = { ok: true; baseUrl?: string } | { ok: false; message: string }
+export type ChainBaseCandidate = { ok: true; baseUrl?: string } | { ok: false; message: string }
 
 /**
  * baseUrl 候选解析：工具入参 > 卡 `sources[].pages[]` 的 origin。
@@ -393,7 +394,7 @@ type ChainBaseCandidate = { ok: true; baseUrl?: string } | { ok: false; message:
  * 不能省；多来源跨 origin 视为冲突（宁可拒跑也不打到错站点）。
  * 一个候选都没有时不在这里报错——交给 `buildPlan` 统一给 `base-url-unresolved`。
  */
-function resolveChainBaseUrl(
+export function resolveChainBaseUrl(
   doc: ChainDoc,
   cards: Map<string, InterfaceCardDoc>,
   explicit: string | undefined,

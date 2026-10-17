@@ -26,7 +26,7 @@ import { DataforgeError } from './shared/errors.js'
 import {
   defineBrowserActTool, defineBrowserCloseTool, defineBrowserOpenTool, defineBrowserSnapshotTool,
   defineCaptureCancelTool, defineCaptureResultTool, defineCaptureStatusTool, defineCaptureTool,
-  defineChainGetTool, defineChainRunsTool, defineChainRunTool, defineChainUpsertTool,
+  defineChainGetTool, defineChainProbeTool, defineChainRunsTool, defineChainRunTool, defineChainUpsertTool,
   defineFlowsTool, defineLibraryImportTool, defineRunTool, defineStatusTool,
 } from './tools.js'
 import type { ChainRunToolDeps, OrchestrationDeps } from './orchestration/application.js'
@@ -88,6 +88,15 @@ const CAPTURE_POLICY = [
   '- site_crawl 是后台任务：dataforge_capture 返回 captureId 后用 dataforge_capture_status 轮询，不要凭空报结果。',
   '- 采集结果用 dataforge_capture_result(scope=cards|samples|credentials|pages) 取回，报给用户时只说接口名/用途/出入参要点，不贴 token/cookie 原文。',
   '- 诚实边界：遇风控/验证码/超限截断/外部域名跳过，如实转述 capture_status/capture_result 里的 notice，不隐瞒。',
+].join('\n')
+
+/** 探索执行纪律：值来源必须诚实标注，写操作必须用户确认。 */
+const EXPLORE_POLICY = [
+  '## dataforge-explore（首跑试探）',
+  '- 首跑用 dataforge_chain_probe 单节点试探；不要把整条不完整的链反复整链重跑。',
+  '- probe 的 values 必须带 source：user / agent-inferred / upstream；agent-inferred 与 upstream 必须写 evidence，禁止把猜测标成 user。',
+  '- 写操作（POST/PUT/PATCH/DELETE）必须经用户确认后带 confirm=true；没有确认只出计划卡。',
+  '- probe 返回的 outputs 用来发现绑定边；回写链只走 dataforge_chain_upsert（R-1 校验）。',
 ].join('\n')
 
 /** 装载插件。 */
@@ -216,11 +225,12 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       defineChainGetTool(orchestrationDeps),
       defineChainRunTool(chainRunDeps),
       defineChainRunsTool(chainRunDeps),
+      defineChainProbeTool(chainRunDeps),
     ]) {
       tools.register(tool)
     }
-    logger?.info?.(`已注册 16 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
-      + ` + library_import/chain_upsert/chain_get/chain_run/chain_runs（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
+    logger?.info?.(`已注册 17 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
+      + ` + library_import/chain_upsert/chain_get/chain_run/chain_runs/chain_probe（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
     if (!config.chainRunEnabled) logger?.info?.('执行开关 chainRunEnabled=false：dataforge_chain_run 一律 execution-disabled')
   })
 
@@ -228,7 +238,7 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
   if (config.injectPolicy) {
     try {
       const policy = loadPolicyText(config.engineRoot)
-      const combined = `${policy.text}\n\n${CAPTURE_POLICY}`
+      const combined = `${policy.text}\n\n${CAPTURE_POLICY}\n\n${EXPLORE_POLICY}`
       const sectionName = 'tool:dataforge'
       anyCtx.systemPrompt?.section?.({
         name: sectionName,

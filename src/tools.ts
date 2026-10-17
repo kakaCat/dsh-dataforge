@@ -26,6 +26,8 @@ import {
   type ChainGetToolValue, type ChainRunPlanValue, type ChainRunsToolValue, type ChainRunToolDeps,
   type ChainRunToolValue, type ChainUpsertToolValue, type ImportLibraryToolValue, type OrchestrationDeps,
 } from './orchestration/application.js'
+import { probeForTool, type ChainProbeToolArgs } from './orchestration/explore.js'
+import type { ProbeResult } from './execute/probe.js'
 
 /** 渲染边界单向收紧：进 render 的值已被 defineTool 按 schema 运行时校验，只是 TS 推断偏松。 */
 function tighten<T>(value: unknown): T {
@@ -1095,6 +1097,226 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
         ...(args.dry_run === undefined ? {} : { dryRun: args.dry_run }),
         ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
         ...(args.relogin === undefined ? {} : { relogin: args.relogin }),
+      }))
+    },
+  })
+}
+
+function renderChainProbe(value: ProbeResult): string {
+  const head = `🔎 节点试探：${value.nodeId || '?'}（${value.method || '?'}）`
+  if (value.gate === 'confirm-required') {
+    const plan = value.plan
+    const inputs = (plan?.cardInputs ?? []).map((input) => `- ${input.path}（${input.type}${input.required ? '，必填' : ''}）`).join('\n')
+    return [
+      `⚠️ 写操作需要确认：${plan?.method ?? value.method} ${plan?.urlTemplate ?? ''}`,
+      '向用户确认后带 confirm=true 重调；本次没有发出任何请求。',
+      inputs === '' ? '' : `卡入参模板：\n${inputs}`,
+    ].filter(Boolean).join('\n')
+  }
+
+  if (value.gate === 'paused') {
+    const gaps = (value.gaps ?? []).map((gap) => `- ${gap.path}（${gap.type}）`).join('\n')
+    const inputs = (value.cardInputs ?? []).map((input) => `- ${input.path}（${input.type}${input.required ? '，必填' : ''}）`).join('\n')
+    return [
+      `⏸ 缺参暂停（未发请求）：${value.message ?? ''}`,
+      gaps === '' ? '' : `缺什么：\n${gaps}`,
+      inputs === '' ? '' : `卡入参模板：\n${inputs}`,
+      value.runId === undefined ? '' : `留痕：${value.runId}`,
+    ].filter(Boolean).join('\n')
+  }
+
+  if (!value.ok) {
+    const response = value.response === undefined
+      ? ''
+      : `\nHTTP ${value.response.status}：${value.response.bodyPreview}`
+    return `❌ 试探未完成（${value.code ?? 'unknown'}）：${value.message ?? ''}${response}${value.runId === undefined ? '' : `\n留痕：${value.runId}`}`
+  }
+
+  const req = value.request === undefined ? '' : `→ ${value.request.method} ${value.request.url}`
+  const resp = value.response === undefined ? '' : `← HTTP ${value.response.status}（${value.response.bytes}B${value.response.truncated ? '，截断' : ''}）`
+  const provenance = (value.provenance ?? []).map((item) => {
+    const evidence = item.evidence === undefined ? '' : `，依据：${item.evidence}`
+    return `- ${item.path} ← ${item.source}${evidence}${item.valuePreview === undefined ? '' : `（${item.valuePreview}）`}`
+  })
+  const outputs = (value.outputs ?? []).slice(0, RECEIPT_MAX_LINES).map((output) => {
+    if (output.error !== undefined) return `- ${output.path}（${output.type}）：取不到（${output.error}）`
+    return `- ${output.path}（${output.type}）：${output.valuePreview ?? '（空）'}`
+  })
+  return [
+    `${head} ${req} ${resp}`,
+    value.attempts === undefined ? '' : `尝试：${value.attempts}`,
+    provenance.length === 0 ? '' : `值来源：\n${provenance.join('\n')}`,
+    outputs.length === 0 ? '' : `卡出参实际值（用来发现绑定）：\n${outputs.join('\n')}`,
+    value.runId === undefined ? '' : `留痕：${value.runId}（explorationId ${value.explorationId ?? '?'}）`,
+    '下一步：用 dataforge_chain_upsert 把发现的绑定边写回链，再 dataforge_chain_run 整链执行。',
+  ].filter(Boolean).join('\n')
+}
+
+export function defineChainProbeTool(deps: ChainRunToolDeps) {
+  return defineTool({
+    name: 'dataforge_chain_probe',
+    description: `单节点试探（R-5 首跑）：只对链上的一个节点发**一发**请求，返回请求/响应摘要与卡出参实际值；不消费绑定边、不写链文件、不整链重跑。
+
+值的形状：values = { "<卡字段路径>": { value, source, evidence? } }。
+- source=user：用户明确给出的值（evidence 建议写原话）；
+- source=agent-inferred：agent 推断的值，**必须给 evidence**；
+- source=upstream：来自某次 probe 的响应，**必须给 evidence**（如 probe:<runId> · body.items[0].internalId）；
+- 节点 constants 自动标 constant，不用放进 values。
+
+三道门：
+- 缺参：在发请求前返回 paused + gaps + 卡入参模板，一个请求都不发；
+- 写操作（POST/PUT/PATCH/DELETE）：没有 confirm=true 只出计划卡，一个请求都不发；
+- 敏感字段（password/token/secret/authorization/cookie/api-key…）的值在留痕里写 ***。
+
+失败时：invalid-source / unknown-value / node-not-found / base-url-unresolved 在发请求前拒；HTTP 非 2xx、超时、网络错如实落 run 并返回 response 摘要。probe 不换票；需要登录态的节点请先确认凭证，或改走 dataforge_chain_run 的 relogin。
+
+首跑闭环：probe 试探 → 读 outputs 发现绑定 → dataforge_chain_upsert 写边 → dataforge_chain_run 整链。`,
+    parameters: {
+      site: { type: 'string', required: true, description: '站点名（链的 meta.site）' },
+      flow: { type: 'string', required: true, description: '流程名（链的 meta.flow）' },
+      version: { type: 'number', description: '链版本；缺省最新' },
+      node: { type: 'string', required: true, description: '链上的节点 id（nodes[].id）' },
+      values: {
+        type: 'object',
+        additionalProperties: true,
+        description: '卡字段路径 → { value, source, evidence? }；source 只允许 user / agent-inferred / upstream',
+      },
+      inputs: {
+        type: 'object',
+        additionalProperties: true,
+        description: '链级槽位运行值（给节点常量里的 $inputs.x 用）',
+      },
+      baseUrl: { type: 'string', description: '目标站点源；缺省从卡的来源页面 origin 推断' },
+      confirm: { type: 'boolean', description: '写操作必须显式确认；缺省 = 只出计划卡' },
+      retry: { type: 'number', description: '仅 GET/HEAD/OPTIONS 生效；0..3 封顶，写方法强制 0' },
+      explorationId: { type: 'string', description: '同一轮首跑的探索组 ID；缺省自动生成 exp_<timestamp>' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          gate: { type: 'string', description: 'executed / paused / confirm-required / failed / blocked' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+          runId: { type: 'string' },
+          runDir: { type: 'string' },
+          explorationId: { type: 'string' },
+          nodeId: { type: 'string' },
+          cardId: { type: 'string' },
+          method: { type: 'string' },
+          gaps: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { path: { type: 'string' }, type: { type: 'string' }, target: { type: 'string' } },
+            },
+          },
+          cardInputs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                path: { type: 'string' },
+                type: { type: 'string' },
+                required: { type: 'boolean' },
+                role: { type: 'string' },
+              },
+            },
+          },
+          plan: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              nodeId: { type: 'string' },
+              method: { type: 'string' },
+              urlTemplate: { type: 'string' },
+              writes: { type: 'boolean' },
+              cardInputs: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    path: { type: 'string' },
+                    type: { type: 'string' },
+                    required: { type: 'boolean' },
+                    role: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          request: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              method: { type: 'string' },
+              url: { type: 'string' },
+              headers: { type: 'object', additionalProperties: true },
+              bodyPreview: { type: 'string' },
+            },
+          },
+          response: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              status: { type: 'number' },
+              bytes: { type: 'number' },
+              truncated: { type: 'boolean' },
+              bodyPreview: { type: 'string' },
+            },
+          },
+          outputs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                path: { type: 'string' },
+                type: { type: 'string' },
+                valuePreview: { type: 'string' },
+                redacted: { type: 'boolean' },
+                error: { type: 'string' },
+              },
+            },
+          },
+          provenance: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                path: { type: 'string' },
+                source: { type: 'string' },
+                evidence: { type: 'string' },
+                valuePreview: { type: 'string' },
+                redacted: { type: 'boolean' },
+              },
+            },
+          },
+          attempts: { type: 'number' },
+          credentials: { type: 'object', additionalProperties: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderChainProbe(tighten<ProbeResult>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<ProbeResult> {
+      const values = args.values as ChainProbeToolArgs['values'] | undefined
+      return lossless(await probeForTool(deps, exec, {
+        site: args.site,
+        flow: args.flow,
+        node: args.node,
+        ...(args.version === undefined ? {} : { version: args.version }),
+        ...(values === undefined ? {} : { values }),
+        ...(args.inputs === undefined ? {} : { inputs: args.inputs }),
+        ...(args.baseUrl === undefined ? {} : { baseUrl: args.baseUrl }),
+        ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
+        ...(args.retry === undefined ? {} : { retry: args.retry }),
+        ...(args.explorationId === undefined ? {} : { explorationId: args.explorationId }),
       }))
     },
   })
