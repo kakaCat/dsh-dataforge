@@ -48,7 +48,6 @@ type FlowEdge = Edge
 export const CARD_MIME = 'application/x-dsh-dataforge-card'
 export const PAGE_MIME = 'application/x-dsh-dataforge-page'
 
-const NODE_WIDTH = 210
 const LEVEL_GAP = 300
 const LANE_GAP = 150
 
@@ -56,13 +55,15 @@ const LANE_GAP = 150
 
 function PageNode({ data, selected }: NodeProps<Node<CanvasNodeData>>): ReactNode {
   return (
-    <div className={`dsh-df-rf-node dsh-df-rf-page${selected === true ? ' dsh-df-rf-selected' : ''}`}>
+    <div
+      className={`dsh-df-rf-node dsh-df-rf-page${selected === true ? ' dsh-df-rf-selected' : ''}`}
+      title={data.url}
+    >
       <Handle type="target" position={Position.Left} />
       <div className="dsh-df-rf-t">
         <span className="dsh-df-lv dsh-df-lv-2">页面</span>
-        <span>{data.label}</span>
+        <span className="dsh-df-rf-name">{data.label}</span>
       </div>
-      {data.url === undefined ? null : <div className="dsh-df-rf-u">{data.url}</div>}
       <Handle type="source" position={Position.Right} />
     </div>
   )
@@ -71,15 +72,17 @@ function PageNode({ data, selected }: NodeProps<Node<CanvasNodeData>>): ReactNod
 function ApiNode({ data, selected }: NodeProps<Node<CanvasNodeData>>): ReactNode {
   const method = data.method ?? ''
   return (
-    <div className={`dsh-df-rf-node dsh-df-rf-api${selected === true ? ' dsh-df-rf-selected' : ''}`}>
+    <div
+      className={`dsh-df-rf-node dsh-df-rf-api${selected === true ? ' dsh-df-rf-selected' : ''}`}
+      title={data.url}
+    >
       <Handle type="target" position={Position.Left} />
       <div className="dsh-df-rf-t">
         <span className={`dsh-df-method ${method === 'GET' ? 'GET' : method === 'POST' ? 'POST' : 'dsh-df-method-other'}`}>
           {method || '—'}
         </span>
-        <span>{data.label}</span>
+        <span className="dsh-df-rf-name">{data.label}</span>
       </div>
-      {data.url === undefined ? null : <div className="dsh-df-rf-u">{data.url}</div>}
       <Handle type="source" position={Position.Right} />
     </div>
   )
@@ -152,8 +155,8 @@ export function projectNodes(graph: ChainGraph): FlowNode[] {
     const card = node.card === undefined ? undefined : graph.cards[node.card]
     const isPage = node.page !== undefined
     const label = isPage
-      ? `页面 ${pageTail(node.page ?? '')}`
-      : card?.name ?? node.card ?? node.id
+      ? pageTail(node.page ?? '')
+      : interfaceDisplayName(node, card)
     const data: CanvasNodeData = {
       label,
       ...(isPage ? { url: node.page ?? '' } : {}),
@@ -170,6 +173,28 @@ export function projectNodes(graph: ChainGraph): FlowNode[] {
       data,
     }
   })
+}
+
+/**
+ * 画布上给「接口」起的显示名：卡名优先（去掉与徽标重复的方法前缀），
+ * 否则用 URL 末段；再退到 cardId / 节点 id。节点上只显示名字，地址在点击面板里。
+ */
+function interfaceDisplayName(node: CanvasNode, card: CardProjection | undefined): string {
+  const method = (card?.method ?? '').trim()
+  const rawName = (card?.name ?? '').trim()
+  const urlTail = (() => {
+    const url = (card?.urlTemplate ?? '').split('?')[0] ?? ''
+    const segment = url.replace(/\/+$/, '').split('/').filter((part) => part !== '').pop() ?? ''
+    return segment
+  })()
+  const base = rawName !== ''
+    ? rawName
+    : urlTail !== ''
+      ? `${method !== '' ? `${method} ` : ''}${urlTail}`
+      : (node.card ?? node.id)
+  if (method === '') return base
+  const stripped = base.replace(new RegExp(`^${method}\\s+`, 'i'), '').trim()
+  return stripped !== '' ? stripped : base
 }
 
 function pageTail(page: string): string {
@@ -539,6 +564,7 @@ function CanvasInner({ graph, onSave }: OrchestrationCanvasProps): ReactNode {
             <Panel position="top-right">
               <NodeEditor
                 node={selNode}
+                card={selNode.data.card === undefined ? undefined : graph.cards[selNode.data.card]}
                 onChange={updateNodeData}
                 onDelete={deleteSelection}
                 onClose={() => { setSelNodeId(undefined) }}
@@ -611,12 +637,16 @@ const INPUT_TYPES = [
 
 function NodeEditor(props: {
   node: FlowNode
+  /** 节点引用的卡投影（接口内容来自这里；缺省 = 卡不在库/页面节点）。 */
+  card?: CardProjection
   onChange: (patch: Partial<CanvasNodeData>) => void
   onDelete: () => void
   onClose: () => void
 }): ReactNode {
-  const { node, onChange, onDelete, onClose } = props
+  const { node, card, onChange, onDelete, onClose } = props
   const constants = node.data.constants ?? {}
+  const method = card?.method ?? node.data.method ?? ''
+  const url = card?.urlTemplate ?? node.data.url ?? ''
   return (
     <div className="dsh-df-rf-panel">
       <h3>
@@ -625,10 +655,43 @@ function NodeEditor(props: {
       </h3>
       <label>名称（来自卡 / 页面，只读）</label>
       <input value={node.data.label} readOnly />
-      {node.data.url === undefined ? null : (
+      {url === '' ? null : (
         <>
-          <label>地址（只读）</label>
-          <input value={node.data.url} readOnly />
+          <label>方法 / 地址（只读，来自接口卡）</label>
+          <input value={`${method} ${url}`.trim()} readOnly />
+          <div className="dsh-df-rf-section">
+            <label>接口内容（入参）</label>
+            {card === undefined || card.inputs.length === 0 ? (
+              <p className="dsh-df-rf-hint">接口卡不在库里或没有入参字段。</p>
+            ) : (
+              <ul className="dsh-df-rf-fields">
+                {card.inputs.slice(0, 12).map((field) => (
+                  <li key={field.path}>
+                    <code>{field.path}</code>
+                    <span>{field.type}{field.required === true ? ' · 必填' : ''}</span>
+                  </li>
+                ))}
+                {card.inputs.length > 12 ? <li><span>… 还有 {card.inputs.length - 12} 个入参</span></li> : null}
+              </ul>
+            )}
+          </div>
+          <div className="dsh-df-rf-section">
+            <label>接口内容（出参）</label>
+            {card === undefined || card.outputs.length === 0 ? (
+              <p className="dsh-df-rf-hint">接口卡不在库里或没有出参字段。</p>
+            ) : (
+              <ul className="dsh-df-rf-fields">
+                {card.outputs.slice(0, 12).map((field) => (
+                  <li key={field.path}>
+                    <code>{field.path}</code>
+                    <span>{field.type}</span>
+                  </li>
+                ))}
+                {card.outputs.length > 12 ? <li><span>… 还有 {card.outputs.length - 12} 个出参</span></li> : null}
+              </ul>
+            )}
+          </div>
+          <div className="dsh-df-rf-divider" />
         </>
       )}
       {node.type === 'api' ? (

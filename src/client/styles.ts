@@ -440,13 +440,13 @@ const CSS = `
   border-radius: var(--dsh-df-radius); overflow: hidden; height: 560px; }
 
 /* React Flow 自定义节点（原型 .rf-page-node / .rf-api-node / .rf-pill-node） */
-.dsh-df-rf-node { background: #fff; border-radius: 10px; padding: 8px 14px; min-width: 170px;
+/* 节点只展示「接口名称」：地址/入参/出参收进点击后的编辑面板，画布保持干净的框图观感。 */
+.dsh-df-rf-node { background: #fff; border-radius: 10px; padding: 8px 12px; width: 190px;
   box-shadow: 0 2px 8px rgba(30,50,120,.08); }
 .dsh-df-rf-page { border: 1.5px solid var(--dsh-df-accent); }
-.dsh-df-rf-api { border: 1.5px solid #059669; min-width: 190px; }
-.dsh-df-rf-t { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12.5px; }
-.dsh-df-rf-u { font: 10.5px var(--dsh-df-mono); color: var(--dsh-df-ink-3); margin-top: 2px;
-  word-break: break-all; }
+.dsh-df-rf-api { border: 1.5px solid #059669; width: 210px; }
+.dsh-df-rf-t { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12.5px; min-width: 0; }
+.dsh-df-rf-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsh-df-rf-pill { border: 1.5px solid #94a3b8; background: #f8fafc; color: var(--dsh-df-ink-2);
   border-radius: 999px; padding: 5px 20px; font-weight: 700; font-size: 12px; }
 .dsh-df-rf-selected { outline: 2px solid var(--dsh-df-accent); outline-offset: 2px; }
@@ -473,6 +473,16 @@ const CSS = `
 .dsh-df-rf-panel input:focus, .dsh-df-rf-panel textarea:focus, .dsh-df-rf-panel select:focus {
   outline: none; border-color: var(--dsh-df-accent); }
 .dsh-df-rf-panel input[readonly] { background: #f7f8fa; color: var(--dsh-df-ink-3); }
+/* 点击节点后的「接口内容」：入参/出参清单（只读） */
+.dsh-df-rf-section { margin-top: 6px; }
+.dsh-df-rf-fields { list-style: none; margin: 4px 0 0; padding: 0; display: flex;
+  flex-direction: column; gap: 2px; max-height: 120px; overflow: auto; }
+.dsh-df-rf-fields li { display: flex; align-items: baseline; gap: 6px; font-size: 11px;
+  color: var(--dsh-df-ink-3); min-width: 0; }
+.dsh-df-rf-fields code { font: 10.5px var(--dsh-df-mono); color: var(--dsh-df-ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+.dsh-df-rf-fields li span { margin-left: auto; white-space: nowrap; }
+.dsh-df-rf-divider { border-top: 1px dashed var(--dsh-df-line); margin: 12px 0 4px; }
 .dsh-df-rf-row { display: flex; gap: 8px; margin-top: 12px; }
 .dsh-df-rf-row > div { flex: 1; min-width: 0; }
 .dsh-df-btn-danger { border: 1px solid #f3c2c2; background: #fff; color: #dc2626; border-radius: 6px;
