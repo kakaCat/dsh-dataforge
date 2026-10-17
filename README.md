@@ -17,6 +17,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
   └─ dataforge_chain_upsert / dataforge_chain_get  接口链：版本快照、绑定即拓扑依赖
   └─ dataforge_chain_run / dataforge_chain_runs    执行：拓扑调度 + 纯 HTTP 直调 + 运行留痕
   └─ dataforge_chain_probe                        首跑：单节点试探 + 每个值带来源 + 写操作确认闸
+  └─ dataforge_chain_crystallize                  结晶：三分类草案 + 用户确认 + 入参槽位写回
         │
         ▼  编排/执行/复跑一律走「接口卡模板 + 凭证卡」＋纯 HTTP，不再开浏览器
 ```
@@ -35,6 +36,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | 执行引擎 | `src/execute/{plan,coverage,request,binding,http,run}.ts` | 计划编译 / 缺参覆盖 / 请求构造 / 绑定求值 / HTTP 出口 / 调度器 |
 | 凭证注入 | `src/{execute,capture}/credentials.ts` | cookie 匹配纯函数 / 只读采集库 provider / 注入摘要（R-4 M1） |
 | 首跑试探 | `src/{execute,orchestration}/{probe,explore}.ts` | 单节点请求 / 值来源校验 / 缺参与写闸 / `probe-run` 留痕（R-5 M1） |
+| 结晶复跑 | `src/{execute,orchestration}/crystal.ts` | 三分类草案 / 铁律 / 确认闸 / `saveChain` 槽位写回 / `crystal-run` 审计（R-6 M1） |
 | 编排应用层 | `src/orchestration/application.ts` | 链读写、执行闸门与 IF-1/2 的错误码折叠与回执值 |
 
 ## 三道闸（调用纪律，写进 dataforge_run 工具描述）
@@ -243,6 +245,37 @@ probe 试探 → 读 outputs 发现绑定 → dataforge_chain_upsert 写边（R-
 **留痕**：每次 probe 一条 `runs/<runId>/`，`run.json` 的 `kind: probe-run` + `probe.explorationId`，同一次首跑的多发 probe 用同一个 explorationId 串起来。`dataforge_status` 可直接读。
 
 **诚实边界**：probe 不消费绑定边、不缓存上游响应、不自动猜值、不自动推断绑定；probe 也不换票（401 会提示走 `dataforge_chain_run` 的 `relogin`）。
+
+### 结晶与复跑（R-6 M1）
+
+首跑 probe 留下的「值 + 来源」在这里变成链资产：
+
+```text
+dataforge_chain_crystallize(explorationId)      ← 不带 confirm：只出草案
+  → 用户确认
+dataforge_chain_crystallize(explorationId, confirm:true[, decisions])
+  → 新链版本：inputs 槽位 + $inputs.<name> 常量
+dataforge_chain_run(inputs:{...}, confirm:true)  ← 换入参复跑
+```
+
+**三分类铁律**：
+
+| 来源 | 结晶为 | 复跑时 |
+|---|---|---|
+| `user` | 链级 `inputs` 槽位（`example` 存本次值） | 替换成新入参 |
+| `constant` | 节点 `constants` | 原样使用 |
+| `upstream` | **链生成值**：只校验已有绑定边，**绝不冻结** | 沿绑定边重新求解 |
+| `agent-inferred` | 入参候选，但必须在 `decisions` 里 `confirmed:true` | 同 user |
+
+- **确认闸**：没有 `confirm=true` 绝不写链；写回只走 `saveChain`（R-1 校验 + 新版本）；
+- **铁律强制**：任何把 upstream 当 constant/input 的决策 → `crystal-iron-rule`，整次写回拒绝；
+- **冲突**：同一 `nodeId:path` 多条 probe 值/来源不一致 → `crystal-conflict`，必须用 decisions 明确选一个；
+- **敏感值**：probe 标了 `redacted`/`***` 的行不参与结晶；
+- **审计**：每次写回落一条 `crystal-run`（explorationId、decisions、写入版本）。
+
+**复跑与诊断**：结晶后的链是普通 `interface-chain`，直接 `dataforge_chain_run(inputs:{q:'C', quantity:2}, confirm:true)`；链生成值由上游响应重新求解，不读首跑缓存。失败时 R-3 回执给 `failedNode` + `binding-*` 错误，错误消息带 `from → to`，可定位到求解断点。
+
+**M1 边界**：只做手动复跑；不自动合并旧槽位（以一次 exploration 重新出草案）；不做定时/批量；不做自动修复。
 
 ### 编排页签（面板内可视化编辑）
 
