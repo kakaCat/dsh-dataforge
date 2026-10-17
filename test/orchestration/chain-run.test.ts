@@ -15,6 +15,7 @@ import { chainToYaml } from '../../src/chains/schema.js'
 import { cardsRoot, chainFilePath, saveChain } from '../../src/chains/store.js'
 import {
   chainRunForTool,
+  getChainForTool,
   type ChainRunToolDeps,
   type ChainRunsToolValue,
   type ChainRunToolValue,
@@ -100,6 +101,30 @@ describe('执行开关：execution-disabled', () => {
     expect(value.code).toBe('execution-disabled')
     expect(value.message).toContain('chainRunEnabled')
     expect(listRunIds(deps.dataRoot, 10)).toEqual([])
+  })
+})
+
+describe('开关演练（M4 回滚路径）', () => {
+  it('关 → 拒跑，开 → 立刻恢复；数据面无需迁移', async () => {
+    const workspace = workspaceOf()
+    writeCard(workspace, cardOf('card_ok', 'GET', '/api/ok', [], 'https://scm.example.com'))
+    seedChain(workspace, '演练链', chainOf([{ id: 'node-1', card: 'card_ok', constants: {} }]))
+
+    // 1) 关：拒跑，但链照常可读。
+    const closed = depsOf(workspace, { enabled: false })
+    const refused = await chainRunForTool(closed, {}, { site: '测试站点', flow: '演练链', confirm: true })
+    expect(refused.code).toBe('execution-disabled')
+    // 关着也能读链：开关只管执行，不管链读写（阅读走 chain_get，与执行闸无关）。
+    const readBack = await getChainForTool(closed, {}, { site: '测试站点', flow: '演练链' })
+    expect(readBack.ok).toBe(true)
+    expect(readBack.version).toBe(1)
+
+    // 2) 开：同一条链立刻能出计划卡（配置即恢复，无数据面迁移）。
+    const opened = depsOf(workspace, { enabled: true })
+    const recovered = await chainRunForTool(opened, {}, { site: '测试站点', flow: '演练链' })
+    expect(recovered.ok).toBe(true)
+    expect(recovered.gate).toBe('confirm-required')
+    expect(recovered.plan?.totalNodes).toBe(1)
   })
 })
 

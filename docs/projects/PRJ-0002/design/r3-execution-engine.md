@@ -443,6 +443,22 @@ application 层的执行编排，工具壳只负责参数与回执渲染（沿�
 | 悬挂 run（无 terminal）如何判死与清理 | 只提示不自动处理 / `startedAt` 超 2×超时判 stale / 启动时清扫 | yunpeng | M4 前定；倾向只提示，不自动改状态 |
 | SSRF 与目标站点白名单 | 不做 / 仅允许卡来源 origin / 配置站点白名单 | yunpeng | 与 R-4 一起定（凭证注入后风险面变大）；本期只做 http/https 限制与目标 host 记录 |
 
+## 验收证据  serves: 全文
+
+需求 §5 的五条判据逐条落到可自动跑的用例（`pnpm test` 全绿即通过），不留「人工点一遍」的模糊项：
+
+| 验收判据 | 证据 | 说明 |
+|---|---|---|
+| ≥3 节点、含绑定边的无登录态链直跑成功，上游出参正确传入下游 | `test/execute/run.test.ts`「三节点链（两条绑定边）跑通」 | 值经两跳：`internalId(M-1)` → `detail.query.id` → `materialCode(CODE-9)` → 写节点请求体，断言的是**实际发出的请求体** |
+| 并行分支并发执行；依赖未满足的节点不提前发请求 | `run.test.ts`「并发：两个无依赖节点同时发出」（计时 < 单次耗时上界）、「就绪节点按 id 字典序取」；`plan.test.ts` 拓扑序 | 依赖未满足的直接证据是真实请求顺序 = 拓扑序，以及被中止时下游节点**没有** `step` 事件 |
+| 4xx/5xx/超时 → 链中止，运行记录诚实标注失败节点与响应摘要 | `test/execute/failure.test.ts`（500 / 405 / 401 / 403 / 超时 / 连接被拒）；`run.test.ts`「下游 500 → failedNode 指到该节点」 | 失败节点、错误码、HTTP 状态、响应摘要四项都在 `step(error)` 与 `terminal.message` 里 |
+| 绑定路径不存在 / 类型不符 → 明确报错指到绑定边 | `run.test.ts`「绑定取不到值 → binding-path-not-found 指到绑定边」；`binding.test.ts` | 回执给 `from → to` 原文与求值原因，且下游节点一个请求都不发 |
+| 全程无浏览器进程启动 | `test/execute/invariants.test.ts`（依赖图断言） | 比一次性进程列表更强的保证：`src/execute` 的依赖图里没有 `capture/`（Playwright 只在那里）、没有 `node:child_process`、没有 http.ts 之外的 `fetch` —— 不存在能起浏览器的代码路径 |
+| 后台 job：可轮询、可取消、终态 `killed` | `test/execute/job.test.ts`（jobs 在场/缺席/取消 + `chain_runs` + `status`） | 取消后 `foldSummary` 折叠成 `killed`，不留悬挂 `running` |
+| 执行开关回滚演练 | `test/orchestration/chain-run.test.ts`「开关演练（M4 回滚路径）」 | 关 → 拒跑且链照常可读；开 → 同一份链立刻出计划卡（配置即恢复，无数据面迁移） |
+
+**仍未验证（需要真实站点，非代码问题）**：设计 §四风险里列的「可用性补课」——用一条真实 3 节点链 + 一次故意失败，让用户只看运行记录回答「失败在哪、传了什么值」。这一步要人参与，用例替代不了；M3 出口判据里已挂起，结论未出。
+
 ## 附录  serves: 全文
 
 - **原型与验证材料**：无新原型；验证以单测 + 一条真实 3 节点链的 e2e 为准（M2 产出）。

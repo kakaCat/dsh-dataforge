@@ -40,6 +40,11 @@ beforeAll(async () => {
     req.on('data', (chunk: Buffer) => chunks.push(chunk))
     req.on('end', () => {
       seen.push({ method: req.method ?? '', url, body: Buffer.concat(chunks).toString('utf8') })
+      if (url.startsWith('/api/materials/detail')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ materialCode: 'CODE-9' }))
+        return
+      }
       if (url.startsWith('/api/materials')) {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ items: [{ internalId: 'M-1' }] }))
@@ -115,6 +120,10 @@ const createCard = cardOf('card_create', 'POST', '/api/orders', [
   { path: 'body.lines[0].quantity', type: 'number' },
   { path: 'body.orgId', type: 'string' },
 ], [{ path: 'body.orderNo', type: 'string' }])
+
+const detailCard = cardOf('card_detail', 'GET', '/api/materials/detail?id={id}', [
+  { path: 'query.id', type: 'string' },
+], [{ path: 'body.materialCode', type: 'string' }])
 
 const failCard = cardOf('card_fail', 'GET', '/api/fail', [])
 const slowACard = cardOf('card_slow_a', 'GET', '/api/slow-a', [])
@@ -211,6 +220,51 @@ describe('主路径：拓扑执行 + 绑定传值', () => {
     // 出参探测：上游 done 事件的 emitted 里有绑定路径。
     const queryDone = steps[1] as { data?: { emitted?: Record<string, unknown> } }
     expect(queryDone.data?.emitted?.['query-material.body.items[0].internalId']).toBe('M-1')
+  })
+
+  it('三节点链（两条绑定边）跑通：值经两跳传到写节点，每节点恰好一对 start/终态', async () => {
+    seen = []
+    const deps = depsOf()
+    const doc = chainOf(
+      [
+        { id: 'query-material', card: 'card_search', constants: { 'query.orgId': '2120', 'query.q': '$inputs.keyword' } },
+        { id: 'query-detail', card: 'card_detail', constants: {} },
+        { id: 'create-order', card: 'card_create', constants: { 'body.lines[0].quantity': '3', 'body.orgId': '2120' } },
+      ],
+      [
+        { from: 'query-material.body.items[0].internalId', to: 'query-detail.query.id' },
+        { from: 'query-detail.body.materialCode', to: 'create-order.body.lines[0].materialId' },
+      ],
+      [{ name: 'keyword', type: 'string', required: true }],
+    )
+    const cards = cardsOf(searchCard, detailCard, createCard)
+    const plan = planOf(doc, cards, { keyword: '螺丝' })
+    expect(plan.order).toEqual(['query-material', 'query-detail', 'create-order'])
+
+    const result = await runChain(deps, { doc, cards, plan, inputs: { keyword: '螺丝' }, baseUrl: base })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('completed')
+    expect(result.summary.stepsDone).toBe(3)
+    expect(result.nodes.map((node) => node.status)).toEqual(['done', 'done', 'done'])
+
+    // 值经两跳：internalId(M-1) → detail.query.id → materialCode(CODE-9) → create.body…
+    const createRequest = seen.find((entry) => entry.url.startsWith('/api/orders'))
+    expect(JSON.parse(createRequest?.body ?? '{}')).toMatchObject({
+      lines: [{ materialId: 'CODE-9' }],
+    })
+    // 依赖未满足不提前发请求：真实发出顺序 = 拓扑序。
+    expect(seen.map((entry) => entry.url.split('?')[0])).toEqual([
+      '/api/materials', '/api/materials/detail', '/api/orders',
+    ])
+
+    // 每节点恰好一条 start + 一条终态。
+    const steps = (loadRunEvents(deps.dataRoot, result.runId) ?? []).filter((event) => event.event === 'step')
+    for (const nodeId of plan.order) {
+      const mine = steps.filter((event) => event.id === nodeId)
+      expect(mine.filter((event) => event.status === 'start')).toHaveLength(1)
+      expect(mine.filter((event) => event.status === 'done' || event.status === 'error')).toHaveLength(1)
+    }
   })
 
   it('run.json 先于第一个请求落盘，且是 chain-run 快照', async () => {
