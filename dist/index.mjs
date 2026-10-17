@@ -1288,7 +1288,7 @@ function foldSummary(runId, events, overrideStatus) {
 	else status = "failed";
 	const firstTs = numOrUndefined(events[0]?.ts);
 	const lastTs = numOrUndefined(events[events.length - 1]?.ts);
-	const bizData = plainRecord$1(result?.businessData);
+	const bizData = plainRecord$2(result?.businessData);
 	return {
 		runId,
 		flow: typeof meta?.flow === "string" ? meta.flow : "",
@@ -1314,7 +1314,7 @@ function foldSummary(runId, events, overrideStatus) {
 * 没有 `meta.chain` 的旧流程运行返回空对象——只增可选字段，旧 run 不受影响。
 */
 function chainSummaryOf(meta, bizData) {
-	const chainMeta = plainRecord$1(meta?.chain);
+	const chainMeta = plainRecord$2(meta?.chain);
 	if (chainMeta === void 0) return {};
 	const failedNode = typeof bizData?.["failedNode"] === "string" ? bizData["failedNode"] : void 0;
 	const completedRaw = bizData?.["completed"];
@@ -1331,7 +1331,7 @@ function numOrUndefined(value) {
 	return typeof value === "number" ? value : void 0;
 }
 /** 非 plain object（数组/缺失）一律 undefined。 */
-function plainRecord$1(value) {
+function plainRecord$2(value) {
 	if (value !== null && typeof value === "object" && !Array.isArray(value)) return value;
 }
 
@@ -7953,7 +7953,7 @@ function stringifyValue(value) {
 		return String(value);
 	}
 }
-function plainRecord(value) {
+function plainRecord$1(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 function sourceOf(value) {
@@ -7974,7 +7974,7 @@ function probeRunsOf(input) {
 	for (const runId of listRunIds(input.dataRoot, 200)) {
 		const record = readRunRecord(input.dataRoot, runId);
 		if (record === void 0 || record["kind"] !== "probe-run") continue;
-		const probe = plainRecord(record["probe"]);
+		const probe = plainRecord$1(record["probe"]);
 		if (probe === void 0) continue;
 		if (probe["site"] !== input.site || probe["flow"] !== input.flow) continue;
 		if (input.version !== void 0 && probe["version"] !== input.version) continue;
@@ -7985,9 +7985,9 @@ function probeRunsOf(input) {
 		const cardId = typeof probe["cardId"] === "string" ? probe["cardId"] : "";
 		if (nodeId === "" || cardId === "") continue;
 		const provenanceRaw = record["provenance"];
-		const provenance = Array.isArray(provenanceRaw) ? provenanceRaw.filter((item) => plainRecord(item) !== void 0) : [];
+		const provenance = Array.isArray(provenanceRaw) ? provenanceRaw.filter((item) => plainRecord$1(item) !== void 0) : [];
 		if (provenance.length === 0) continue;
-		const values = plainRecord(record["values"]) ?? {};
+		const values = plainRecord$1(record["values"]) ?? {};
 		runs.push({
 			runId,
 			startedAt: typeof record["startedAt"] === "number" ? record["startedAt"] : 0,
@@ -8429,6 +8429,174 @@ async function crystalForTool(deps, exec, args) {
 		runDir,
 		warnings: applied.warnings
 	};
+}
+
+//#endregion
+//#region src/orchestration/diagnose.ts
+function diagnoseOutputOf(value) {
+	return JSON.parse(JSON.stringify(value));
+}
+function plainRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function stringOf(value) {
+	return typeof value === "string" ? value : void 0;
+}
+function numberOrUndefined(value) {
+	return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function nodeSummaries(events) {
+	const map = /* @__PURE__ */ new Map();
+	for (const event of events) {
+		if (event.event !== "step" || event.id === void 0) continue;
+		const nodeId = event.id;
+		const data = plainRecord(event.data);
+		const existing = map.get(nodeId) ?? {
+			nodeId,
+			status: "started"
+		};
+		if (event.status === "start") {
+			map.set(nodeId, {
+				...existing,
+				status: "started"
+			});
+			continue;
+		}
+		if (event.status === "done") {
+			const response = plainRecord(data?.["response"]);
+			map.set(nodeId, {
+				nodeId,
+				status: "done",
+				...numberOrUndefined(response?.["status"]) === void 0 ? {} : { httpStatus: numberOrUndefined(response?.["status"]) },
+				...numberOrUndefined(data?.["attempts"]) === void 0 ? {} : { attempts: numberOrUndefined(data?.["attempts"]) },
+				...numberOrUndefined(event.elapsed) === void 0 ? {} : { elapsedMs: numberOrUndefined(event.elapsed) }
+			});
+			continue;
+		}
+		if (event.status === "error") {
+			const response = plainRecord(data?.["response"]);
+			map.set(nodeId, {
+				nodeId,
+				status: "error",
+				...numberOrUndefined(response?.["status"]) === void 0 ? {} : { httpStatus: numberOrUndefined(response?.["status"]) },
+				...numberOrUndefined(data?.["attempts"]) === void 0 ? {} : { attempts: numberOrUndefined(data?.["attempts"]) },
+				...numberOrUndefined(event.elapsed) === void 0 ? {} : { elapsedMs: numberOrUndefined(event.elapsed) },
+				...stringOf(data?.["code"]) === void 0 ? {} : { errorCode: stringOf(data?.["code"]) },
+				...event.error === void 0 ? {} : { error: event.error }
+			});
+		}
+	}
+	return [...map.values()];
+}
+function hintsOf(errorCode) {
+	if (errorCode === void 0) return [];
+	if (errorCode.startsWith("binding-") || errorCode === "empty-wildcard") return ["绑定断点：先 probe 上游节点，核对 outputs 里该路径是否真的存在", "确认 from 路径（[*]/[0]）与上游响应结构一致；必要时重新采集刷新卡模板"];
+	if (errorCode === "node-auth-required") return ["鉴权失败：确认 cookie/token 是否注入；过期时用 dataforge_chain_run 的 relogin 换票", "仍失败就重新采集登录态，不要把凭证手写进链"];
+	if (errorCode.startsWith("relogin-")) return ["换票失败：检查登录链（site/flow/inputs）与账号权限；修好后用新 run 重跑"];
+	if (errorCode === "node-http-error" || errorCode === "node-timeout" || errorCode === "node-network-error") return ["看 response.bodyPreview 与状态码；改入参/补绑定后重跑，不自动重放写请求"];
+	if (errorCode === "missing-params" || errorCode === "inputs-invalid") return ["补齐链级 inputs/节点常量；结晶后的链应只有槽位和常量，不应再有裸值"];
+	return [];
+}
+/** 诊断一条链运行（只读）。 */
+async function diagnoseForTool(deps, exec, args) {
+	const runId = args.runId.trim();
+	if (runId === "") return {
+		ok: false,
+		code: "invalid-run-id",
+		message: "runId 不能为空",
+		runId
+	};
+	const record = readRunRecord(deps.dataRoot, runId);
+	if (record === void 0) return {
+		ok: false,
+		code: "run-not-found",
+		message: `没有找到运行 ${runId}`,
+		runId
+	};
+	if (record["kind"] !== "chain-run") return {
+		ok: false,
+		code: "not-a-chain-run",
+		message: `运行 ${runId} 不是链运行（kind=${String(record["kind"])}）：诊断只针对 dataforge_chain_run 的留痕`,
+		runId
+	};
+	const events = loadRunEvents(deps.dataRoot, runId);
+	if (events === void 0 || events.length === 0) return {
+		ok: false,
+		code: "run-not-found",
+		message: `运行 ${runId} 还没有事件留痕`,
+		runId
+	};
+	const summary = foldSummary(runId, events);
+	const chain = summary.chain;
+	const chainRecord = plainRecord(record["chain"]);
+	const site = chain?.site ?? stringOf(chainRecord?.["site"]) ?? "";
+	const flow = chain?.flow ?? stringOf(chainRecord?.["flow"]) ?? "";
+	const version = chain?.version ?? numberOrUndefined(chainRecord?.["version"]);
+	const failedNode = chain?.failedNode ?? summary.lastStepId;
+	const nodes = nodeSummaries(events);
+	const failedNodeInfo = nodes.find((node) => node.nodeId === failedNode);
+	const errorCode = failedNodeInfo?.errorCode;
+	const error = failedNodeInfo?.error ?? summary.lastError;
+	const failedStart = events.find((event) => event.event === "step" && event.id === failedNode && event.status === "start");
+	const failedEnd = events.find((event) => event.event === "step" && event.id === failedNode && event.status !== "start");
+	const startData = plainRecord(failedStart?.data);
+	const endData = plainRecord(failedEnd?.data);
+	const request = plainRecord(startData?.["request"]);
+	const response = plainRecord(endData?.["response"]);
+	let edges = [];
+	const hints = hintsOf(errorCode);
+	if (failedNode !== void 0 && site !== "" && flow !== "" && version !== void 0) {
+		const workspaceRoot = await deps.resolveWorkspaceRoot(exec) ?? process.cwd();
+		const loaded = loadChain(workspaceRoot, site, flow, { version });
+		if (!loaded.ok) hints.push(`链文件不可读（v${version}）：${loaded.message}；只能按事件留痕诊断`);
+		else {
+			edges = edgesInto(loaded.doc, failedNode, nodes, error);
+			if (edges.length === 0) hints.push(`节点 ${failedNode} 没有入边：失败不是绑定造成的，先看请求/响应`);
+		}
+	}
+	return {
+		ok: true,
+		runId,
+		status: summary.status,
+		...site === "" ? {} : { chain: {
+			site,
+			flow,
+			version: version ?? 0
+		} },
+		...plainRecord(record["params"]) === void 0 ? {} : { params: plainRecord(record["params"]) },
+		...failedNode === void 0 ? {} : { failedNode },
+		...errorCode === void 0 ? {} : { errorCode },
+		...error === void 0 ? {} : { error },
+		nodes,
+		...failedNode === void 0 ? {} : { failed: {
+			...typeof failedStart?.action === "string" ? { action: failedStart.action } : {},
+			...request === void 0 ? {} : { request },
+			...response === void 0 ? {} : { response }
+		} },
+		edges,
+		...hints.length === 0 ? {} : { hints }
+	};
+}
+function edgesInto(doc, failedNode, nodes, error) {
+	const statusOf = new Map(nodes.map((node) => [node.nodeId, node.status]));
+	const edges = [];
+	for (const edge of doc.edges) {
+		const to = splitBindingPath(edge.to);
+		if (to === void 0 || to.nodeId !== failedNode) continue;
+		const sourceNode = splitBindingPath(edge.from)?.nodeId ?? "";
+		const sourceStatus = statusOf.get(sourceNode) ?? "unknown";
+		const suspect = error !== void 0 && (error.includes(edge.from) || error.includes(`${edge.from} → ${edge.to}`));
+		const reason = sourceStatus === "error" ? `上游节点 ${sourceNode} 失败` : suspect ? "错误消息指向这条绑定边" : void 0;
+		edges.push({
+			from: edge.from,
+			to: edge.to,
+			sourceNode,
+			sourceStatus,
+			suspect,
+			...reason === void 0 ? {} : { reason }
+		});
+	}
+	return edges;
 }
 
 //#endregion
@@ -10090,6 +10258,138 @@ function defineChainCrystalTool(deps) {
 		}
 	});
 }
+function renderChainDiagnose(value) {
+	if (!value.ok) return `❌ 诊断不可用（${value.code ?? "unknown"}）：${value.message ?? ""}`;
+	const chain = value.chain === void 0 ? "" : `${value.chain.site}/${value.chain.flow} v${value.chain.version}`;
+	const failed = value.failedNode === void 0 ? "" : `断点：${value.failedNode}${value.errorCode === void 0 ? "" : `（${value.errorCode}）`}`;
+	const nodeLines = (value.nodes ?? []).map((node) => {
+		const http = node.httpStatus === void 0 ? "" : ` HTTP ${node.httpStatus}`;
+		const error = node.errorCode === void 0 ? "" : ` ${node.errorCode}`;
+		return `- ${node.nodeId}：${node.status}${http}${error}`;
+	});
+	const edgeLines = (value.edges ?? []).map((edge) => {
+		return `- ${edge.suspect ? "⚠️ " : ""}${edge.from} → ${edge.to}（上游 ${edge.sourceNode}: ${edge.sourceStatus}${edge.reason === void 0 ? "" : `；${edge.reason}`}）`;
+	});
+	const failedRequest = value.failed?.request;
+	const failedResponse = value.failed?.response;
+	const req = failedRequest === void 0 ? "" : `请求：${String(failedRequest["method"] ?? "")} ${String(failedRequest["url"] ?? "")}`;
+	const resp = failedResponse === void 0 ? "" : `响应：HTTP ${String(failedResponse["status"] ?? "?")} ${String(failedResponse["bodyPreview"] ?? "")}`;
+	return [
+		`🩺 复跑诊断：${value.runId} ${chain === "" ? "" : `（${chain}）`} ${value.status ?? ""}`,
+		failed,
+		value.error === void 0 ? "" : `错误：${value.error}`,
+		nodeLines.length === 0 ? "" : `节点：\n${nodeLines.join("\n")}`,
+		edgeLines.length === 0 ? "" : `入边：\n${edgeLines.join("\n")}`,
+		req === "" ? "" : req,
+		resp === "" ? "" : resp,
+		(value.hints ?? []).length === 0 ? "" : `建议：\n${(value.hints ?? []).map((hint) => `- ${hint}`).join("\n")}`
+	].filter(Boolean).join("\n");
+}
+function defineChainDiagnoseTool(deps) {
+	return defineTool({
+		name: "dataforge_chain_diagnose",
+		description: `复跑诊断（R-6）：只读一条失败的链运行，回答「断在哪个节点、哪条绑定边、上游什么状态、下一步改什么」。
+
+读 run.json 与 events.ndjson：
+- 失败节点 / 错误码 / 错误原文 / 请求与响应摘要；
+- 节点级状态（done/error/started）；
+- 失败节点的入边（from → to、上游节点状态、是否可疑）；
+- 按错误码给下一步建议（绑定断点、鉴权、换票、HTTP 失败…）。
+
+只读：不重跑、不改链、不碰凭证。要重跑请用 dataforge_chain_run；要重新试探请用 dataforge_chain_probe。`,
+		parameters: { run_id: {
+			type: "string",
+			required: true,
+			description: "链运行的 runId（dataforge_chain_run 回执里的 runId）"
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					code: { type: "string" },
+					message: { type: "string" },
+					runId: { type: "string" },
+					status: { type: "string" },
+					chain: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							site: { type: "string" },
+							flow: { type: "string" },
+							version: { type: "number" }
+						}
+					},
+					params: {
+						type: "object",
+						additionalProperties: true
+					},
+					failedNode: { type: "string" },
+					errorCode: { type: "string" },
+					error: { type: "string" },
+					nodes: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								nodeId: { type: "string" },
+								status: { type: "string" },
+								httpStatus: { type: "number" },
+								attempts: { type: "number" },
+								elapsedMs: { type: "number" },
+								errorCode: { type: "string" },
+								error: { type: "string" }
+							}
+						}
+					},
+					failed: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							action: { type: "string" },
+							request: {
+								type: "object",
+								additionalProperties: true
+							},
+							response: {
+								type: "object",
+								additionalProperties: true
+							}
+						}
+					},
+					edges: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								from: { type: "string" },
+								to: { type: "string" },
+								sourceNode: { type: "string" },
+								sourceStatus: { type: "string" },
+								suspect: { type: "boolean" },
+								reason: { type: "string" }
+							}
+						}
+					},
+					hints: {
+						type: "array",
+						items: { type: "string" }
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderChainDiagnose(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(diagnoseOutputOf(await diagnoseForTool(deps, exec, { runId: args.run_id })));
+		}
+	});
+}
 function renderChainRuns(value) {
 	if (value.notice !== void 0 && (value.runs ?? []).length === 0) return `📭 ${value.notice}`;
 	const lines = (value.runs ?? []).map((run) => {
@@ -11574,7 +11874,8 @@ const EXPLORE_POLICY = [
 	"- probe 的 values 必须带 source：user / agent-inferred / upstream；agent-inferred 与 upstream 必须写 evidence，禁止把猜测标成 user。",
 	"- 写操作（POST/PUT/PATCH/DELETE）必须经用户确认后带 confirm=true；没有确认只出计划卡。",
 	"- probe 返回的 outputs 用来发现绑定边；回写链只走 dataforge_chain_upsert（R-1 校验）。",
-	"- 结晶只经 dataforge_chain_crystallize：upstream 值绝不冻常量；agent-inferred 必须用户确认；复跑用 dataforge_chain_run.inputs。"
+	"- 结晶只经 dataforge_chain_crystallize：upstream 值绝不冻常量；agent-inferred 必须用户确认；复跑用 dataforge_chain_run.inputs。",
+	"- 复跑失败先用 dataforge_chain_diagnose(run_id) 读断点/绑定边，再决定 probe 还是修链；不要盲目重跑写链。"
 ].join("\n");
 /** 装载插件。 */
 function apply(ctx, rawConfig) {
@@ -11663,9 +11964,10 @@ function apply(ctx, rawConfig) {
 			defineChainRunTool(chainRunDeps),
 			defineChainRunsTool(chainRunDeps),
 			defineChainProbeTool(chainRunDeps),
-			defineChainCrystalTool(chainRunDeps)
+			defineChainCrystalTool(chainRunDeps),
+			defineChainDiagnoseTool(chainRunDeps)
 		]) tools.register(tool);
-		logger?.info?.(`已注册 18 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_run/chain_runs/chain_probe/chain_crystallize（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
+		logger?.info?.(`已注册 19 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_run/chain_runs/chain_probe/chain_crystallize/chain_diagnose（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
 		if (!config.chainRunEnabled) logger?.info?.("执行开关 chainRunEnabled=false：dataforge_chain_run 一律 execution-disabled");
 	});
 	if (config.injectPolicy) try {
