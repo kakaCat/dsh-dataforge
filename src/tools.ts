@@ -28,6 +28,7 @@ import {
 } from './orchestration/application.js'
 import { probeForTool, type ChainProbeToolArgs } from './orchestration/explore.js'
 import { crystalForTool, crystalOutputOf, type CrystalToolArgs, type CrystalToolOutput, type CrystalToolValue } from './orchestration/crystal.js'
+import { diagnoseForTool, diagnoseOutputOf, type DiagnoseToolOutput, type DiagnoseToolValue } from './orchestration/diagnose.js'
 import type { ProbeResult } from './execute/probe.js'
 
 /** 渲染边界单向收紧：进 render 的值已被 defineTool 按 schema 运行时校验，只是 TS 推断偏松。 */
@@ -1424,6 +1425,120 @@ export function defineChainCrystalTool(deps: ChainRunToolDeps) {
         ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
         ...(decisions === undefined ? {} : { decisions }),
       })))
+    },
+  })
+}
+
+function renderChainDiagnose(value: DiagnoseToolValue): string {
+  if (!value.ok) return `❌ 诊断不可用（${value.code ?? 'unknown'}）：${value.message ?? ''}`
+  const chain = value.chain === undefined ? '' : `${value.chain.site}/${value.chain.flow} v${value.chain.version}`
+  const failed = value.failedNode === undefined ? '' : `断点：${value.failedNode}${value.errorCode === undefined ? '' : `（${value.errorCode}）`}`
+  const nodeLines = (value.nodes ?? []).map((node) => {
+    const http = node.httpStatus === undefined ? '' : ` HTTP ${node.httpStatus}`
+    const error = node.errorCode === undefined ? '' : ` ${node.errorCode}`
+    return `- ${node.nodeId}：${node.status}${http}${error}`
+  })
+  const edgeLines = (value.edges ?? []).map((edge) => {
+    const mark = edge.suspect ? '⚠️ ' : ''
+    return `- ${mark}${edge.from} → ${edge.to}（上游 ${edge.sourceNode}: ${edge.sourceStatus}${edge.reason === undefined ? '' : `；${edge.reason}`}）`
+  })
+  const failedRequest = value.failed?.request
+  const failedResponse = value.failed?.response
+  const req = failedRequest === undefined ? '' : `请求：${String(failedRequest['method'] ?? '')} ${String(failedRequest['url'] ?? '')}`
+  const resp = failedResponse === undefined ? '' : `响应：HTTP ${String(failedResponse['status'] ?? '?')} ${String(failedResponse['bodyPreview'] ?? '')}`
+  return [
+    `🩺 复跑诊断：${value.runId} ${chain === '' ? '' : `（${chain}）`} ${value.status ?? ''}`,
+    failed,
+    value.error === undefined ? '' : `错误：${value.error}`,
+    nodeLines.length === 0 ? '' : `节点：\n${nodeLines.join('\n')}`,
+    edgeLines.length === 0 ? '' : `入边：\n${edgeLines.join('\n')}`,
+    req === '' ? '' : req,
+    resp === '' ? '' : resp,
+    (value.hints ?? []).length === 0 ? '' : `建议：\n${(value.hints ?? []).map((hint) => `- ${hint}`).join('\n')}`,
+  ].filter(Boolean).join('\n')
+}
+
+export function defineChainDiagnoseTool(deps: ChainRunToolDeps) {
+  return defineTool({
+    name: 'dataforge_chain_diagnose',
+    description: `复跑诊断（R-6）：只读一条失败的链运行，回答「断在哪个节点、哪条绑定边、上游什么状态、下一步改什么」。
+
+读 run.json 与 events.ndjson：
+- 失败节点 / 错误码 / 错误原文 / 请求与响应摘要；
+- 节点级状态（done/error/started）；
+- 失败节点的入边（from → to、上游节点状态、是否可疑）；
+- 按错误码给下一步建议（绑定断点、鉴权、换票、HTTP 失败…）。
+
+只读：不重跑、不改链、不碰凭证。要重跑请用 dataforge_chain_run；要重新试探请用 dataforge_chain_probe。`,
+    parameters: {
+      run_id: { type: 'string', required: true, description: '链运行的 runId（dataforge_chain_run 回执里的 runId）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+          runId: { type: 'string' },
+          status: { type: 'string' },
+          chain: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { site: { type: 'string' }, flow: { type: 'string' }, version: { type: 'number' } },
+          },
+          params: { type: 'object', additionalProperties: true },
+          failedNode: { type: 'string' },
+          errorCode: { type: 'string' },
+          error: { type: 'string' },
+          nodes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                nodeId: { type: 'string' },
+                status: { type: 'string' },
+                httpStatus: { type: 'number' },
+                attempts: { type: 'number' },
+                elapsedMs: { type: 'number' },
+                errorCode: { type: 'string' },
+                error: { type: 'string' },
+              },
+            },
+          },
+          failed: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              action: { type: 'string' },
+              request: { type: 'object', additionalProperties: true },
+              response: { type: 'object', additionalProperties: true },
+            },
+          },
+          edges: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                from: { type: 'string' },
+                to: { type: 'string' },
+                sourceNode: { type: 'string' },
+                sourceStatus: { type: 'string' },
+                suspect: { type: 'boolean' },
+                reason: { type: 'string' },
+              },
+            },
+          },
+          hints: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderChainDiagnose(tighten<DiagnoseToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<DiagnoseToolOutput> {
+      return lossless(diagnoseOutputOf(await diagnoseForTool(deps, exec, { runId: args.run_id })))
     },
   })
 }
