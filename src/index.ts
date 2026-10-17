@@ -26,7 +26,7 @@ import { DataforgeError } from './shared/errors.js'
 import {
   defineBrowserActTool, defineBrowserCloseTool, defineBrowserOpenTool, defineBrowserSnapshotTool,
   defineCaptureCancelTool, defineCaptureResultTool, defineCaptureStatusTool, defineCaptureTool,
-  defineChainCrystalTool, defineChainDiagnoseTool, defineChainGetTool, defineChainProbeTool, defineChainRunsTool, defineChainRunTool, defineChainUpsertTool,
+  defineChainCrystalTool, defineChainDiagnoseTool, defineChainCompareTool, defineChainGetTool, defineChainBindTool, defineChainProbeTool, defineChainRunsTool, defineChainRunTool, defineChainUpsertTool,
   defineFlowsTool, defineLibraryImportTool, defineRunTool, defineStatusTool,
 } from './tools.js'
 import type { ChainRunToolDeps, OrchestrationDeps } from './orchestration/application.js'
@@ -96,7 +96,8 @@ const EXPLORE_POLICY = [
   '- 首跑用 dataforge_chain_probe 单节点试探；不要把整条不完整的链反复整链重跑。',
   '- probe 的 values 必须带 source：user / agent-inferred / upstream；agent-inferred 与 upstream 必须写 evidence，禁止把猜测标成 user。',
   '- 写操作（POST/PUT/PATCH/DELETE）必须经用户确认后带 confirm=true；没有确认只出计划卡。',
-  '- probe 返回的 outputs 用来发现绑定边；回写链只走 dataforge_chain_upsert（R-1 校验）。',
+  '- probe 返回的 outputs 用来发现绑定边；回写只走 dataforge_chain_bind（只给边，自增版本；仍过 R-1 校验），不要手抄整份 YAML。',
+  '- 复跑前后要对照时用 dataforge_chain_compare(runIds) 看入参/节点出参/状态差异，先对照再解释。',
   '- 结晶只经 dataforge_chain_crystallize：upstream 值绝不冻常量；agent-inferred 必须用户确认；复跑用 dataforge_chain_run.inputs。',
   '- 复跑失败先用 dataforge_chain_diagnose(run_id) 读断点/绑定边，再决定 probe 还是修链；不要盲目重跑写链。',
 ].join('\n')
@@ -163,11 +164,13 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       foregroundTimeoutSeconds: config.timeoutSeconds,
     },
     resolveJobs: () => jobsService,
-    // R-4 M1/M3：执行期按卡的来源 captureId 只读采集库注入 cookie；
+    // R-4 M1/M3：执行期按卡的来源 captureId 只读采集库注入 cookie / token；
     // 采集库缺席/坏库由 provider 自己降级，不阻断无鉴权链。
+    // cache:true = 运行级缓存（按 db/jar 文件签名失效；节点多时少开几百次 SQLite）。
     credentials: createCaptureCredentialProvider({
       dbPath: orchestrationDeps.captureDbPath,
       ...(credentialStorePath === undefined ? {} : { storePath: credentialStorePath }),
+      cache: true,
     }),
     ...(credentialStorePath === undefined ? {} : { credentialStorePath }),
   }
@@ -225,16 +228,18 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       defineLibraryImportTool(orchestrationDeps),
       defineChainUpsertTool(orchestrationDeps),
       defineChainGetTool(orchestrationDeps),
+      defineChainBindTool(orchestrationDeps),
       defineChainRunTool(chainRunDeps),
       defineChainRunsTool(chainRunDeps),
       defineChainProbeTool(chainRunDeps),
       defineChainCrystalTool(chainRunDeps),
       defineChainDiagnoseTool(chainRunDeps),
+      defineChainCompareTool(chainRunDeps),
     ]) {
       tools.register(tool)
     }
-    logger?.info?.(`已注册 19 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
-      + ` + library_import/chain_upsert/chain_get/chain_run/chain_runs/chain_probe/chain_crystallize/chain_diagnose（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
+    logger?.info?.(`已注册 21 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
+      + ` + library_import/chain_upsert/chain_get/chain_bind/chain_run/chain_runs/chain_probe/chain_crystallize/chain_diagnose/chain_compare（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
     if (!config.chainRunEnabled) logger?.info?.('执行开关 chainRunEnabled=false：dataforge_chain_run 一律 execution-disabled')
   })
 

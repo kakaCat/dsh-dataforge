@@ -26,8 +26,11 @@ import {
   type ChainGetToolValue, type ChainRunPlanValue, type ChainRunsToolValue, type ChainRunToolDeps,
   type ChainRunToolValue, type ChainUpsertToolValue, type ImportLibraryToolValue, type OrchestrationDeps,
 } from './orchestration/application.js'
+import { harvestTokenCredentials } from './capture/token-harvest.js'
+import { bindChainForTool, type BindEdgeSpec, type ChainBindToolValue } from './orchestration/bind.js'
 import { probeForTool, type ChainProbeToolArgs } from './orchestration/explore.js'
 import { crystalForTool, crystalOutputOf, type CrystalToolArgs, type CrystalToolOutput, type CrystalToolValue } from './orchestration/crystal.js'
+import { compareForTool, type ChainCompareToolValue } from './orchestration/compare.js'
 import { diagnoseForTool, diagnoseOutputOf, type DiagnoseToolOutput, type DiagnoseToolValue } from './orchestration/diagnose.js'
 import type { ProbeResult } from './execute/probe.js'
 
@@ -500,7 +503,13 @@ export function defineCaptureCancelTool(deps: CaptureDeps) {
 
 type BrowserActValue = { ok: boolean; pageUrl?: string; error?: string }
 type BrowserSnapshotValue = { ok: boolean; elements?: string[]; error?: string }
-type BrowserCloseValue = { ok: boolean; cookies: Array<{ name: string; domain: string }>; captureId?: string }
+type BrowserCloseValue = {
+  ok: boolean
+  cookies: Array<{ name: string; domain: string }>
+  captureId?: string
+  /** R-4 M3：收口时从样本收割到的 token 条数（0/缺省 = 没有可补采的 token）。 */
+  tokensHarvested?: number
+}
 
 function toActSpec(raw: unknown): ActSpec | undefined {
   const r = raw as Record<string, unknown>
@@ -646,20 +655,25 @@ export function defineBrowserCloseTool(deps: CaptureDeps) {
           ok: { type: 'boolean' },
           cookies: { type: 'array', items: { type: 'object', additionalProperties: true } },
           captureId: { type: 'string' },
+          tokensHarvested: { type: 'number' },
         },
       },
       render: (_args, value) => {
         const v = tighten<BrowserCloseValue>(value)
+        const tokens = v.tokensHarvested === undefined || v.tokensHarvested === 0
+          ? ''
+          : `，补采 token ${v.tokensHarvested} 条`
         return [{
           type: 'text',
           text: v.ok
-            ? `🔒 会话已关（cookie ${v.cookies.length} 个${v.captureId === undefined ? '' : `，已挂到 ${v.captureId}`}）`
+            ? `🔒 会话已关（cookie ${v.cookies.length} 个${v.captureId === undefined ? '' : `，已挂到 ${v.captureId}`}${tokens}）`
             : '❌ 会话不存在或已关闭',
         }]
       },
     },
     async execute(args) {
       const closed = await deps.registry.close(args.session_id)
+      let tokensHarvested = 0
       if (closed.captureId !== undefined) {
         for (const c of closed.cookies) {
           deps.store.upsertCredential(
@@ -671,6 +685,12 @@ export function defineBrowserCloseTool(deps: CaptureDeps) {
             c,
           )
         }
+        // R-4 M3：token 型凭证补采——只扫本 captureId 的样本，失败不打断收口。
+        try {
+          tokensHarvested = harvestTokenCredentials(deps.store, closed.captureId)
+        } catch {
+          tokensHarvested = 0
+        }
         const run = deps.store.getRun(closed.captureId)
         if (run?.status === 'running') deps.store.finishRun(closed.captureId, 'done')
       }
@@ -678,6 +698,7 @@ export function defineBrowserCloseTool(deps: CaptureDeps) {
         ok: closed.ok,
         cookies: closed.cookies.map((c) => ({ name: String(c['name'] ?? ''), domain: String(c['domain'] ?? '') })),
         ...(closed.captureId === undefined ? {} : { captureId: closed.captureId }),
+        ...(tokensHarvested === 0 ? {} : { tokensHarvested }),
       }
       return lossless(summarized)
     },
@@ -885,6 +906,159 @@ export function defineChainGetTool(deps: OrchestrationDeps) {
 }
 
 // ────────────────────────────────────────────────
+// 绑定回写：dataforge_chain_bind（R-5 M2）
+// ────────────────────────────────────────────────
+
+/**
+ * 工具入参 → bind 核心的严格边形状。
+ *
+ * 嵌套对象在参数 DSL 里的 required 推断偏松（TS 侧 match 可能被当成可选），所以这里显式收敛：
+ * 缺失的 match 字段补空串，交给 bind 的 pickShapeProblemOf 给出「pick.match.field 必须是非空字符串」
+ * 这类可读拒绝，而不是在工具壳里静默丢掉 pick。
+ */
+function bindEdgeSpecsOf(raw: Array<{
+  from: string
+  to: string
+  transform?: 'string' | 'json' | 'array-json'
+  pick?: { match?: { field?: string; equals?: string }; field?: string }
+}>): BindEdgeSpec[] {
+  return raw.map((edge) => ({
+    from: edge.from,
+    to: edge.to,
+    ...(edge.transform === undefined ? {} : { transform: edge.transform }),
+    ...(edge.pick === undefined
+      ? {}
+      : {
+          pick: {
+            match: { field: edge.pick.match?.field ?? '', equals: edge.pick.match?.equals ?? '' },
+            ...(edge.pick.field === undefined ? {} : { field: edge.pick.field }),
+          },
+        }),
+  }))
+}
+
+function renderChainBind(value: ChainBindToolValue): string {
+  if (!value.ok) {
+    const versions = ''
+    return `❌ 绑定未写入（${value.code ?? 'invalid-chain'}）：${value.message ?? ''}${renderChainIssues(value.issues)}`
+      + versions
+      + ((value.hints ?? []).length === 0 ? '' : `\n建议：\n${(value.hints ?? []).map((hint) => `- ${hint}`).join('\n')}`)
+  }
+  const edges = value.edges ?? []
+  const shown = edges.slice(0, RECEIPT_MAX_LINES).map((edge) => `- ${edge.from} → ${edge.to}`)
+  const rest = edges.length > RECEIPT_MAX_LINES ? `\n… 还有 ${edges.length - RECEIPT_MAX_LINES} 条（edges 里有全量）` : ''
+  const hints = (value.hints ?? []).length === 0 ? '' : `\n提醒：\n${(value.hints ?? []).map((hint) => `- ${hint}`).join('\n')}`
+  return [
+    `🔗 绑定已写入 ${value.site ?? ''}/${value.flow ?? ''} v${value.version ?? 0}`
+      + `（新增 ${value.added ?? 0} / 替换 ${value.replaced ?? 0} / 未变 ${value.unchanged ?? 0}）`,
+    `文件：${value.path ?? ''}`,
+    edges.length === 0 ? '- 新版本没有任何绑定边' : `边：\n${shown.join('\n')}${rest}`,
+  ].join('\n') + hints
+}
+
+export function defineChainBindTool(deps: OrchestrationDeps) {
+  return defineTool({
+    name: 'dataforge_chain_bind',
+    description: `把 probe 发现的绑定边**回写进链**（R-5 M2）：不需要手抄整份 YAML，只给边 → 自增版本。
+
+入参 edges：每条 { from, to, transform?, pick? }
+- from 是「节点.出参路径」（如上一步 probe 的 outputs 里那条 body.items[0].internalId），也允许 $inputs.槽位名；
+- to 是「节点.入参路径」（下游卡的入参，如 body.lines[0].materialId）；
+- transform（string/json/array-json）与 pick（按数组元素字段选值）原样写进边，语义同 dataforge_chain_run。
+
+合并语义（同一次只增改给定的边，其余边原样保留）：
+- to 相同 = 重写这条绑定（替换，不会叠加两条指向同一入参的边）；
+- from/to/transform/pick 全同 = 未变化（只计数）；
+- to 不同 = 新增；同一次调用里 to 重复，以后者为准。
+
+写链纪律不打折：仍只经 R-1 的 saveChain —— 卡引用/两端字段存在性/成环/绑定与常量互斥/僵尸槽位全部校验，失败零落盘并逐条给 issues（指向 edges[i]）。版本只增不删，旧版本永远可回读；内容无变化也会落 max+1 新版本（回执 added=0/replaced=0/unchanged>0 说明原因）。
+
+失败时：chain-not-found（先 upsert）/ invalid-chain（含 page-chain 不支持、边形状坏、R-1 语义不符）/ card-not-imported（先 dataforge_library_import）。
+
+首跑闭环：dataforge_chain_probe 试探 → 读 outputs 发现绑定 → **dataforge_chain_bind 回写边** → dataforge_chain_run 整链。`,
+    parameters: {
+      site: { type: 'string', required: true, description: '站点名（链的 meta.site）' },
+      flow: { type: 'string', required: true, description: '流程名（链的 meta.flow）' },
+      version: { type: 'number', description: '以哪个版本为基（缺省最新）；落盘永远是 max+1 新版本' },
+      edges: {
+        type: 'array',
+        required: true,
+        description: '要回写的绑定边；to 相同视为重写同一条绑定',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            from: { type: 'string', required: true, description: '「节点.出参路径」或 $inputs.槽位名' },
+            to: { type: 'string', required: true, description: '「节点.入参路径」' },
+            transform: { type: 'string', enum: ['string', 'json', 'array-json'], description: '缺省原样传值（不隐式转换）' },
+            pick: {
+              type: 'object',
+              additionalProperties: false,
+              description: '{ match: { field, equals }, field? }：从数组出参按字段选元素再取字段（equals 按字符串比较）',
+              properties: {
+                match: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    field: { type: 'string', required: true },
+                    equals: { type: 'string', required: true, description: '匹配值（按字符串比较，数字写 "123" 即可）' },
+                  },
+                },
+                field: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string', description: 'chain-not-found / invalid-chain / card-not-imported' },
+          message: { type: 'string' },
+          hints: { type: 'array', items: { type: 'string' } },
+          site: { type: 'string' },
+          flow: { type: 'string' },
+          version: { type: 'number' },
+          path: { type: 'string' },
+          added: { type: 'number' },
+          replaced: { type: 'number' },
+          unchanged: { type: 'number' },
+          edges: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { from: { type: 'string' }, to: { type: 'string' } },
+            },
+          },
+          issues: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { target: { type: 'string' }, code: { type: 'string' }, reason: { type: 'string' } },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderChainBind(tighten<ChainBindToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<ChainBindToolValue> {
+      return lossless(await bindChainForTool(deps, exec, {
+        site: args.site,
+        flow: args.flow,
+        ...(args.version === undefined ? {} : { version: args.version }),
+        edges: bindEdgeSpecsOf(args.edges),
+      }))
+    },
+  })
+}
+
+// ────────────────────────────────────────────────
 // 执行两件套：dataforge_chain_run / dataforge_chain_runs
 // ────────────────────────────────────────────────
 
@@ -973,7 +1147,7 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
 
 运行期失败（binding-* / node-* / response-too-large / cancelled）不自动重试：链已中止，错误进运行记录，修好后用新 run 重跑（绝不自动重放写请求）。
 
-鉴权：卡声明 cookie-session 时，引擎会按卡的采集来源自动注入 cookie；token 型一期未采集，不猜 Authorization。401 回执区分「未注入可用凭证」与「已注入但仍 401」。
+鉴权（R-4 M1/M3）：按卡的采集来源自动注入本地凭证——cookie-session 注 cookie；token-header 注 Authorization（采集到的原文，Bearer/Basic 原样）；token-param 注 URL query。body token / localStorage token 本期只记录不注入（回执如实 unsupported，不猜）。401 回执区分「未采集到可用凭证」与「已注入但仍 401」。
 
 自动换票：传 relogin（一条普通 interface-chain）后，401 会执行登录链、收割 set-cookie、单飞换票并重放当前节点一次；重放仍 401 就中止并报「换票后仍 401」。登录链的 inputs 只进内存，不写运行记录。
 
@@ -1562,6 +1736,177 @@ export function defineChainDiagnoseTool(deps: ChainRunToolDeps) {
     },
     async execute(args, exec: ToolRunContext): Promise<DiagnoseToolOutput> {
       return lossless(diagnoseOutputOf(await diagnoseForTool(deps, exec, { runId: args.run_id })))
+    },
+  })
+}
+
+/** 对照值的人话预览：对象/数组截 120 字，避免回执被整段正文撑爆。 */
+function previewOfJson(value: unknown): string {
+  if (value === undefined) return '（缺）'
+  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text
+}
+
+function renderChainCompare(value: ChainCompareToolValue): string {
+  if (!value.ok) return `❌ 对照失败（${value.code ?? 'unknown'}）：${value.message ?? ''}`
+  const runs = value.runs ?? []
+  const base = runs[0]
+  const target = runs[1]
+  if (base === undefined || target === undefined) return '❌ 对照失败：回执缺少一侧 run'
+  const versionOf = (run: typeof base): string => (run.chain === undefined ? '' : ` v${run.chain.version}`)
+  const header = `🆚 复跑对照：${base.runId}${versionOf(base)} → ${target.runId}${versionOf(target)}`
+  const stateOf = (run: typeof base): string =>
+    `${run.status}${run.failedNode === undefined ? '' : `（断在 ${run.failedNode}）`}`
+
+  const inputs = (value.inputs ?? []).filter((row) => row.changed)
+  const inputLines = inputs.slice(0, RECEIPT_MAX_LINES).map(
+    (row) => `- ${row.key}：${previewOfJson(row.base)} → ${previewOfJson(row.target)}`,
+  )
+  const nodes = (value.nodes ?? []).filter((row) => row.changed)
+  const nodeLines = nodes.slice(0, RECEIPT_MAX_LINES).map((row) => {
+    const http = (from?: number, to?: number): string =>
+      from === to ? (from === undefined ? '' : ` HTTP ${from}`) : ` HTTP ${from ?? '?'} → ${to ?? '?'}`
+    const elapsed = (from?: number, to?: number): string =>
+      from === to ? (from === undefined ? '' : ` ${from}ms`) : ` ${from ?? '?'}ms → ${to ?? '?'}ms`
+    return `- ${row.nodeId}：${row.baseStatus ?? '缺'} → ${row.targetStatus ?? '缺'}${http(row.baseHttpStatus, row.targetHttpStatus)}${elapsed(row.baseElapsedMs, row.targetElapsedMs)}`
+  })
+  const emitted = (value.emitted ?? []).filter((row) => row.changed)
+  const emittedLines = emitted.slice(0, RECEIPT_MAX_LINES).map(
+    (row) => `- ${row.nodeId} · ${row.path}：${previewOfJson(row.base)} → ${previewOfJson(row.target)}`,
+  )
+  const summary = value.summary
+  const summaryLine = summary === undefined
+    ? ''
+    : `差异：入参 ${summary.inputsChanged} / 出参 ${summary.emittedChanged} / 节点 ${summary.nodesChanged}`
+  return [
+    header,
+    `状态：${stateOf(base)} → ${stateOf(target)}`,
+    inputLines.length === 0 ? '入参：无差异' : `入参变化：\n${inputLines.join('\n')}`,
+    emittedLines.length === 0 ? '出参：无差异' : `出参变化（链生成值重新求解）：\n${emittedLines.join('\n')}`,
+    nodeLines.length === 0 ? '节点：无差异' : `节点变化：\n${nodeLines.join('\n')}`,
+    summaryLine,
+    (value.hints ?? []).length === 0 ? '' : `提示：\n${(value.hints ?? []).map((hint) => `- ${hint}`).join('\n')}`,
+  ].filter(Boolean).join('\n')
+}
+
+export function defineChainCompareTool(deps: ChainRunToolDeps) {
+  return defineTool({
+    name: 'dataforge_chain_compare',
+    description: `复跑对照（R-6 M2）：把两次 chain-run 的留痕并排投影成差异视图，回答「换入参复跑后什么变了、链生成值是不是重新求解」。
+
+输入 run_ids = [基线 runId, 对照 runId]（runId 来自 dataforge_chain_run / dataforge_status / dataforge_chain_runs）。
+输出：
+- runs：两侧的身份快照（链版本、params、状态、failedNode）；
+- inputs：链级入参逐槽位差异（changed）；
+- emitted：各节点出参（绑定边 from 取到的实际值）差异——复跑换了 C/D 时这里应看到新求解值，证明没吃首跑缓存；
+- nodes：节点状态/HTTP/耗时对照；
+- summary + hints：版本不同、入参变化、失败节点变化等提示。
+
+只读：不重跑、不发请求、不改链；敏感键（password/token/authorization/cookie 等）在输出里一律 ***，不含任何 header 原文。
+
+失败时：invalid-run-ids（须恰好两个非空 runId）/ run-not-found（run.json 或事件留痕缺失）/ not-chain-run（不是链运行）。`,
+    parameters: {
+      run_ids: {
+        type: 'array',
+        required: true,
+        items: { type: 'string' },
+        description: '[基线 runId, 对照 runId]：先首跑、后复跑',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string', description: 'invalid-run-ids / run-not-found / not-chain-run' },
+          message: { type: 'string' },
+          runs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                runId: { type: 'string' },
+                chain: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    site: { type: 'string' },
+                    flow: { type: 'string' },
+                    version: { type: 'number' },
+                  },
+                },
+                params: { type: 'object', additionalProperties: true },
+                status: { type: 'string' },
+                failedNode: { type: 'string' },
+                startedAt: { type: 'number' },
+              },
+            },
+          },
+          inputs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                key: { type: 'string' },
+                base: { type: 'json' },
+                target: { type: 'json' },
+                changed: { type: 'boolean' },
+              },
+            },
+          },
+          nodes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                nodeId: { type: 'string' },
+                baseStatus: { type: 'string' },
+                targetStatus: { type: 'string' },
+                baseHttpStatus: { type: 'number' },
+                targetHttpStatus: { type: 'number' },
+                baseElapsedMs: { type: 'number' },
+                targetElapsedMs: { type: 'number' },
+                changed: { type: 'boolean' },
+              },
+            },
+          },
+          emitted: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                nodeId: { type: 'string' },
+                path: { type: 'string' },
+                base: { type: 'json' },
+                target: { type: 'json' },
+                changed: { type: 'boolean' },
+              },
+            },
+          },
+          summary: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              nodesChanged: { type: 'number' },
+              emittedChanged: { type: 'number' },
+              inputsChanged: { type: 'number' },
+              baseFailedNode: { type: 'string' },
+              targetFailedNode: { type: 'string' },
+            },
+          },
+          hints: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderChainCompare(tighten<ChainCompareToolValue>(value)) }],
+    },
+    async execute(args): Promise<ChainCompareToolValue> {
+      // 长度/空串交给 compareForTool 的 invalid-run-ids 统一判，工具壳不重复。
+      return lossless(await compareForTool(deps, { runIds: [args.run_ids[0], args.run_ids[1]] }))
     },
   })
 }
