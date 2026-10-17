@@ -245,3 +245,48 @@ describe('POST /orchestration/graph（画布保存）', () => {
     expect(json(response).code).toBe('method-not-allowed')
   })
 })
+
+describe('同一前缀内的分派（不赌宿主 prefix 匹配语义）', () => {
+  it('编排路径交给编排 handler，其余仍归采集 handler', async () => {
+    const { registerCapturePanelRoutes, isOrchestrationRequest } = await import('../../src/capture/panel-routes.js')
+    const { CaptureStore } = await import('../../src/capture/store.js')
+
+    const captureDir = mkdtempSync(join(tmpdir(), 'df-dispatch-'))
+    const store = new CaptureStore(join(captureDir, 'c.sqlite'), join(captureDir, 'samples'), join(captureDir, 'e.ndjson'))
+    let registered: ((req: unknown, res: unknown) => void) | undefined
+    const webServer = {
+      register: (route: { handler: (req: unknown, res: unknown) => void }) => {
+        registered = route.handler
+        return () => { /* dispose */ }
+      },
+    }
+    registerCapturePanelRoutes(webServer as never, {
+      store,
+      orchestration: createOrchestrationPanelHandler({ resolveWorkspaceRoot: async () => workspace() }),
+    })
+    store.close()
+    rmSync(captureDir, { recursive: true, force: true })
+    expect(registered).toBeDefined()
+
+    // 路径判定：完整路径与剩余路径两种形态都认
+    expect(isOrchestrationRequest('/dashboard/api/dataforge/orchestration/overview')).toBe(true)
+    expect(isOrchestrationRequest('/orchestration/graph?site=a')).toBe(true)
+    expect(isOrchestrationRequest('/dashboard/api/dataforge/runs')).toBe(false)
+
+    const response: FakeResponse = { status: 0, body: '' }
+    const res = {
+      writeHead: (status: number) => { response.status = status },
+      end: (payload: string) => { response.body = payload },
+    }
+    registered?.(
+      { method: 'GET', url: '/dashboard/api/dataforge/orchestration/overview', on: () => undefined } as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+    )
+    for (let i = 0; i < 50 && response.status === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    // 编排 handler 认这个路径（空工作区 → 空列表），而不是采集 handler 的 unknown-path
+    expect(response.status).toBe(200)
+    expect(json(response).success).toBe(true)
+  })
+})

@@ -315,7 +315,16 @@ export function OrchestrationCanvas({ graph, onSave }: OrchestrationCanvasProps)
         <span className="dsh-df-canvas-name">{graph.flow}</span>
         <span className="dsh-df-canvas-meta">{legend}</span>
         <div className="dsh-df-canvas-ops">
-          <button type="button" className="dsh-df-btn" disabled={busy} onClick={save}>
+          <button
+            type="button"
+            className="dsh-df-btn"
+            disabled={graph.chainYaml.length === 0}
+            title={graph.chainYaml.length === 0 ? '草稿尚未落盘，没有可导出的 YAML' : '导出当前版本原文'}
+            onClick={() => { downloadText(`${graph.site}-${graph.flow}-v${graph.version}.yaml`, graph.chainYaml) }}
+          >
+            导出 YAML
+          </button>
+          <button type="button" className="dsh-df-btn-primary" disabled={busy} onClick={save}>
             {busy ? '保存中…' : '保存为新版本'}
           </button>
         </div>
@@ -369,6 +378,23 @@ export function OrchestrationCanvas({ graph, onSave }: OrchestrationCanvasProps)
       </p>
     </div>
   )
+}
+
+/**
+ * 下载文本文件（导出版本原文用）。
+ *
+ * 链文件天然零凭证（只存 cardId、字段路径、常量），所以导出即原文，不需要脱敏。
+ */
+function downloadText(filename: string, text: string): void {
+  const blob = new Blob([text], { type: 'text/yaml;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename.replace(/[\\/:*?"<>|]/g, '-')
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
 }
 
 /* ──────────────────────────── 编辑面板 ──────────────────────────── */

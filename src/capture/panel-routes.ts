@@ -49,10 +49,16 @@ export interface CapturePanelDeps {
   orchestration?: (req: IncomingMessage, res: ServerResponse) => void
 }
 
-/** 是不是该交给编排子路由（看路径里有没有 /dataforge/orchestration）。 */
+/**
+ * 是不是该交给编排子路由。
+ *
+ * 两种 URL 形态都要认（宿主可能传完整路径，也可能传剥好前缀的剩余路径）：
+ * 完整 `/dashboard/api/dataforge/orchestration/...` 与剩余 `/orchestration/...`。
+ * 采集路由是 /runs /cards /captures，与 /orchestration 无交集。
+ */
 export function isOrchestrationRequest(url: string | undefined): boolean {
   const path = new URL(url ?? '/', 'http://panel.localhost').pathname
-  return path.includes('/dataforge/orchestration')
+  return path.includes('/dataforge/orchestration') || path.startsWith('/orchestration')
 }
 
 /**

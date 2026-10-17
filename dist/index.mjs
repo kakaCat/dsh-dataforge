@@ -5809,9 +5809,16 @@ const RUN_DETAIL_CARDS_LIMIT = 200;
 const RUN_DETAIL_RELATIONS_LIMIT = 500;
 /** 写入口请求体上限：面板只需要 {taskType, entryUrl}，超过这个尺寸一律 413。 */
 const MAX_CAPTURE_BODY_BYTES = 8192;
-/** 是不是该交给编排子路由（看路径里有没有 /dataforge/orchestration）。 */
+/**
+* 是不是该交给编排子路由。
+*
+* 两种 URL 形态都要认（宿主可能传完整路径，也可能传剥好前缀的剩余路径）：
+* 完整 `/dashboard/api/dataforge/orchestration/...` 与剩余 `/orchestration/...`。
+* 采集路由是 /runs /cards /captures，与 /orchestration 无交集。
+*/
 function isOrchestrationRequest(url) {
-	return new URL(url ?? "/", "http://panel.localhost").pathname.includes("/dataforge/orchestration");
+	const path = new URL(url ?? "/", "http://panel.localhost").pathname;
+	return path.includes("/dataforge/orchestration") || path.startsWith("/orchestration");
 }
 /**
 * 构造面板数据 handler。
