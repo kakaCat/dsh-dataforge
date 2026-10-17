@@ -4445,17 +4445,43 @@ function summarize(workspaceRoot, site, flow, version) {
 		const doc = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, version), "utf8"));
 		if (!doc.ok) return { unreadable: doc.issues.map((issue) => `${issue.target}：${issue.reason}`).join("；") };
 		const { meta, nodes, edges } = doc.doc;
+		const hosts = hostsOfDoc(workspaceRoot, doc.doc);
 		return {
 			kind: doc.doc.kind,
 			...meta.domain === void 0 ? {} : { domain: meta.domain },
 			...meta.note === void 0 ? {} : { note: meta.note },
 			...meta.created === void 0 ? {} : { updatedAt: meta.created },
 			nodeCount: nodes.length,
-			edgeCount: edges.length
+			edgeCount: edges.length,
+			...hosts.length === 0 ? {} : { hosts }
 		};
 	} catch (error) {
 		return { unreadable: `读取失败：${error instanceof Error ? error.message : String(error)}` };
 	}
+}
+/**
+* 链节点引用的卡/页面的 host（去重、保序）。
+*
+* 用途只限面板「网站卡」展示（原型的新增字段）：host 不在链 schema 里，
+* 它是卡的采集来源；卡/页面缺失时静默跳过，不因展示信息失败影响列表。
+*/
+function hostsOfDoc(workspaceRoot, doc) {
+	const hosts = /* @__PURE__ */ new Set();
+	const addUrl = (url) => {
+		if (typeof url !== "string" || url === "") return;
+		try {
+			const parsed = new URL(url, "http://placeholder.invalid");
+			if (parsed.host !== "" && parsed.host !== "placeholder.invalid") hosts.add(parsed.host);
+		} catch {}
+	};
+	for (const node of doc.nodes ?? []) {
+		if (typeof node.card === "string" && node.card !== "") {
+			const card = readCard(workspaceRoot, node.card);
+			for (const source of card?.sources ?? []) for (const page of source.pages ?? []) addUrl(page);
+		}
+		addUrl(node.page);
+	}
+	return [...hosts];
 }
 function safeDirs(dir) {
 	try {
@@ -13507,11 +13533,13 @@ async function buildOverview(deps, url) {
 			...chain.updatedAt === void 0 ? {} : { updatedAt: chain.updatedAt },
 			...chain.nodeCount === void 0 ? {} : { nodeCount: chain.nodeCount },
 			...chain.edgeCount === void 0 ? {} : { edgeCount: chain.edgeCount },
+			...chain.hosts === void 0 ? {} : { hosts: chain.hosts },
 			...chain.unreadable === void 0 ? {} : { unreadable: chain.unreadable },
 			versions: infos.map((info) => ({
 				version: info.version,
 				...info.created === void 0 ? {} : { created: info.created },
 				...info.source === void 0 ? {} : { source: info.source },
+				...info.note === void 0 ? {} : { note: info.note },
 				...info.nodeCount === void 0 ? {} : { nodeCount: info.nodeCount },
 				...info.edgeCount === void 0 ? {} : { edgeCount: info.edgeCount },
 				superseded: latest !== void 0 && info.version < latest,
@@ -13539,12 +13567,14 @@ function foldSites(flows) {
 			pageFlows: 0,
 			apiFlows: 0,
 			flows: 0,
-			domains: []
+			domains: [],
+			hosts: []
 		};
 		row.flows += 1;
 		if (flow.kind === "page-chain") row.pageFlows += 1;
 		if (flow.kind === "interface-chain") row.apiFlows += 1;
 		if (flow.domain !== void 0 && !row.domains.includes(flow.domain)) row.domains.push(flow.domain);
+		for (const host of flow.hosts ?? []) if (!row.hosts.includes(host)) row.hosts.push(host);
 		if (flow.updatedAt !== void 0 && (row.updatedAt === void 0 || flow.updatedAt > row.updatedAt)) row.updatedAt = flow.updatedAt;
 		bySite.set(flow.site, row);
 	}
@@ -13929,6 +13959,25 @@ function apply(ctx, rawConfig) {
 	anyCtx.inject?.(["jobs"], (svc) => {
 		jobsService = svc["jobs"];
 	});
+	/**
+	* 面板工作区的服务端兜底（R-2 编排页「白板」修复）。
+	*
+	* 面板请求没有 session 上下文；客户端会尽量带 `?workspace=`，但工作区快照到达前
+	* （或宿主未注入 useWorkspaces 时）会缺参。此时不能回落到 DSH 进程 cwd（那是
+	* profile 目录，永远没有链），而是取工作区注册表里最近更新的那个。
+	*/
+	let workspaceRegistryService;
+	anyCtx.inject?.(["workspaceRegistry"], (svc) => {
+		workspaceRegistryService = svc["workspaceRegistry"];
+	});
+	const latestWorkspacePath = () => {
+		const rows = workspaceRegistryService?.list?.();
+		if (!Array.isArray(rows) || rows.length === 0) return void 0;
+		const valid = rows.filter((row) => typeof row?.path === "string" && row.path !== "");
+		if (valid.length === 0) return void 0;
+		valid.sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
+		return typeof valid[0]?.path === "string" ? valid[0].path : void 0;
+	};
 	const dataforgeDeps = buildDataforgeDeps({
 		config,
 		resolveJobs: () => jobsService,
@@ -13977,7 +14026,7 @@ function apply(ctx, rawConfig) {
 		const install = () => registerCapturePanelRoutes(webServer, {
 			store: captureDeps.store,
 			startCapture: (args) => startCapture(captureDeps, args),
-			orchestration: createOrchestrationPanelHandler({ resolveWorkspaceRoot: async () => await resolveWorkspaceRoot(void 0) ?? process.cwd() })
+			orchestration: createOrchestrationPanelHandler({ resolveWorkspaceRoot: async () => latestWorkspacePath() ?? await resolveWorkspaceRoot(void 0) ?? process.cwd() })
 		});
 		if (typeof effect === "function") effect(install, `${name}: capture panel routes`);
 		else install();
