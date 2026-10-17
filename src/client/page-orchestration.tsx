@@ -83,8 +83,9 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
   const [sitesPageSize, setSitesPageSize] = useState<number>(SITES_PAGE_SIZE)
   const [flowsPageSize, setFlowsPageSize] = useState<number>(FLOWS_PAGE_SIZE)
   const [graphsPageSize, setGraphsPageSize] = useState<number>(GRAPHS_PAGE_SIZE)
-  const [collapsedDomains, setCollapsedDomains] = useState<Set<string>>(new Set())
-  const [collapsedFlows, setCollapsedFlows] = useState<Set<string>>(new Set())
+  // 默认全部折叠：集合里记录的是「被用户手动展开过」的域 / 流程。
+  const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set())
+  const [expandedFlows, setExpandedFlows] = useState<Set<string>>(new Set())
 
   const reload = useCallback(async (): Promise<void> => {
     setLoading(true)
@@ -114,7 +115,11 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
   const flowsOfSite = useMemo(() => {
     if (site === undefined) return []
     const target = kind === 'page' ? 'page-chain' : 'interface-chain'
-    return (overview?.flows ?? []).filter((item) => item.site === site && item.kind === target)
+    // 流程倒序：最近更新的在前；时间相同按名称倒序，保证顺序稳定。
+    return (overview?.flows ?? [])
+      .filter((item) => item.site === site && item.kind === target)
+      .sort((left, right) =>
+        (right.updatedAt ?? '').localeCompare(left.updatedAt ?? '') || right.flow.localeCompare(left.flow))
   }, [kind, overview, site])
 
   const filteredFlows = useMemo(() => {
@@ -140,7 +145,16 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
       list.push(item)
       groups.set(domain, list)
     }
-    return [...groups.entries()].sort((left, right) => left[0].localeCompare(right[0]))
+    const latestOf = (list: OrchestrationFlow[]): string =>
+      list.reduce((latest, item) => ((item.updatedAt ?? '') > latest ? (item.updatedAt ?? '') : latest), '')
+    return [...groups.entries()]
+      .map(([domain, list]) => [
+        domain,
+        // 流程倒序：最近更新的在前；时间相同再按名称倒序，保证顺序稳定。
+        [...list].sort((left, right) =>
+          (right.updatedAt ?? '').localeCompare(left.updatedAt ?? '') || right.flow.localeCompare(left.flow)),
+      ] as const)
+      .sort((left, right) => latestOf(right[1]).localeCompare(latestOf(left[1])) || left[0].localeCompare(right[0]))
   }, [filteredFlows])
 
   const pagedFlows = useMemo(() => {
@@ -173,7 +187,8 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
 
   const versionRows = useMemo(() => {
     if (flow === undefined) return [] as OrchestrationVersion[]
-    return flow.versions
+    // 版本倒序：当前（最新）版本排第一，旧版本在后（原型语义）。
+    return [...flow.versions].sort((left, right) => right.version - left.version)
   }, [flow])
 
   const pagedVersions = useMemo(() => {
@@ -187,6 +202,9 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
     setSite(next)
     setFlowsPage(1)
     setSearch('')
+    // 每次进入网站都回到默认折叠态，避免带着上一次的展开状态。
+    setExpandedDomains(new Set())
+    setExpandedFlows(new Set())
     setView('flows')
   }
 
@@ -327,12 +345,18 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
           pageSize={flowsPageSize}
           sizeOptions={FLOW_PAGE_OPTIONS}
           onPageSize={(size) => { setFlowsPageSize(size); setFlowsPage(1) }}
-          collapsedDomains={collapsedDomains}
-          collapsedFlows={collapsedFlows}
-          onKind={(next) => { setKind(next); setFlowsPage(1); setSearch('') }}
+          expandedDomains={expandedDomains}
+          expandedFlows={expandedFlows}
+          onKind={(next) => {
+            setKind(next)
+            setFlowsPage(1)
+            setSearch('')
+            // 切换编排类型：流程集合变了，清掉旧的展开记录，回到全部折叠。
+            setExpandedFlows(new Set())
+          }}
           onSearch={(next) => { setSearch(next); setFlowsPage(1) }}
           onToggleDomain={(domain) => {
-            setCollapsedDomains((current) => {
+            setExpandedDomains((current) => {
               const next = new Set(current)
               if (next.has(domain)) next.delete(domain)
               else next.add(domain)
@@ -344,7 +368,7 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
               && (kind === 'page' ? item.kind === 'interface-chain' : item.kind === 'page-chain'),
           ).length}
           onToggleFlow={(key) => {
-            setCollapsedFlows((current) => {
+            setExpandedFlows((current) => {
               const next = new Set(current)
               if (next.has(key)) next.delete(key)
               else next.add(key)
@@ -474,8 +498,9 @@ function FlowsView(props: {
   total: number
   page: number
   pageSize: number
-  collapsedDomains: Set<string>
-  collapsedFlows: Set<string>
+  /** 被用户手动展开的业务域 / 流程（缺省全部折叠）。 */
+  expandedDomains: Set<string>
+  expandedFlows: Set<string>
   onKind: (kind: KindTab) => void
   onSearch: (value: string) => void
   onToggleDomain: (domain: string) => void
@@ -492,10 +517,12 @@ function FlowsView(props: {
   onImported: (notice: string) => void
 }): ReactNode {
   const {
-    siteName, kind, search, domains, domainTotals, total, page, pageSize, sizeOptions, collapsedDomains, collapsedFlows, otherKindCount,
+    siteName, kind, search, domains, domainTotals, total, page, pageSize, sizeOptions, expandedDomains, expandedFlows, otherKindCount,
     onKind, onSearch, onToggleDomain, onToggleFlow, onPage, onPageSize, onBack, onOpenGraphs, onOpenCanvas,
     onCreated, onImported,
   } = props
+  /** 检索时强制展开命中项：否则「默认折叠」会让搜索结果藏在收起的卡片里。 */
+  const searching = search.trim().length > 0
   const [modalOpen, setModalOpen] = useState(false)
   const [importing, setImporting] = useState(false)
   const fileRef = useRef<HTMLInputElement | null>(null)
@@ -587,7 +614,7 @@ function FlowsView(props: {
       ) : null}
 
       {domains.map(([domain, list]) => {
-        const collapsed = collapsedDomains.has(domain)
+        const collapsed = !searching && !expandedDomains.has(domain)
         return (
           <div key={domain} className={`dsh-df-domain${collapsed ? ' dsh-df-collapsed' : ''}`}>
             <button type="button" className="dsh-df-domain-head" onClick={() => { onToggleDomain(domain) }}>
@@ -599,7 +626,7 @@ function FlowsView(props: {
             <div className="dsh-df-domain-body">
               {list.map((item) => {
                 const key = `${item.site}/${item.flow}`
-                const flowCollapsed = collapsedFlows.has(key)
+                const flowCollapsed = !searching && !expandedFlows.has(key)
                 const latest = item.versions.find((version) => version.version === item.latest)
                 return (
                   <div key={key} className={`dsh-df-flow${flowCollapsed ? ' dsh-df-collapsed' : ''}`}>
@@ -616,7 +643,9 @@ function FlowsView(props: {
                       {item.unreadable === undefined ? null : (
                         <div className="dsh-df-errline">最新版本读不出来：{item.unreadable}</div>
                       )}
-                      {item.versions.map((version) => {
+                      {[...item.versions]
+                        .sort((left, right) => right.version - left.version)
+                        .map((version) => {
                         const current = version.version === item.latest
                         return (
                           <div key={version.version} className="dsh-df-ver">
