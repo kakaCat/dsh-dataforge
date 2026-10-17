@@ -330,7 +330,7 @@ edges:
 | 里程碑 | 内容 | 出口判据 | 负责人 | 目标日期 |
 |---|---|---|---|---|
 | M1 | draft 生成 + 铁律 + 确认闸 + 槽位写回 + crystal-run + A/B→C/D 端到端 | 本地服务：A/B 首跑 probe → 结晶 v2 → C/D 复跑成功且内部 ID 重新求解；写回无响应常量；typecheck/test/build 全绿 | yunpeng | 已完成（2026-10-17） |
-| M2 | 复跑诊断报告（节点/值/绑定断点）+ 复跑对照视图 + 冲突决策体验 | 一次无效 C 的失败报告能直接指到绑定边；两次 run 可对照 | yunpeng | 2026-10-21 |
+| M2 | 复跑诊断（`dataforge_chain_diagnose`）+ 复跑对照视图 + 冲突决策体验 | 一次无效 C 的失败报告能直接指到绑定边；两次 run 可对照 | yunpeng | 部分完成（2026-10-17）：diagnose 已落地，对照视图待做 |
 | M3 | 调度/批量（需求 Q1）+ 增量结晶（Q2）+ 面板 | 多组入参批量复跑；旧链增量确认 | yunpeng | 2026-10-25 |
 
 ## 需求追溯  serves: 全文
@@ -342,7 +342,7 @@ edges:
 | FR-6.3 | §接口设计 / IF-4 | `test/execute/crystal.test.ts`：upstream→constant 拒 | 响应常量数 = 0 | M1 |
 | FR-6.4 | §数据模型 / IF-3 | `test/orchestration/crystal.test.ts`：写回后 inputs + `$inputs.<name>` | 槽位声明覆盖率 = 100% | M1 |
 | FR-6.5 | §接口设计 / IF-5 | `test/orchestration/crystal.test.ts`：C/D 复跑成功、上游值变化 | 复跑成功率 = 1 | M1 |
-| FR-6.6 | §接口设计 / IF-5 | 同用例：无效 C → failedNode + binding 错误 | 断点可读率 = 100% | M1/M2 |
+| FR-6.6 | §接口设计 / IF-5 | `test/orchestration/diagnose.test.ts`：failedNode + 可疑入边 + 上游状态 + 建议 | 断点可读率 = 100% | M1/M2 |
 | FR-6.7 | §数据模型 | `test/orchestration/crystal.test.ts`：两次 run 的 chain.version 可对照 | 每次复跑一条 run | M1 |
 
 ## 常见问题  serves: 全文
@@ -381,6 +381,13 @@ edges:
   - [x] 无效 Z 的失败：`failedNode=order`，错误含 `query.body.items[0].internalId → order.body.materialId`；
   - [x] agent-inferred 未确认被拒；confirmed 后写成入参；
   - [x] crystal-run 审计留痕。
+
+
+- M2（2026-10-17，部分完成）：
+  - [x] `dataforge_chain_diagnose(runId)`：失败节点/错误码/节点状态/可疑入边/上游状态/建议（`test/orchestration/diagnose.test.ts`）；
+  - [x] 只读：不重跑、不改链；run 不存在/非链运行诚实报错；
+  - [ ] 复跑对照视图（两次 run 的差异展示）；
+  - [ ] 冲突决策的面板体验。
 
 ## 附录  serves: 全文
 

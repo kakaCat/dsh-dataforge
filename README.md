@@ -18,6 +18,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
   └─ dataforge_chain_run / dataforge_chain_runs    执行：拓扑调度 + 纯 HTTP 直调 + 运行留痕
   └─ dataforge_chain_probe                        首跑：单节点试探 + 每个值带来源 + 写操作确认闸
   └─ dataforge_chain_crystallize                  结晶：三分类草案 + 用户确认 + 入参槽位写回
+  └─ dataforge_chain_diagnose                     复跑诊断：失败节点 / 绑定边 / 上游状态 / 下一步
         │
         ▼  编排/执行/复跑一律走「接口卡模板 + 凭证卡」＋纯 HTTP，不再开浏览器
 ```
@@ -37,6 +38,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | 凭证注入 | `src/{execute,capture}/credentials.ts` | cookie 匹配纯函数 / 只读采集库 provider / 注入摘要（R-4 M1） |
 | 首跑试探 | `src/{execute,orchestration}/{probe,explore}.ts` | 单节点请求 / 值来源校验 / 缺参与写闸 / `probe-run` 留痕（R-5 M1） |
 | 结晶复跑 | `src/{execute,orchestration}/crystal.ts` | 三分类草案 / 铁律 / 确认闸 / `saveChain` 槽位写回 / `crystal-run` 审计（R-6 M1） |
+| 复跑诊断 | `src/orchestration/diagnose.ts` | 失败节点 / 入边 / 上游状态 / 按错误码给建议（R-6 M2） |
 | 编排应用层 | `src/orchestration/application.ts` | 链读写、执行闸门与 IF-1/2 的错误码折叠与回执值 |
 
 ## 三道闸（调用纪律，写进 dataforge_run 工具描述）
@@ -276,6 +278,18 @@ dataforge_chain_run(inputs:{...}, confirm:true)  ← 换入参复跑
 **复跑与诊断**：结晶后的链是普通 `interface-chain`，直接 `dataforge_chain_run(inputs:{q:'C', quantity:2}, confirm:true)`；链生成值由上游响应重新求解，不读首跑缓存。失败时 R-3 回执给 `failedNode` + `binding-*` 错误，错误消息带 `from → to`，可定位到求解断点。
 
 **M1 边界**：只做手动复跑；不自动合并旧槽位（以一次 exploration 重新出草案）；不做定时/批量；不做自动修复。
+
+**复跑诊断（R-6 M2）**：失败后先读断点，不要盲目重跑：
+
+```text
+dataforge_chain_diagnose(runId)
+  → 失败节点 / 错误码 / 错误原文
+  → 节点级状态（done/error）
+  → 失败节点的入边（from → to、上游状态、是否可疑）
+  → 建议（绑定断点 / 鉴权 / 换票 / HTTP）
+```
+
+只读，不重跑、不改链。真实站点联调步骤见 [docs/projects/PRJ-0002/plan/real-site-acceptance.md](docs/projects/PRJ-0002/plan/real-site-acceptance.md)。
 
 ### 编排页签（面板内可视化编辑）
 
