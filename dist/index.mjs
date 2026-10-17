@@ -2102,14 +2102,15 @@ function responseToRawSample(wire, bodyLimit) {
 * + 旁路 CDP response 流（只收 xhr/fetch，静态资源全滤）。
 * 页面与 context 由 openCapturingPage 拥有，close 也由它交付（SessionRegistry 调 close）。
 */
-async function openCapturingPage(channel, onWireSample) {
+async function openCapturingPage(channel, onWireSample, options = {}) {
 	const { chromium } = await import("playwright-core");
 	const browser = await chromium.launch({
 		channel,
-		headless: true,
+		headless: options.headless ?? true,
 		args: ["--disable-blink-features=AutomationControlled"]
 	});
 	const context = await browser.newContext();
+	if (options.cookies !== void 0 && options.cookies.length > 0) await context.addCookies(options.cookies).catch(() => void 0);
 	const page = await context.newPage();
 	page.on("response", (response) => {
 		(async () => {
@@ -2278,6 +2279,41 @@ function errText(err) {
 	const message = err?.message;
 	return (typeof message === "string" && message.length > 0 ? message : String(err)).slice(0, 200);
 }
+/** 从采集库的 credential_events 读回 cookie，转成 Playwright addCookies 的形状。 */
+function cookiesFromCapture(store, captureId) {
+	const cookies = [];
+	const now = Date.now() / 1e3;
+	for (const row of store.listCredentials(captureId, 500)) {
+		if (row.kind !== "cookie" || row.valueJson === void 0) continue;
+		let raw;
+		try {
+			raw = JSON.parse(row.valueJson);
+		} catch {
+			continue;
+		}
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+		const record = raw;
+		const name = typeof record["name"] === "string" ? record["name"] : row.name;
+		const value = typeof record["value"] === "string" ? record["value"] : "";
+		const domain = typeof record["domain"] === "string" && record["domain"] !== "" ? record["domain"] : row.url;
+		if (name === "" || domain === "") continue;
+		const expires = typeof record["expires"] === "number" && Number.isFinite(record["expires"]) ? record["expires"] : -1;
+		if (expires > 0 && expires < now) continue;
+		const sameSiteRaw = typeof record["sameSite"] === "string" ? record["sameSite"] : "Lax";
+		const sameSite = sameSiteRaw === "Strict" || sameSiteRaw === "Lax" || sameSiteRaw === "None" ? sameSiteRaw : "Lax";
+		cookies.push({
+			name,
+			value,
+			domain,
+			path: typeof record["path"] === "string" && record["path"] !== "" ? record["path"] : "/",
+			expires,
+			httpOnly: record["httpOnly"] === true,
+			secure: record["secure"] === true,
+			sameSite
+		});
+	}
+	return cookies;
+}
 async function startCapture(deps, args) {
 	const { taskType, entryUrl } = args;
 	let entry;
@@ -2315,16 +2351,20 @@ async function startCapture(deps, args) {
 				credentials: 0
 			}
 		});
+		const cookies = args.reuseCookiesFrom === void 0 ? [] : cookiesFromCapture(deps.store, args.reuseCookiesFrom);
 		const { sessionId } = await deps.registry.open({
 			entryUrl,
-			captureId
+			captureId,
+			...args.headless === void 0 ? {} : { headless: args.headless },
+			...cookies.length === 0 ? {} : { cookies }
 		});
 		deps.registry.bindSink(sessionId, wireToStore(deps, captureId, /* @__PURE__ */ new Map()));
 		return {
 			accepted: true,
 			gate: "started",
 			captureId,
-			sessionId
+			sessionId,
+			...cookies.length === 0 ? {} : { cookiesReused: cookies.length }
 		};
 	}
 	deps.store.upsertRun({
@@ -3403,7 +3443,12 @@ const NodeSchema = Schema.object({
 const EdgeSchema = Schema.object({
 	from: Schema.string().required(),
 	to: Schema.string().required(),
-	suggested: Schema.boolean()
+	suggested: Schema.boolean(),
+	transform: Schema.union([
+		Schema.const("string"),
+		Schema.const("json"),
+		Schema.const("array-json")
+	])
 });
 const InputSchema = Schema.object({
 	name: Schema.string().required(),
@@ -3539,7 +3584,8 @@ function normalizeDoc(raw) {
 			...unknownKeysOf(edge),
 			from: edge.from,
 			to: edge.to,
-			...edge.suggested === true ? { suggested: true } : {}
+			...edge.suggested === true ? { suggested: true } : {},
+			...edge.transform === void 0 ? {} : { transform: edge.transform }
 		}))
 	};
 }
@@ -4943,6 +4989,17 @@ function parseTemplateQuery(query) {
 function serializeQuery(pairs) {
 	return pairs.map(([name, value]) => value === "" ? name : `${name}=${encodeURIComponent(value)}`).join("&");
 }
+/** 扁平 body → application/x-www-form-urlencoded；数组/对象按 JSON 字面量落值。 */
+function formBodyOf(body) {
+	const params = new URLSearchParams();
+	for (const [key, value] of Object.entries(body)) {
+		if (value === void 0) continue;
+		if (typeof value === "string") params.append(key, value);
+		else if (typeof value === "object" && value !== null) params.append(key, JSON.stringify(value));
+		else params.append(key, String(value));
+	}
+	return params.toString();
+}
 /**
 * 构造一条请求。
 *
@@ -5066,8 +5123,20 @@ function buildRequest(input) {
 	}
 	const method = input.node.method.toUpperCase();
 	const sendsBody = method !== "GET" && method !== "HEAD" && hasBodyField;
+	let bodyText;
 	if (sendsBody) {
-		if (!Object.keys(headers).some((name) => name.toLowerCase() === "content-type")) headers["content-type"] = JSON_CONTENT_TYPE;
+		const contentTypeKey = Object.keys(headers).find((name) => name.toLowerCase() === "content-type");
+		const contentType = contentTypeKey === void 0 ? "" : headers[contentTypeKey].toLowerCase();
+		if (contentType === "") {
+			headers["content-type"] = JSON_CONTENT_TYPE;
+			bodyText = JSON.stringify(body);
+		} else if (contentType.includes("application/x-www-form-urlencoded")) bodyText = formBodyOf(body);
+		else if (contentType.includes("multipart/form-data")) return {
+			ok: false,
+			code: "body-type-unsupported",
+			message: "multipart/form-data 请求体暂不支持：需要文件分片/边界，当前执行引擎只支持 JSON 与 urlencoded（R-5 真实站点上传待补）"
+		};
+		else bodyText = JSON.stringify(body);
 	}
 	return {
 		ok: true,
@@ -5075,7 +5144,7 @@ function buildRequest(input) {
 			method,
 			url,
 			headers,
-			...sendsBody ? { body: JSON.stringify(body) } : {}
+			...bodyText === void 0 ? {} : { body: bodyText }
 		},
 		notices
 	};
@@ -5862,7 +5931,7 @@ async function executeChainRun(deps, prepared, input) {
 				});
 				return failPreRequest(bindings, "binding-path-not-found", message);
 			}
-			const bound = resolveBinding(root, from.fieldPath, edgeTargetType(card, to.fieldPath));
+			const bound = resolveBinding(root, from.fieldPath, edge.transform === void 0 ? edgeTargetType(card, to.fieldPath) : void 0);
 			if (!bound.ok) {
 				const code = bindingCodeOf(bound.code);
 				const message = `绑定边 ${edge.from} → ${edge.to} 求值失败：${bound.message}`;
@@ -5874,11 +5943,13 @@ async function executeChainRun(deps, prepared, input) {
 				});
 				return failPreRequest(bindings, code, message);
 			}
-			provided[normalizePath(to.fieldPath)] = bound.value;
+			const transformed = edge.transform === void 0 ? bound.value : applyEdgeTransform(bound.value, edge.transform);
+			provided[normalizePath(to.fieldPath)] = transformed;
 			bindings.push({
 				from: edge.from,
 				to: edge.to,
-				valuePreview: previewValue$1(bound.value)
+				...edge.transform === void 0 ? {} : { transform: edge.transform },
+				valuePreview: previewValue$1(transformed)
 			});
 		}
 		const built = buildRequest({
@@ -6311,6 +6382,12 @@ function terminalMessage(doc, plan, failure, cancelled, cancelledMessage, nodes)
 	if (cancelled) return `链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} 已取消：${doneCount}/${plan.order.length} 个节点完成${cancelledMessage === void 0 ? "" : `（${cancelledMessage}）`}`;
 	return `链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} 执行完成：${plan.order.length} 个节点全绿`;
 }
+/** 绑定值转换：显式声明才做，绝不隐式改变类型。 */
+function applyEdgeTransform(value, transform) {
+	if (transform === "string") return typeof value === "string" ? value : String(value);
+	if (transform === "json") return JSON.stringify(value);
+	return JSON.stringify(Array.isArray(value) ? value : [value]);
+}
 function bindingCodeOf(code) {
 	if (code === "type-mismatch") return "binding-type-mismatch";
 	if (code === "null-value") return "binding-null";
@@ -6331,8 +6408,8 @@ function collectEmitted(doc, cards, nodeId, root) {
 		if (!from || from.nodeId !== nodeId) continue;
 		const to = splitBindingPath(edge.to);
 		const card = to === void 0 ? void 0 : cards.get(cardOfNode(doc, to.nodeId));
-		const bound = resolveBinding(root, from.fieldPath, to === void 0 || card === void 0 ? void 0 : edgeTargetType(card, to.fieldPath));
-		if (bound.ok) emitted[edge.from] = bound.value;
+		const bound = resolveBinding(root, from.fieldPath, edge.transform !== void 0 || to === void 0 || card === void 0 ? void 0 : edgeTargetType(card, to.fieldPath));
+		if (bound.ok) emitted[edge.from] = edge.transform === void 0 ? bound.value : applyEdgeTransform(bound.value, edge.transform);
 	}
 	return emitted;
 }
@@ -8868,7 +8945,10 @@ function defineStatusTool(deps) {
 }
 function renderCapture(value) {
 	if (!value.accepted) return value.card ?? "❌ 采集请求未被接受（缺细节）";
-	if (value.sessionId !== void 0) return `✅ 已开会话 ${value.sessionId}（captureId ${value.captureId ?? "?"}）：用 dataforge_browser_snapshot 看 UI、dataforge_browser_act 交互；结束后 dataforge_browser_close 收 cookie。`;
+	if (value.sessionId !== void 0) {
+		const reused = value.cookiesReused === void 0 ? "" : `，已复用 ${value.cookiesReused} 个 cookie`;
+		return `✅ 已开会话 ${value.sessionId}（captureId ${value.captureId ?? "?"}${reused}）：用 dataforge_browser_snapshot 看 UI、dataforge_browser_act 交互；结束后 dataforge_browser_close 收 cookie。`;
+	}
 	const degraded = value.degradedNotice === void 0 ? "" : `\n⚠ ${value.degradedNotice}`;
 	return `🚀 采集已启动（captureId ${value.captureId ?? "?"}）：site_crawl 是后台任务，用 dataforge_capture_status 轮询，完成后 dataforge_capture_result(scope=cards) 取卡。${degraded}`;
 }
@@ -8948,6 +9028,14 @@ function defineCaptureTool(deps) {
 			max_pages: {
 				type: "number",
 				description: "site_crawl BFS 页数上限（缺省用配置）"
+			},
+			headless: {
+				type: "boolean",
+				description: "action 型：false = 可见 Chrome，供用户手动登录；缺省无头"
+			},
+			reuse_cookies_from: {
+				type: "string",
+				description: "从指定 captureId 的本地 cookie 恢复登录态，再注入新浏览器上下文"
 			}
 		},
 		output: {
@@ -8964,6 +9052,10 @@ function defineCaptureTool(deps) {
 					sessionId: {
 						type: "string",
 						description: "action 型：会话原语 id"
+					},
+					cookiesReused: {
+						type: "number",
+						description: "action 型：从旧 captureId 注入的 cookie 数"
 					},
 					degradedNotice: {
 						type: "string",
@@ -8989,7 +9081,9 @@ function defineCaptureTool(deps) {
 				entryUrl: args.entry_url,
 				...args.confirm === void 0 ? {} : { confirm: args.confirm },
 				...args.max_depth === void 0 ? {} : { maxDepth: args.max_depth },
-				...args.max_pages === void 0 ? {} : { maxPages: args.max_pages }
+				...args.max_pages === void 0 ? {} : { maxPages: args.max_pages },
+				...args.headless === void 0 ? {} : { headless: args.headless },
+				...args.reuse_cookies_from === void 0 ? {} : { reuseCookiesFrom: args.reuse_cookies_from }
 			}));
 		}
 	});
@@ -9137,6 +9231,18 @@ function toActSpec(raw) {
 			selector,
 			value: r["value"]
 		};
+		case "upload": {
+			const files = Array.isArray(r["files"]) && r["files"].every((file) => typeof file === "string") ? r["files"] : void 0;
+			return selector === void 0 || files === void 0 || files.length === 0 ? void 0 : {
+				kind: "upload",
+				selector,
+				files
+			};
+		}
+		case "eval": return typeof r["script"] !== "string" || r["script"].trim() === "" ? void 0 : {
+			kind: "eval",
+			script: r["script"]
+		};
 		case "press": return typeof r["key"] !== "string" ? void 0 : {
 			kind: "press",
 			key: r["key"]
@@ -9155,37 +9261,58 @@ function toActSpec(raw) {
 function defineBrowserOpenTool(deps) {
 	return defineTool({
 		name: "dataforge_browser_open",
-		description: `开一个无头 Chrome 采集会话（系统 Chrome，流经隐私侧通道）。entry_url 给出时直接导航过去。与 dataforge_capture(task_type=action) 配合使用：action 会话可自动开。`,
-		parameters: { entry_url: {
-			type: "string",
-			description: "打开后立刻导航的 URL"
-		} },
+		description: `开一个 Chrome 采集会话（系统 Chrome，流经隐私侧通道）。entry_url 给出时直接导航过去。headless=false 会打开可见窗口，供用户手动登录；与 dataforge_capture(task_type=action) 配合使用。`,
+		parameters: {
+			entry_url: {
+				type: "string",
+				description: "打开后立刻导航的 URL"
+			},
+			headless: {
+				type: "boolean",
+				description: "false = 可见 Chrome（用户手动登录）；缺省无头"
+			},
+			reuse_cookies_from: {
+				type: "string",
+				description: "从指定 captureId 的本地 cookie 恢复登录态"
+			}
+		},
 		output: {
 			schema: {
 				type: "object",
 				additionalProperties: true,
 				properties: {
 					sessionId: { type: "string" },
-					pageUrl: { type: "string" }
+					pageUrl: { type: "string" },
+					cookiesReused: { type: "number" }
 				}
 			},
 			render: (_args, value) => {
 				const v = tighten(value);
+				const reused = v.cookiesReused === void 0 ? "" : `（复用 ${v.cookiesReused} 个 cookie）`;
 				return [{
 					type: "text",
-					text: `🖥 会话 ${v.sessionId} 已开（${v.pageUrl}）。下一步用 dataforge_browser_snapshot 看页面。`
+					text: `🖥 会话 ${v.sessionId} 已开（${v.pageUrl}）${reused}。下一步用 dataforge_browser_snapshot 看页面。`
 				}];
 			}
 		},
 		async execute(args) {
-			return lossless(deps.registry.open(args.entry_url === void 0 ? {} : { entryUrl: args.entry_url }));
+			const cookies = args.reuse_cookies_from === void 0 ? [] : cookiesFromCapture(deps.store, args.reuse_cookies_from);
+			const opened = await deps.registry.open({
+				...args.entry_url === void 0 ? {} : { entryUrl: args.entry_url },
+				...args.headless === void 0 ? {} : { headless: args.headless },
+				...cookies.length === 0 ? {} : { cookies }
+			});
+			return lossless({
+				...opened,
+				...cookies.length === 0 ? {} : { cookiesReused: cookies.length }
+			});
 		}
 	});
 }
 function defineBrowserActTool(deps) {
 	return defineTool({
 		name: "dataforge_browser_act",
-		description: `对采集会话执行一次页面动作：click/fill/press/submit/wait/goto。⚠️ 此工具生成真实用户操作（含写）：生产站点填表/点击前先转述给用户确认；提交类只应出现在 dataforge_capture(task_type=action) 且用户 confirm 之后。`,
+		description: `对采集会话执行一次页面动作：click/fill/press/submit/wait/goto/upload/eval。⚠️ 此工具生成真实用户操作（含写/上传）：生产站点填表、上传、提交前先向用户确认；提交/上传类只应出现在 dataforge_capture(task_type=action) 且用户 confirm 之后。eval 只用于读 DOM/辅助定位，不执行外部脚本。`,
 		parameters: {
 			session_id: {
 				type: "string",
@@ -9210,9 +9337,10 @@ function defineBrowserActTool(deps) {
 			},
 			render: (_args, value) => {
 				const v = tighten(value);
+				const extra = v.value === void 0 ? "" : `\n${JSON.stringify(v.value).slice(0, 4e3)}`;
 				return [{
 					type: "text",
-					text: v.ok ? `✅ 动作完成（当前页 ${v.pageUrl ?? "?"}）` : `❌ 动作失败：${v.error ?? "未知"}`
+					text: (v.ok ? `✅ 动作完成（当前页 ${v.pageUrl ?? "?"}）` : `❌ 动作失败：${v.error ?? "未知"}`) + extra
 				}];
 			}
 		},
@@ -11709,6 +11837,9 @@ var SessionRegistry = class {
 		const sessionId = `bs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 		const { browser, context, page } = await this.io.openCapturingPage("chrome", (w) => {
 			this.sessions.get(sessionId)?.sink?.(w);
+		}, {
+			...o.headless === void 0 ? {} : { headless: o.headless },
+			...o.cookies === void 0 ? {} : { cookies: o.cookies }
 		});
 		this.sessions.set(sessionId, o.captureId === void 0 ? {
 			page,
@@ -11742,7 +11873,15 @@ var SessionRegistry = class {
 		try {
 			if (spec.kind === "click") await s.page.click(spec.selector, { timeout: 1e4 });
 			else if (spec.kind === "fill") await s.page.fill(spec.selector, spec.value, { timeout: 1e4 });
-			else if (spec.kind === "press") await s.page.keyboard.press(spec.key);
+			else if (spec.kind === "upload") await s.page.setInputFiles(spec.selector, spec.files, { timeout: 2e4 });
+			else if (spec.kind === "eval") {
+				const value = await s.page.evaluate(spec.script);
+				return {
+					ok: true,
+					pageUrl: s.page.url(),
+					value
+				};
+			} else if (spec.kind === "press") await s.page.keyboard.press(spec.key);
 			else if (spec.kind === "submit") await s.page.click(spec.selector, { timeout: 1e4 });
 			else if (spec.kind === "wait") await s.page.waitForTimeout(Math.min(spec.ms, 1e4));
 			else if (spec.kind === "goto") await s.page.goto(spec.url, {
