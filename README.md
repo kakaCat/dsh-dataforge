@@ -106,9 +106,21 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 
 | 入口 | 用途 | 说明 |
 |---|---|---|
-| `dataforge_capture(task_type=action)` + `dataforge_browser_*` | agent 驱动真实交互（搜索/翻页/提交） | 写操作先经用户确认；会话期间遇到的 XHR 全部成卡 |
+| `dataforge_capture(task_type=action)` + `dataforge_browser_*` | agent 驱动真实交互（搜索/翻页/提交） | 写操作先经用户确认；会话期间遇到的 XHR 全部成卡；`headless:false` 可开可见 Chrome 供用户手动登录 |
 | `dataforge_capture(task_type=single_page)` | 单页静止期采集 | 走后台 job；jobs 不可用时**前台降级**执行（回执带 `degradedNotice`） |
 | 侧栏「数据采集」面板 | 单入口三标签：采集运行 / 快速采集 / 接口库 | 快速采集只发起 single_page（FR-7.6），2 秒轮询进度，收口后按「页面 → 接口 → 形态」出文档 |
+
+**手动登录（可见 Chrome）**：需要用户亲自登录（验证码/扫码/双因素）时，用可见模式开会话：
+
+```text
+dataforge_capture(task_type=action, entry_url="https://目标站/", confirm=true, headless=false)
+```
+
+- 浏览器窗口会出现在用户桌面；用户在窗口里完成登录；
+- 会话仍绑定 captureId：期间触发的 XHR 会成卡，收口时 cookie 入 `credential_events`；
+- 登录完成后用 `dataforge_browser_snapshot` 看当前页，或直接 `dataforge_browser_close` 收口；
+- 不传 `headless` = 无头采集（agent 驱动）；可见模式只用于人工登录，不要用它做无人值守采集；
+- **复用登录态**：已有登录 captureId 时传 `reuse_cookies_from=<captureId>`，新会话会从本地 `credential_events` 读回 cookie 注入浏览器上下文，不用重新登录。
 
 **落库模型**（`<dataRoot>/capture/capture.sqlite`）：
 
@@ -161,6 +173,12 @@ runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result
 **缺参判据（硬规则）**：`covered(node) = 常量键 ∪ 以该节点为终点的绑定边字段`，`missing = 卡入参.filter(角色≠credential 且 未被 covered)`。**卡的 `required` 不参与判据**——单样本卡几乎全是 `required: false`，拿它判会把必须给值的入参全部放行、进而静默发空值。静态缺参一次判完，整链不执行。
 
 **错误码是契约**（只增不改名）：预检 `missing-params` / `chain-not-found` / `invalid-chain` / `not-executable` / `cycle` / `base-url-unresolved` / `inputs-invalid` / `confirm-required` / `execution-disabled` / `execution-unavailable`；运行期 `binding-path-not-found` / `binding-type-mismatch` / `binding-null` / `empty-wildcard` / `param-missing` / `param-type-mismatch` / `bad-url-template` / `node-timeout` / `node-network-error` / `node-http-error` / `node-auth-required` / `response-too-large` / `cancelled`；换票 `relogin-unavailable` / `relogin-failed` / `relogin-cycle`。
+
+**真实站点适配（R-5）**：
+
+- **正文编码**：按 `content-type` 自动选择 JSON / `application/x-www-form-urlencoded`；`multipart/form-data` 明确报 `body-type-unsupported`（文件上传目前只走浏览器，不走链执行）；
+- **绑定值转换**：边可写 `transform: string | json | array-json`。`array-json` 把标量包成数组再 JSON 序列化（如网盘 `fs_id` → `fid_list` 需要的 `"[123]"`），不做隐式转换；
+- **鉴权误判修正**：采集期页面脚本拿不到 `cookie` 头时，卡可能被标成 `auth: none`；可在卡文件里把它改成 `cookie-session`，执行期就会按来源 captureId 注入本地 cookie。
 
 **安全面**：`credentials: 'omit'`（不继承 cookie jar）、头名命中脱敏集合即打码、请求/响应正文摘要各留 4 KiB、响应读取上限 `chainResponseLimitBytes`、只允许 http(s)、`chainRunEnabled` 全局开关。**卡与链零凭证**；cookie 注入与 401 换票见下节（R-4 M1/M2）。
 
