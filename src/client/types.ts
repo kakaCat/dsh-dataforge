@@ -159,6 +159,15 @@ export type CanvasNode = {
 
 export type CanvasEdge = { from: string; to: string; suggested?: boolean }
 
+/** 卡的画布投影（字段路径表用于连线绑定下拉）。 */
+export type CardProjection = {
+  name?: string
+  method: string
+  urlTemplate: string
+  inputs: Array<{ path: string; type: string; required?: boolean }>
+  outputs: Array<{ path: string; type: string; required?: boolean }>
+}
+
 /** 链级入参槽位（画布原样带回，不解释）。 */
 export type ChainInputSlot = {
   name: string
@@ -197,8 +206,8 @@ export type ChainGraph = {
   created?: string
   chainYaml: string
   doc: ChainDocLike
-  /** 节点引用的卡身份（只 method/url/name，零凭证）；读不到就没有该键。 */
-  cards: Record<string, { name?: string; method: string; urlTemplate: string }>
+  /** 节点引用的卡投影（method/url/name + 字段路径表，零凭证）；读不到就没有该键。 */
+  cards: Record<string, CardProjection>
   versions: number[]
 }
 

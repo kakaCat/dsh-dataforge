@@ -39,6 +39,17 @@ export interface OrchestrationPanelDeps {
   resolveWorkspaceRoot: () => Promise<string>
 }
 
+/** 卡投影：画布显示用（方法/地址/名称）+ 连线绑定下拉用（字段路径表）。零凭证。 */
+export type CardProjection = {
+  name?: string
+  method: string
+  urlTemplate: string
+  /** 入参字段路径表（FR-2.3 的「下游入参 ←」候选）。 */
+  inputs: Array<{ path: string; type: string; required?: boolean }>
+  /** 出参字段路径表（FR-2.3 的「上游出参 →」候选）。 */
+  outputs: Array<{ path: string; type: string; required?: boolean }>
+}
+
 /** 网站行：编排页一级列表。 */
 export type SiteRow = {
   site: string
@@ -108,7 +119,7 @@ export type GraphValue = {
    * 画布要显示「POST /api/purchase/order/create」这类标签，但那些字段属于**卡**，
    * 不属于链——复制进链文件会立刻产生两处事实源。所以链只存 cardId，显示时按 id 解析。
    */
-  cards: Record<string, { name?: string; method: string; urlTemplate: string }>
+  cards: Record<string, CardProjection>
   versions: number[]
 }
 
@@ -264,11 +275,8 @@ async function handleGraph(deps: OrchestrationPanelDeps, url: URL, res: ServerRe
 }
 
 /** 节点引用的卡身份投影（读不到的卡不出现在表里，画布降级显示 cardId）。 */
-function resolveCardIdentities(
-  workspaceRoot: string,
-  doc: ChainDoc,
-): Record<string, { name?: string; method: string; urlTemplate: string }> {
-  const cards: Record<string, { name?: string; method: string; urlTemplate: string }> = {}
+function resolveCardIdentities(workspaceRoot: string, doc: ChainDoc): Record<string, CardProjection> {
+  const cards: Record<string, CardProjection> = {}
   for (const node of doc.nodes) {
     if (node.card === undefined || cards[node.card] !== undefined) continue
     const card = readCard(workspaceRoot, node.card)
@@ -277,6 +285,16 @@ function resolveCardIdentities(
       ...(card.name === undefined ? {} : { name: card.name }),
       method: card.identity.method,
       urlTemplate: card.identity.urlTemplate,
+      inputs: card.inputs.map((field) => ({
+        path: field.path,
+        type: field.type,
+        ...(field.required === undefined ? {} : { required: field.required }),
+      })),
+      outputs: card.outputs.map((field) => ({
+        path: field.path,
+        type: field.type,
+        ...(field.required === undefined ? {} : { required: field.required }),
+      })),
     }
   }
   return cards

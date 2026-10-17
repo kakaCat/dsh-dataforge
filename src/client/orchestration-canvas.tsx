@@ -20,7 +20,9 @@ import {
 } from '@xyflow/react'
 import { XYFLOW_CSS } from './xyflow-css.js'
 import { XYFLOW_STYLE_ID, injectCssOnce } from './styles.js'
-import type { CanvasEdge, CanvasNode, ChainDocLike, ChainGraph, ChainSaveResult } from './types.js'
+import type {
+  CanvasEdge, CanvasNode, CardProjection, ChainDocLike, ChainGraph, ChainInputSlot, ChainSaveResult,
+} from './types.js'
 
 /** 画布节点 data：label/url/method 是**展示投影**（来自卡或 page），constants 才是可编辑的链数据。 */
 type CanvasNodeData = {
@@ -195,6 +197,8 @@ export function OrchestrationCanvas({ graph, onSave }: OrchestrationCanvasProps)
 
   const [nodes, setNodes] = useState<FlowNode[]>(() => projectNodes(graph))
   const [edges, setEdges] = useState<FlowEdge[]>(() => projectEdges(graph.doc))
+  const [inputs, setInputs] = useState<ChainInputSlot[]>(() => graph.doc.inputs.map((slot) => ({ ...slot })))
+  const [inputsOpen, setInputsOpen] = useState(false)
   const [selNodeId, setSelNodeId] = useState<string | undefined>()
   const [selEdgeId, setSelEdgeId] = useState<string | undefined>()
   const [busy, setBusy] = useState(false)
@@ -231,8 +235,8 @@ export function OrchestrationCanvas({ graph, onSave }: OrchestrationCanvasProps)
       from: String(edge.data?.from ?? edge.source),
       to: String(edge.data?.to ?? edge.target),
     }))
-    return { ...graph.doc, nodes: nextNodes, edges: nextEdges }
-  }, [edges, graph.doc, nodes])
+    return { ...graph.doc, inputs, nodes: nextNodes, edges: nextEdges }
+  }, [edges, graph.doc, inputs, nodes])
 
   const save = useCallback(() => {
     setBusy(true)
@@ -330,6 +334,60 @@ export function OrchestrationCanvas({ graph, onSave }: OrchestrationCanvasProps)
         </div>
       </div>
       {notice === undefined ? null : <div className="dsh-df-canvas-notice">{notice}</div>}
+      <div className="dsh-df-inputs">
+        <button type="button" className="dsh-df-inputs-head" onClick={() => { setInputsOpen(!inputsOpen) }}>
+          <span className="dsh-df-lv dsh-df-lv-1">链级入参</span>
+          <span className="dsh-df-dname">{inputs.length} 个槽位（$inputs.&lt;name&gt;）</span>
+          <span className="dsh-df-caret">{inputsOpen ? '▼' : '▶'}</span>
+        </button>
+        {inputsOpen ? (
+          <div className="dsh-df-inputs-body">
+            {inputs.map((slot, index) => (
+              <div key={`${slot.name}-${index}`} className="dsh-df-inputs-row">
+                <input
+                  placeholder="槽位名 materialCodes"
+                  value={slot.name}
+                  onChange={(event) => { patchSlot(setInputs, index, { name: event.target.value }) }}
+                />
+                <select
+                  value={slot.type}
+                  onChange={(event) => { patchSlot(setInputs, index, { type: event.target.value }) }}
+                >
+                  {INPUT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+                </select>
+                <label className="dsh-df-inputs-req">
+                  <input
+                    type="checkbox"
+                    checked={slot.required}
+                    onChange={(event) => { patchSlot(setInputs, index, { required: event.target.checked }) }}
+                  />
+                  必填
+                </label>
+                <input
+                  placeholder="示例值（可选）"
+                  value={slot.example ?? ''}
+                  onChange={(event) => { patchSlot(setInputs, index, { example: event.target.value === '' ? undefined : event.target.value }) }}
+                />
+                <button type="button" className="dsh-df-btn" onClick={() => { setInputs((current) => current.filter((_item, i) => i !== index)) }}>
+                  删除
+                </button>
+              </div>
+            ))}
+            <div className="dsh-df-inputs-row">
+              <button
+                type="button"
+                className="dsh-df-btn"
+                onClick={() => { setInputs((current) => [...current, { name: `slot${current.length + 1}`, type: 'string', required: false }]) }}
+              >
+                + 新增槽位
+              </button>
+              <span className="dsh-df-rf-hint">
+                槽位必须被常量或边引用（$inputs.名），否则保存时按 R-1 的僵尸槽位规则拒绝。
+              </span>
+            </div>
+          </div>
+        ) : null}
+      </div>
       <div className="dsh-df-flow-wrap">
         <ReactFlow
           nodes={nodes}
@@ -365,6 +423,8 @@ export function OrchestrationCanvas({ graph, onSave }: OrchestrationCanvasProps)
               <EdgeEditor
                 from={String(selEdge.data?.from ?? selEdge.source)}
                 to={String(selEdge.data?.to ?? selEdge.target)}
+                sourceCard={cardsOfNode(nodes, graph, selEdge.source)}
+                targetCard={cardsOfNode(nodes, graph, selEdge.target)}
                 onChange={updateEdgeBinding}
                 onClose={() => { setSelEdgeId(undefined) }}
               />
@@ -396,6 +456,28 @@ function downloadText(filename: string, text: string): void {
   anchor.remove()
   URL.revokeObjectURL(url)
 }
+
+/** 取某节点引用卡的投影（没有卡 / 卡不在库 → undefined，编辑面板退回手写）。 */
+function cardsOfNode(nodes: FlowNode[], graph: ChainGraph, nodeId: string): CardProjection | undefined {
+  const node = nodes.find((item) => item.id === nodeId)
+  const cardId = node?.data.card
+  return cardId === undefined ? undefined : graph.cards[cardId]
+}
+
+/** 改一个槽位字段（name/type/required/example）。 */
+function patchSlot(
+  setInputs: (updater: (current: ChainInputSlot[]) => ChainInputSlot[]) => void,
+  index: number,
+  patch: Partial<ChainInputSlot>,
+): void {
+  setInputs((current) => current.map((slot, i) => (i === index ? { ...slot, ...patch } : slot)))
+}
+
+/** 槽位类型词表（与 R-1 CHAIN_VALUE_TYPES 同源；这里只列画布提供的选项）。 */
+const INPUT_TYPES = [
+  'string', 'number', 'boolean', 'object', 'array',
+  'array<string>', 'array<number>', 'array<boolean>', 'array<object>',
+] as const
 
 /* ──────────────────────────── 编辑面板 ──────────────────────────── */
 
@@ -488,24 +570,70 @@ function NodeEditor(props: {
   )
 }
 
+/**
+ * 连线属性 = 「下游入参字段 ← 上游出参字段」（FR-2.3）。
+ *
+ * 两侧有卡模板就给**下拉**（候选来自卡的 inputs/outputs，选完拼成 `<节点id>.<字段路径>`）；
+ * 没有卡模板（页面编排的 page 节点、或卡不在库里）就退回文本框——不假装有模板。
+ */
 function EdgeEditor(props: {
   from: string
   to: string
+  sourceCard?: CardProjection
+  targetCard?: CardProjection
   onChange: (side: 'from' | 'to', value: string) => void
   onClose: () => void
 }): ReactNode {
-  const { from, to, onChange, onClose } = props
+  const { from, to, sourceCard, targetCard, onChange, onClose } = props
+  const sourceNode = from.split('.')[0] ?? ''
+  const targetNode = to.split('.')[0] ?? ''
+  const fromPath = from.slice(sourceNode.length + 1)
+  const toPath = to.slice(targetNode.length + 1)
+
   return (
     <div className="dsh-df-rf-panel">
       <h3>
         <span>依赖绑定</span>
         <button type="button" className="dsh-df-rf-close" onClick={onClose}>✕</button>
       </h3>
-      <label>from（上游出参路径）</label>
-      <input value={from} onChange={(event) => { onChange('from', event.target.value) }} />
-      <label>to（下游入参路径）</label>
-      <input value={to} onChange={(event) => { onChange('to', event.target.value) }} />
-      <p className="dsh-df-rf-hint">形如 `节点id.字段路径`；标签取 from 的叶子字段名。</p>
+
+      <label>上游：{sourceNode} 的出参</label>
+      {sourceCard === undefined || sourceCard.outputs.length === 0 ? (
+        <input value={from} onChange={(event) => { onChange('from', event.target.value) }} />
+      ) : (
+        <select
+          value={fromPath}
+          onChange={(event) => { onChange('from', `${sourceNode}.${event.target.value}`) }}
+        >
+          <option value="">（选择出参字段）</option>
+          {sourceCard.outputs.map((field) => (
+            <option key={field.path} value={field.path}>{field.path} · {field.type}</option>
+          ))}
+        </select>
+      )}
+
+      <label>下游：{targetNode} 的入参</label>
+      {targetCard === undefined || targetCard.inputs.length === 0 ? (
+        <input value={to} onChange={(event) => { onChange('to', event.target.value) }} />
+      ) : (
+        <select
+          value={toPath}
+          onChange={(event) => { onChange('to', `${targetNode}.${event.target.value}`) }}
+        >
+          <option value="">（选择入参字段）</option>
+          {targetCard.inputs.map((field) => (
+            <option key={field.path} value={field.path}>
+              {field.path} · {field.type}{field.required === true ? ' · 必填' : ''}
+            </option>
+          ))}
+        </select>
+      )}
+
+      <p className="dsh-df-rf-hint">
+        {sourceCard === undefined || targetCard === undefined
+          ? '有一侧节点没有卡模板（页面节点或卡不在库），只能手写路径。'
+          : '候选来自两侧卡的字段表；边标签取上游字段的叶子名。'}
+      </p>
     </div>
   )
 }

@@ -156,6 +156,14 @@ describe('GET /orchestration/graph', () => {
     // 卡身份按 cardId 解析出来（画布显示方法/地址用），且不含凭证
     const cards = data.cards as Record<string, Record<string, unknown>>
     expect(cards.card_000123).toMatchObject({ method: 'GET', urlTemplate: '/api/materials?q={q}' })
+    // 字段路径表随卡下发：画布「连线即绑定」的下拉候选来自这里（FR-2.3）
+    expect(cards.card_000123?.inputs).toEqual([
+      { path: 'query.q', type: 'string', required: true },
+      { path: 'query.orgId', type: 'string', required: true },
+    ])
+    expect(cards.card_000457?.outputs).toEqual([{ path: 'body.orderNo', type: 'string' }])
+    // 零凭证：卡投影里不该出现 auth/sources/任何 value 字段
+    expect(Object.keys(cards.card_000123 ?? {})).not.toContain('auth')
   })
 
   it('缺 site/flow 是 400，链不存在是 404', async () => {

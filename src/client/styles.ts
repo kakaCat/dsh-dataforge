@@ -474,6 +474,21 @@ const CSS = `
   outline: none; border-color: var(--dsh-df-accent); box-shadow: 0 0 0 3px var(--dsh-df-accent-soft); }
 .dsh-df-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .dsh-df-modal-ops { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+/* ── 编排：链级入参槽位编辑（FR-2.6） ── */
+.dsh-df-inputs { background: var(--dsh-df-card); border: 1px solid var(--dsh-df-line);
+  border-radius: var(--dsh-df-radius); margin-bottom: 12px; overflow: hidden; }
+.dsh-df-inputs-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+  background: none; border: none; width: 100%; text-align: left; cursor: pointer; font-family: inherit; }
+.dsh-df-inputs-head .dsh-df-dname { font-size: 12px; color: var(--dsh-df-ink-2); flex: 1; }
+.dsh-df-inputs-body { padding: 0 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+.dsh-df-inputs-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dsh-df-inputs-row input, .dsh-df-inputs-row select { border: 1px solid #d4d8df; border-radius: 6px;
+  padding: 5px 8px; font-size: 12px; font-family: inherit; min-width: 0; }
+.dsh-df-inputs-row input:focus, .dsh-df-inputs-row select:focus { outline: none;
+  border-color: var(--dsh-df-accent); }
+.dsh-df-inputs-req { display: flex; align-items: center; gap: 4px; font-size: 11.5px;
+  color: var(--dsh-df-ink-3); white-space: nowrap; }
+
 .dsh-df-errline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   background: var(--dsh-df-err-soft); color: var(--dsh-df-err); border: 1px solid #f3c2c2;
   border-radius: 8px; padding: 8px 12px; font-size: 12px; margin-bottom: 12px; }

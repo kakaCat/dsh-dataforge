@@ -6218,7 +6218,17 @@ function resolveCardIdentities(workspaceRoot, doc) {
 		cards[node.card] = {
 			...card.name === void 0 ? {} : { name: card.name },
 			method: card.identity.method,
-			urlTemplate: card.identity.urlTemplate
+			urlTemplate: card.identity.urlTemplate,
+			inputs: card.inputs.map((field) => ({
+				path: field.path,
+				type: field.type,
+				...field.required === void 0 ? {} : { required: field.required }
+			})),
+			outputs: card.outputs.map((field) => ({
+				path: field.path,
+				type: field.type,
+				...field.required === void 0 ? {} : { required: field.required }
+			}))
 		};
 	}
 	return cards;
