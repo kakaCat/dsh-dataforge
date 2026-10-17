@@ -152,25 +152,43 @@ runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result
 
 **缺参判据（硬规则）**：`covered(node) = 常量键 ∪ 以该节点为终点的绑定边字段`，`missing = 卡入参.filter(角色≠credential 且 未被 covered)`。**卡的 `required` 不参与判据**——单样本卡几乎全是 `required: false`，拿它判会把必须给值的入参全部放行、进而静默发空值。静态缺参一次判完，整链不执行。
 
-**错误码是契约**（只增不改名）：预检 `missing-params` / `chain-not-found` / `invalid-chain` / `not-executable` / `cycle` / `base-url-unresolved` / `inputs-invalid` / `confirm-required` / `execution-disabled` / `execution-unavailable`；运行期 `binding-path-not-found` / `binding-type-mismatch` / `binding-null` / `empty-wildcard` / `param-missing` / `param-type-mismatch` / `bad-url-template` / `node-timeout` / `node-network-error` / `node-http-error` / `node-auth-required` / `response-too-large` / `cancelled`。
+**错误码是契约**（只增不改名）：预检 `missing-params` / `chain-not-found` / `invalid-chain` / `not-executable` / `cycle` / `base-url-unresolved` / `inputs-invalid` / `confirm-required` / `execution-disabled` / `execution-unavailable`；运行期 `binding-path-not-found` / `binding-type-mismatch` / `binding-null` / `empty-wildcard` / `param-missing` / `param-type-mismatch` / `bad-url-template` / `node-timeout` / `node-network-error` / `node-http-error` / `node-auth-required` / `response-too-large` / `cancelled`；换票 `relogin-unavailable` / `relogin-failed` / `relogin-cycle`。
 
-**安全面**：`credentials: 'omit'`（不继承 cookie jar）、头名命中脱敏集合即打码、请求/响应正文摘要各留 4 KiB、响应读取上限 `chainResponseLimitBytes`、只允许 http(s)、`chainRunEnabled` 全局开关。**卡与链零凭证**；cookie 注入见下节（R-4 M1），401 换票仍归 R-4 M2。
+**安全面**：`credentials: 'omit'`（不继承 cookie jar）、头名命中脱敏集合即打码、请求/响应正文摘要各留 4 KiB、响应读取上限 `chainResponseLimitBytes`、只允许 http(s)、`chainRunEnabled` 全局开关。**卡与链零凭证**；cookie 注入与 401 换票见下节（R-4 M1/M2）。
 
 **不幂等**：同一参数重复调用就是新 run、新请求；写类节点不做自动整链重试（节点级 `retry` 只对 GET/HEAD/OPTIONS 生效）。取消后重跑必须重新确认。
 
 **长跑**：`jobs` 在场则以 `kind: 'dataforge-chain'` 起后台 job（`job_output` 看进度、`job_kill` 取消，终态 `killed`）；`jobs` 不在场则前台降级并在回执标 `degradedNotice`。
 
-### 凭证注入（R-4 M1：cookie 型）
+### 凭证注入与自动换票（R-4 M1/M2）
 
-设计：[docs/projects/PRJ-0002/design/r4-credential-injection.md](docs/projects/PRJ-0002/design/r4-credential-injection.md)（M1 注入已实现；M2 换票、M3 硬化待做）。
+设计：[docs/projects/PRJ-0002/design/r4-credential-injection.md](docs/projects/PRJ-0002/design/r4-credential-injection.md)（M1 注入、M2 换票已实现；M3 硬化待做）。
 
 - **来源**：只读 `dataRoot/capture/capture.sqlite` 的 `credential_events`，**只按卡的 `sources[].captureId`** 查，不做全库兜底（A 站 cookie 不会发给 B 站）；
 - **匹配**：domain / path / secure / expires 四道门，同名同路径去重（更具体的域优先），排序可复现；
 - **注入点**：`buildRequest()` 之后、`httpRequest()` 之前；`cookie` 头与卡上已有值拼接，其它同名头以注入值为准；
 - **零留痕**：请求摘要里 `cookie` 恒为 `***`；响应正文摘要与 emitted 值会按已知凭证值再做一次脱敏（防服务端回显）；事件里只留 `credentials: { status, names, domains, captureIds, expired }`，**没有值**；
-- **401 诊断**：区分「注入了 N 个 cookie 但仍 401（可能过期，换票属 M2）」与「没有注入可用凭证（原因）」；
+- **401 诊断**：区分「注入了 N 个 cookie 但仍 401（可能过期）」与「没有注入可用凭证（原因）」；传了 `relogin` 时自动进入换票；
 - **诚实边界**：一期只采到 cookie（本机 48 条、0 条 token），`token-header` / `token-param` 卡不猜 Authorization，摘要标 `unsupported` 并提示补采集；
-- **回滚**：provider 缺席 = 回到 R-3 无凭证行为（`src/index.ts` 不装配即可），无需迁移。
+- **回滚**：provider 缺席 = 回到 R-3 无凭证行为（`src/index.ts` 不装配即可）；不传 `relogin` = 回到 M1 行为，无需迁移。
+
+**自动换票（M2）**：给 `dataforge_chain_run` 传一条普通接口链作为登录链：
+
+```json
+{
+  "site": "业务站点", "flow": "取数", "confirm": true,
+  "relogin": {
+    "site": "认证站点", "flow": "登录",
+    "inputs": { "user": "alice", "pass": "***" }
+  }
+}
+```
+
+- 401 → 执行登录链（同一套 `loadChain`/`buildPlan`/`executeChainRun`）→ 收割 `set-cookie` → **单飞**换票 → 用新 cookie 重放当前节点**一次**；
+- 登录链以**敏感模式**执行：`run.json.params` 的值写 `***`、请求/响应正文摘要 `[已脱敏]`、`emitted`/绑定预览不落值；账号密码只从 `relogin.inputs` 进内存，**不写链、不写运行记录**；
+- 安全边界：登录链与主链必须**同源**（拒绝跨站复用凭证）；`relogin.site/flow` = 主链自身 → `relogin-cycle`；
+- 失败语义：登录链不存在/不可用 → `relogin-unavailable`；登录链失败或没有下发 `set-cookie` → `relogin-failed`，回执固定带「需人工重新登录并更新凭证」；换票后重放仍 401 → 中止，不二次换票；
+- 并发：同一运行内两个节点同时 401，只执行一次登录链，其它节点等结果。
 
 ### 编排页签（面板内可视化编辑）
 
