@@ -178,6 +178,9 @@ runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result
 
 - **正文编码**：按 `content-type` 自动选择 JSON / `application/x-www-form-urlencoded` / `multipart/form-data`；
 - **文件上传**：节点可写 `files: { "body.file": "<本地路径或 $inputs.filePath>" }`，执行期读取文件、按扩展名猜 content-type，拼 multipart 正文；文件不存在在发请求前拒（`file-not-found`）；
+- **跨域节点**：节点可写 `baseUrl`（如 `https://c5.pcs.baidu.com`），缺省才用链级源；
+- **文件派生值**：节点可写 `hashes: { "body.block_list": "md5-array:$inputs.filePath" }`，运行期算 md5/sha1，支持 `md5` / `md5-array` / `sha1`；
+- **业务码校验**：节点可写 `expect: { path: body.errno, equals: 0 }`；HTTP 200 但业务码不符 → `node-business-error`，不再假绿；
 - **绑定值转换**：边可写 `transform: string | json | array-json`。`array-json` 把标量包成数组再 JSON 序列化（如网盘 `fs_id` → `fid_list` 需要的 `"[123]"`），不做隐式转换；
 - **数组选择**：边可写 `pick: { match: { field, equals }, field? }`，从数组出参里按字段值选元素再取字段（替代脆弱的 `list[3]` 下标）；
 - **鉴权误判修正**：采集期页面脚本拿不到 `cookie` 头时，卡可能被标成 `auth: none`；可在卡文件里把它改成 `cookie-session`，执行期就会按来源 captureId 注入本地 cookie。
