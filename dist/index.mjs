@@ -161,7 +161,7 @@ function clone(source, refs = /* @__PURE__ */ new Map()) {
 * @param strict - whether to require strict data equality outside volatile references.
 * @returns whether the values compare equal.
 */
-function deepEqual(a, b, strict) {
+function deepEqual$1(a, b, strict) {
 	const ancestors = /* @__PURE__ */ new Set();
 	function compare(a, b) {
 		if (a === b) return true;
@@ -443,7 +443,7 @@ Schema.prototype.pattern = function pattern(regexp) {
 };
 Schema.prototype.simplify = function simplify(value) {
 	if (isVolatile(value)) value = value.get();
-	if (deepEqual(value, this.meta.default, this.type === "dict")) return null;
+	if (deepEqual$1(value, this.meta.default, this.type === "dict")) return null;
 	if (isNullable(value)) return value;
 	if (this.type === "object" || this.type === "dict") {
 		const result = {};
@@ -451,7 +451,7 @@ Schema.prototype.simplify = function simplify(value) {
 			const item = (this.type === "object" ? this.dict[key] : this.inner)?.simplify(value[key]);
 			if (this.type === "dict" || !isNullable(item)) result[key] = item;
 		}
-		if (deepEqual(result, this.meta.default, this.type === "dict")) return null;
+		if (deepEqual$1(result, this.meta.default, this.type === "dict")) return null;
 		return result;
 	} else if (this.type === "array" || this.type === "tuple") {
 		const result = [];
@@ -655,7 +655,7 @@ Schema.extend("never", (data, _, options) => {
 	throw new ValidationError(`expected nullable but got ${data}`, options);
 });
 Schema.extend("const", (data, { value }, options) => {
-	if (deepEqual(data, value)) return [value];
+	if (deepEqual$1(data, value)) return [value];
 	throw new ValidationError(`expected ${value} but got ${data}`, options);
 });
 function checkWithinRange(data, meta, description, options, skipMin = false) {
@@ -1288,7 +1288,7 @@ function foldSummary(runId, events, overrideStatus) {
 	else status = "failed";
 	const firstTs = numOrUndefined(events[0]?.ts);
 	const lastTs = numOrUndefined(events[events.length - 1]?.ts);
-	const bizData = plainRecord$2(result?.businessData);
+	const bizData = plainRecord$3(result?.businessData);
 	return {
 		runId,
 		flow: typeof meta?.flow === "string" ? meta.flow : "",
@@ -1314,7 +1314,7 @@ function foldSummary(runId, events, overrideStatus) {
 * 没有 `meta.chain` 的旧流程运行返回空对象——只增可选字段，旧 run 不受影响。
 */
 function chainSummaryOf(meta, bizData) {
-	const chainMeta = plainRecord$2(meta?.chain);
+	const chainMeta = plainRecord$3(meta?.chain);
 	if (chainMeta === void 0) return {};
 	const failedNode = typeof bizData?.["failedNode"] === "string" ? bizData["failedNode"] : void 0;
 	const completedRaw = bizData?.["completed"];
@@ -1331,7 +1331,7 @@ function numOrUndefined(value) {
 	return typeof value === "number" ? value : void 0;
 }
 /** 非 plain object（数组/缺失）一律 undefined。 */
-function plainRecord$2(value) {
+function plainRecord$3(value) {
 	if (value !== null && typeof value === "object" && !Array.isArray(value)) return value;
 }
 
@@ -1830,7 +1830,7 @@ function semanticName(method, urlTemplate) {
 	const last = named[named.length - 1] ?? "";
 	return last === "" ? `${method} ${host}` : `${method} ${last}`;
 }
-const TOKEN_HEADERS = /* @__PURE__ */ new Set(["authorization", "proxy-authorization"]);
+const TOKEN_HEADERS$1 = /* @__PURE__ */ new Set(["authorization", "proxy-authorization"]);
 const TOKEN_PARAM_KEYS = /* @__PURE__ */ new Set([
 	"token",
 	"access_token",
@@ -1847,7 +1847,7 @@ const TOKEN_PARAM_KEYS = /* @__PURE__ */ new Set([
 ]);
 function classifyAuth(rawUrl, requestHeaders, requestBody) {
 	const lowerHeaders = new Map(Object.keys(requestHeaders).map((k) => [k.toLowerCase(), k]));
-	const authHeader = [...lowerHeaders.keys()].find((k) => TOKEN_HEADERS.has(k));
+	const authHeader = [...lowerHeaders.keys()].find((k) => TOKEN_HEADERS$1.has(k));
 	if (authHeader !== void 0) return {
 		authType: "token-header",
 		evidence: `header:${authHeader}`
@@ -2157,6 +2157,202 @@ async function openCapturingPage(channel, onWireSample, options = {}) {
 		context,
 		page
 	};
+}
+
+//#endregion
+//#region src/capture/token-harvest.ts
+/** 单次补采最多扫描的样本数（与 `SAMPLE_LIMIT_PER_RUN` 对齐）。 */
+const TOKEN_HARVEST_SAMPLE_LIMIT = 1e3;
+/** 单次补采最多读取的既有凭证行（去重基线）。 */
+const TOKEN_HARVEST_CREDENTIAL_LIMIT = 1e3;
+/** 请求头里的 token 位置（与采集期 `classifyAuth` 的 TOKEN_HEADERS 同源）。 */
+const TOKEN_HEADERS = /* @__PURE__ */ new Set(["authorization", "proxy-authorization"]);
+/**
+* query/body 里的 token 类参数名（与采集期 `classifyAuth` 的 TOKEN_PARAM_KEYS 对齐，
+* 另补 `id_token`/`jwt`/`refresh_token` 等 OAuth 常见名）。名称大小写不敏感。
+*/
+const TOKEN_PARAM_NAMES = /* @__PURE__ */ new Set([
+	"token",
+	"access_token",
+	"access-token",
+	"accesstoken",
+	"auth_token",
+	"auth-token",
+	"authtoken",
+	"id_token",
+	"id-token",
+	"jwt",
+	"api_key",
+	"api-key",
+	"apikey",
+	"app_token",
+	"apptoken",
+	"refresh_token",
+	"refresh-token",
+	"access_key",
+	"access-key"
+]);
+function isTokenParamName(raw) {
+	const name = raw.trim().toLowerCase();
+	if (name === "") return false;
+	if (TOKEN_PARAM_NAMES.has(name)) return true;
+	return name.endsWith("_token") || name.endsWith("-token");
+}
+function headerValue(headers, name) {
+	for (const [key, value] of Object.entries(headers)) if (key.toLowerCase() === name) return value;
+}
+/** 从 URL 里检测 token 类 query 参数（`searchParams` 已解码），逐条交给 push。 */
+function collectQueryTokens(push, draftUrl) {
+	let parsed;
+	try {
+		parsed = new URL(draftUrl, "http://capture.local");
+	} catch {
+		return;
+	}
+	for (const [name, value] of parsed.searchParams.entries()) {
+		if (!isTokenParamName(name) || value === "") continue;
+		push({
+			location: "query",
+			name,
+			value
+		});
+	}
+}
+/** 从 JSON 正文预览里检测顶层 token 类字段；坏 JSON / 非对象一律跳过。 */
+function collectBodyTokens(push, preview, contentType) {
+	if (preview === void 0 || preview.trim() === "") return;
+	if (!((contentType ?? "").toLowerCase().includes("json") || preview.trim().startsWith("{"))) return;
+	let raw;
+	try {
+		raw = JSON.parse(preview);
+	} catch {
+		return;
+	}
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
+	for (const [name, value] of Object.entries(raw)) {
+		if (!isTokenParamName(name) || typeof value !== "string" || value === "") continue;
+		push({
+			location: "body",
+			name,
+			value
+		});
+	}
+}
+/**
+* 检测一条请求样本里的 token 凭证。
+*
+* 返回顺序固定（header → query → body，各自按出现顺序），同一次检测内按
+* `name + url + value` 去重；不读盘、不写盘。
+*/
+function detectTokenCredentials(sample) {
+	const drafts = [];
+	const seen = /* @__PURE__ */ new Set();
+	const push = (value) => {
+		const name = `${value.location}:${value.name.toLowerCase()}`;
+		const key = `${name}\u0000${sample.url}\u0000${value.value}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		drafts.push({
+			kind: "token",
+			name,
+			url: sample.url,
+			value
+		});
+	};
+	for (const [rawName, rawValue] of Object.entries(sample.requestHeaders)) {
+		const name = rawName.toLowerCase();
+		if (!TOKEN_HEADERS.has(name)) continue;
+		const value = rawValue.trim();
+		if (value === "") continue;
+		push({
+			location: "header",
+			name,
+			value
+		});
+	}
+	collectQueryTokens(push, sample.url);
+	collectBodyTokens(push, sample.requestBodyPreview, sample.contentType);
+	return drafts;
+}
+/** 解析 `value_json` → token 值；坏 JSON/字段缺失返回 `undefined`（坏行不炸批）。 */
+function tokenValueOfJson(valueJson) {
+	if (typeof valueJson !== "string" || valueJson === "") return void 0;
+	let raw;
+	try {
+		raw = JSON.parse(valueJson);
+	} catch {
+		return;
+	}
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
+	const record = raw;
+	const location = record["location"];
+	const name = record["name"];
+	const value = record["value"];
+	if (location !== "header" && location !== "query" && location !== "body") return void 0;
+	if (typeof name !== "string" || name === "") return void 0;
+	if (typeof value !== "string" || value === "") return void 0;
+	return {
+		location,
+		name,
+		value
+	};
+}
+/** token 类 query 参数值打码：`?access_token=SECRET` → `?access_token=***`。 */
+function maskedUrlOf(url) {
+	let parsed;
+	try {
+		parsed = new URL(url, "http://capture.local");
+	} catch {
+		return url;
+	}
+	let changed = false;
+	for (const name of [...parsed.searchParams.keys()]) {
+		if (!isTokenParamName(name)) continue;
+		parsed.searchParams.set(name, "***");
+		changed = true;
+	}
+	if (!changed) return url;
+	return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url) ? parsed.toString() : `${parsed.pathname}${parsed.search}`;
+}
+function tokenKeyOf(name, url, value) {
+	return `${name}\u0000${url}\u0000${value}`;
+}
+/**
+* 扫一个 captureId 的请求样本，把还没落库的 token 写成 `credential_events(kind='token')`。
+*
+* 去重键是 `name + 落库 url + value`：重复调用是幂等的（第二次返回 0）。
+* 返回新增条数；调用方负责吞异常（补采失败不该打断采集收口）。
+*/
+function harvestTokenCredentials(store, captureId) {
+	const existing = /* @__PURE__ */ new Set();
+	for (const row of store.listCredentials(captureId, TOKEN_HARVEST_CREDENTIAL_LIMIT)) {
+		if (row.kind !== "token") continue;
+		const value = tokenValueOfJson(row.valueJson);
+		if (value === void 0) continue;
+		existing.add(tokenKeyOf(row.name, row.url, value.value));
+	}
+	const seen = /* @__PURE__ */ new Set();
+	let added = 0;
+	const now = Date.now();
+	for (const sample of store.listSamples(captureId, TOKEN_HARVEST_SAMPLE_LIMIT)) {
+		const contentType = headerValue(sample.requestHeaders, "content-type");
+		const drafts = detectTokenCredentials({
+			url: sample.url,
+			method: sample.method,
+			requestHeaders: sample.requestHeaders,
+			...sample.requestBodyPreview === void 0 ? {} : { requestBodyPreview: sample.requestBodyPreview },
+			...contentType === void 0 ? {} : { contentType }
+		});
+		for (const draft of drafts) {
+			const url = maskedUrlOf(draft.url);
+			const key = tokenKeyOf(draft.name, url, draft.value.value);
+			if (seen.has(key) || existing.has(key)) continue;
+			seen.add(key);
+			store.upsertCredential(captureId, "token", url, draft.name, now, draft.value);
+			added += 1;
+		}
+	}
+	return added;
 }
 
 //#endregion
@@ -2472,6 +2668,9 @@ function makeAutonomousRun(deps, captureId, taskType, entry, args) {
 					}
 					if (browserClosed) return { status: "killed" };
 					for (const c of await context.cookies()) deps.store.upsertCredential(captureId, "cookie", String(c["domain"] ?? ""), String(c["name"] ?? ""), Date.now(), c);
+					try {
+						harvestTokenCredentials(deps.store, captureId);
+					} catch {}
 					deps.store.finishRun(captureId, "done", void 0);
 					return {
 						status: "completed",
@@ -3413,6 +3612,7 @@ const InterfaceCardSchema = Schema.object({
 	inputs: Schema.array(IoFieldSchema).default([]),
 	outputs: Schema.array(IoFieldSchema).default([]),
 	auth: Schema.string(),
+	authEvidence: Schema.string(),
 	sources: Schema.array(CardSourceSchema),
 	name: Schema.string()
 });
@@ -3498,6 +3698,14 @@ function issueTargetOf(path) {
 	const hit = /^(nodes|edges|inputs|meta)(\[\d+\])?/.exec(path);
 	if (hit) return `${hit[1]}${hit[2] ?? ""}`;
 	return path || "chain";
+}
+/**
+* IF-2 的错误码归类：整批问题都是"卡没导入"时给 `card-not-imported`（提示先跑 IF-1），
+* 其余一律 `invalid-chain`。混合时按 `invalid-chain` 报，但 issues 里逐条仍带各自 code。
+*/
+function chainErrorCode(issues) {
+	if (issues.length > 0 && issues.every((issue) => issue.code === "card-not-imported")) return "card-not-imported";
+	return "invalid-chain";
 }
 /** 字段路径 → 段数组；`[0]`/`[*]`/`[]` 都归一成 `[*]`（卡模板与手写路径才能对上）。 */
 function fieldSegments(path) {
@@ -4822,7 +5030,7 @@ function matchType(value, expectedType) {
 		};
 	}
 }
-function failureOf(code, message) {
+function failureOf$1(code, message) {
 	return {
 		ok: false,
 		failure: {
@@ -4832,7 +5040,7 @@ function failureOf(code, message) {
 	};
 }
 function nullFailure(path, where) {
-	return failureOf("null-value", `绑定路径「${path}」在${where}处取到 null/undefined，不能把空值传给下游`);
+	return failureOf$1("null-value", `绑定路径「${path}」在${where}处取到 null/undefined，不能把空值传给下游`);
 }
 /** 路径求值里的每个中间值都不许是 null/undefined（显式缺值要如实报）。 */
 function guardNull(value, path, where) {
@@ -4841,8 +5049,8 @@ function guardNull(value, path, where) {
 /** 读对象字段；字段不存在才是 `path-not-found`，字段存在但值是 null 交给 guard。 */
 function readProperty(value, name, path, where) {
 	if (value === null || value === void 0) return nullFailure(path, where);
-	if (typeof value !== "object" || Array.isArray(value)) return failureOf("path-not-found", `绑定路径「${path}」在${where}处期望对象，实际类型 ${typeName(value)}`);
-	if (!(name in value)) return failureOf("path-not-found", `绑定路径「${path}」在${where}处未命中：字段「${name}」不存在`);
+	if (typeof value !== "object" || Array.isArray(value)) return failureOf$1("path-not-found", `绑定路径「${path}」在${where}处期望对象，实际类型 ${typeName(value)}`);
+	if (!(name in value)) return failureOf$1("path-not-found", `绑定路径「${path}」在${where}处未命中：字段「${name}」不存在`);
 	return {
 		ok: true,
 		value: value[name]
@@ -4852,7 +5060,7 @@ function readProperty(value, name, path, where) {
 function applyIndexes(value, indexes, segments, step, where, path) {
 	const head = indexes[0];
 	if (head === void 0) return evalSegments(value, segments, step + 1, path);
-	if (!Array.isArray(value)) return failureOf("path-not-found", `绑定路径「${path}」在${where}处期望数组，实际类型 ${typeName(value)}`);
+	if (!Array.isArray(value)) return failureOf$1("path-not-found", `绑定路径「${path}」在${where}处期望数组，实际类型 ${typeName(value)}`);
 	if (head === "wildcard") {
 		const rest = indexes.slice(1);
 		const projected = [];
@@ -4866,7 +5074,7 @@ function applyIndexes(value, indexes, segments, step, where, path) {
 			value: projected
 		};
 	}
-	if (head >= value.length) return failureOf("path-not-found", `绑定路径「${path}」在${where}处下标 ${head} 越界（数组长度 ${value.length}）`);
+	if (head >= value.length) return failureOf$1("path-not-found", `绑定路径「${path}」在${where}处下标 ${head} 越界（数组长度 ${value.length}）`);
 	const element = value[head];
 	const missing = guardNull(element, path, where);
 	if (missing) return missing;
@@ -5687,6 +5895,57 @@ function mergeCredentialHeaders(existing, injected) {
 	}
 	return out;
 }
+/** 参与二次脱敏的最小值长度：太短的值会把正常业务文本打碎。 */
+const MIN_SECRET_LENGTH = 4;
+/**
+* 把凭证 query 参数拼进 URL（R-4 M3 token-param）。
+*
+* - 同名参数以凭证值为准（`searchParams.set`），URL 其余部分原样保留；
+* - 编码交给 `URL` 的序列化（空格→`+`、`&`/`=` 等百分号编码），不手拼字符串；
+* - 非法 URL / 非 http(s) / 空参数表原样返回，不抛。
+*/
+function withQueryParams(url, params) {
+	if (params === void 0) return url;
+	const entries = Object.entries(params).filter(([name]) => name !== "");
+	if (entries.length === 0) return url;
+	let parsed;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return url;
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return url;
+	for (const [name, value] of entries) parsed.searchParams.set(name, value);
+	return parsed.toString();
+}
+/**
+* 敏感值集合：去空/去短（< 4 字符，避免打碎正常文本）、去重、按长度降序。
+*
+* 降序是为了先替换长值：当短值恰好是长值子串时（如 `abc` 与 `abcdef`），
+* 先替换长值才不会留下半截泄漏。返回值只在内存里用，不落任何地方。
+*/
+function redactSecretValues(values) {
+	const unique = /* @__PURE__ */ new Set();
+	for (const value of values) {
+		if (typeof value !== "string") continue;
+		if (value.length < MIN_SECRET_LENGTH) continue;
+		unique.add(value);
+	}
+	return [...unique].sort((left, right) => right.length - left.length);
+}
+/**
+* 文本脱敏：把已知凭证值替换成 `***`。
+*
+* 用在「服务端把凭证回显进响应正文/URL」这类二次泄漏面：请求 URL 摘要、正文摘要、
+* `emitted` 出参、错误消息都要过这一道。secrets 为空时原样返回。
+*/
+function redactSecretsInText(text, secrets) {
+	const list = redactSecretValues(secrets);
+	if (list.length === 0) return text;
+	let out = text;
+	for (const secret of list) out = out.split(secret).join("***");
+	return out;
+}
 /** 由匹配结果构造 `applied` 摘要（名字/域/来源，不含值）。 */
 function appliedCredentialApplication(selection, captureIds) {
 	return {
@@ -6155,6 +6414,8 @@ async function executeChainRun(deps, prepared, input) {
 		}
 		let request = built.request;
 		let credentialApplication;
+		/** token-param 注入的 query 参数：只用于拼真实 URL 与脱敏，值绝不进事件/回执。 */
+		let injectedQuery = {};
 		if (input.credentials !== void 0) {
 			const resolution = input.credentials({
 				card,
@@ -6167,6 +6428,13 @@ async function executeChainRun(deps, prepared, input) {
 				...request,
 				headers: mergeCredentialHeaders(request.headers, resolution.headers)
 			};
+			if (resolution.query !== void 0 && Object.keys(resolution.query).length > 0) {
+				injectedQuery = resolution.query;
+				request = {
+					...request,
+					url: withQueryParams(request.url, resolution.query)
+				};
+			}
 			result.credentials = credentialApplication;
 		}
 		if (runtimeCookieHeader !== void 0) {
@@ -6176,7 +6444,7 @@ async function executeChainRun(deps, prepared, input) {
 				headers: withCookieHeader(request.headers, merged)
 			};
 		}
-		let secrets = credentialApplication?.status === "applied" ? secretValuesOf(request.headers) : [];
+		let secrets = credentialApplication?.status === "applied" ? secretValuesOf(request.headers, injectedQuery) : [];
 		const sensitive = input.sensitive === true;
 		if (secrets.length > 0) {
 			for (const binding of bindings) if (binding.valuePreview !== void 0) binding.valuePreview = redactSecrets(binding.valuePreview, secrets);
@@ -6186,16 +6454,16 @@ async function executeChainRun(deps, prepared, input) {
 		}
 		const requestDigest = {
 			method: request.method,
-			url: request.url,
+			url: digestUrlFor(request.url, injectedQuery, secrets),
 			headers: redactHeaders(request.headers),
 			...request.body === void 0 ? {} : { bodyPreview: bodyPreviewOf(request.body, secrets, sensitive) }
 		};
 		result.requestDigest = requestDigest;
-		result.url = request.url;
+		result.url = requestDigest.url;
 		emit({
 			event: "step",
 			id: nodeId,
-			action: `${request.method} ${request.url}`,
+			action: `${request.method} ${requestDigest.url}`,
 			status: "start",
 			data: {
 				card: planNode.cardId,
@@ -6204,7 +6472,7 @@ async function executeChainRun(deps, prepared, input) {
 				...credentialApplication === void 0 ? {} : { credentials: credentialApplication }
 			}
 		});
-		input.onProgress?.(`▶ ${nodeId}：${request.method} ${request.url}`);
+		input.onProgress?.(`▶ ${nodeId}：${request.method} ${requestDigest.url}`);
 		const sendRequest = async (target) => httpRequest({
 			method: target.method,
 			url: target.url,
@@ -6292,14 +6560,15 @@ async function executeChainRun(deps, prepared, input) {
 				...request,
 				headers: withCookieHeader(request.headers, freshCookie)
 			};
-			secrets = secretValuesOf(request.headers);
+			secrets = secretValuesOf(request.headers, injectedQuery);
+			const replayDigestUrl = digestUrlFor(request.url, injectedQuery, secrets);
 			result.requestDigest = {
 				method: request.method,
-				url: request.url,
+				url: replayDigestUrl,
 				headers: redactHeaders(request.headers),
 				...request.body === void 0 ? {} : { bodyPreview: bodyPreviewOf(request.body, secrets, sensitive) }
 			};
-			result.url = request.url;
+			result.url = replayDigestUrl;
 			outcome = await sendRequest(request);
 			result.attempts += outcome.ok ? outcome.response.attempts : outcome.attempts;
 		}
@@ -6805,7 +7074,10 @@ function authRequired(card) {
 function authHint(card, status, application, relogin) {
 	if (relogin?.success === true) return `HTTP ${status}：已自动换票（登录链 ${relogin.runId ?? "本次运行"}）并重放一次，仍被拒；登录态或账号权限仍有问题。请检查登录链/账号权限后重跑，不要原样重试`;
 	if (relogin?.attempted === true && relogin.success === false) return `HTTP ${status}：自动换票失败（${relogin.code ?? "relogin-failed"}）：${relogin.message ?? "未知原因"}；需人工重新登录并更新凭证`;
-	if (application?.status === "applied") return `HTTP ${status}：已注入 ${application.names.length} 个 cookie（${application.names.join("、")}）但仍被拒；凭证可能过期。可传 relogin 登录链自动换票，或重新采集/登录后重跑`;
+	if (application?.status === "applied") {
+		const names = application.names.join("、");
+		return `HTTP ${status}：${application.header === "cookie" ? `已注入 ${application.names.length} 个 cookie（${names}）` : application.header === "authorization" ? `已注入 authorization 头（${names}）` : application.header === "query" ? `已注入 query token（${names}）` : `已注入 ${application.names.length} 个凭证（${names}）`}但仍被拒；凭证可能过期或账号权限不足。可传 relogin 登录链自动换票，或重新采集/登录后重跑`;
+	}
 	const reason = application === void 0 ? "本次运行未配置凭证注入（R-4 注入缝未装配）" : application.status === "expired" ? "匹配到的 cookie 全部过期" : application.status === "unsupported" ? application.reason ?? "token 型凭证未采集" : application.reason ?? "没有可用凭证";
 	return `HTTP ${status}：该卡声明了鉴权（${String(card.auth)}），但没有注入可用凭证（${reason}）；本次未执行自动换票`;
 }
@@ -6832,31 +7104,69 @@ function previewText(text) {
 	if (buffer.byteLength <= DIGEST_PREVIEW_BYTES) return text ?? "";
 	return buffer.subarray(0, DIGEST_PREVIEW_BYTES).toString("utf8");
 }
+/** 留痕里必须二次脱敏的 token 类头（与 http.ts 的 SECRET_HEADERS 对齐）。 */
+const TOKEN_SECRET_HEADERS = /* @__PURE__ */ new Set([
+	"authorization",
+	"proxy-authorization",
+	"x-api-key",
+	"x-auth-token",
+	"x-csrf-token"
+]);
 /**
-* 从已注入的请求头里取「需要从留痕中抹掉的值」。
+* 请求 URL 的留痕版本：先按注入的 query 参数名打码，再按已知凭证值全文替换。
 *
-* 只认 cookie 头的值；太短（< 4 字符）的值不参与替换，避免把正常业务文本打碎。
-* 这些值只在本次节点的内存里存在，函数返回后不写任何地方。
+* token-param 的凭证就在 URL 里，原样落 `events.ndjson`/回执就是泄漏；参数名保留
+* 是为了让运行记录还能回答「带了哪个参数」，值一律 `***`。
 */
-function secretValuesOf(headers) {
-	const cookie = Object.entries(headers).find(([name]) => name.toLowerCase() === "cookie")?.[1];
-	if (cookie === void 0 || cookie === "") return [];
+function digestUrlFor(url, query, secrets) {
+	const names = Object.keys(query);
+	return redactSecrets(names.length === 0 ? url : withQueryParams(url, Object.fromEntries(names.map((name) => [name, "***"]))), secrets);
+}
+/**
+* 从已注入的凭证里取「需要从留痕中抹掉的值」。
+*
+* 覆盖三类（R-4 M3 起）：cookie 值、token 头值（`Bearer xxx` 连同裸 token）、
+* query token 值（原始值 + URL 编码形态）。太短（< 4 字符）的值不参与替换，
+* 避免把正常业务文本打碎。这些值只在本次节点的内存里存在，函数返回后不写任何地方。
+*/
+function secretValuesOf(headers, query = {}) {
 	const secrets = /* @__PURE__ */ new Set();
-	for (const part of cookie.split(";")) {
-		const trimmed = part.trim();
-		const at = trimmed.indexOf("=");
-		if (at === -1) continue;
-		const value = trimmed.slice(at + 1);
-		if (value.length >= 4) secrets.add(value);
+	const add = (raw) => {
+		if (raw === void 0) return;
+		const value = raw.trim();
+		if (value.length < 4) return;
+		secrets.add(value);
+		const space = value.indexOf(" ");
+		if (space > 0) {
+			const tail = value.slice(space + 1).trim();
+			if (tail.length >= 4) secrets.add(tail);
+		}
+	};
+	for (const [name, headerValue] of Object.entries(headers)) {
+		const lower = name.toLowerCase();
+		if (lower === "cookie") {
+			for (const part of headerValue.split(";")) {
+				const trimmed = part.trim();
+				const at = trimmed.indexOf("=");
+				if (at === -1) continue;
+				add(trimmed.slice(at + 1));
+			}
+			continue;
+		}
+		if (TOKEN_SECRET_HEADERS.has(lower)) add(headerValue);
+	}
+	for (const value of Object.values(query)) {
+		add(value);
+		add(value.replace(/ /g, "+"));
+		try {
+			add(encodeURIComponent(value));
+		} catch {}
 	}
 	return [...secrets];
 }
-/** 文本脱敏：把已知凭证值替换成 `***`。 */
+/** 文本脱敏：把已知凭证值替换成 `***`（先长后短，避免半截泄漏）。 */
 function redactSecrets(text, secrets) {
-	if (secrets.length === 0) return text;
-	let out = text;
-	for (const secret of secrets) out = out.split(secret).join("***");
-	return out;
+	return redactSecretsInText(text, secrets);
 }
 /** 递归脱敏（只用于事件里的 emitted 值，不改变绑定求值本身）。 */
 function redactRecord(record, secrets) {
@@ -7083,6 +7393,33 @@ function persistCookies(storePath, origin, setCookies, now) {
 }
 
 //#endregion
+//#region src/execute/throttle.ts
+/**
+* 创建进程内单飞节流器。
+*
+* 在飞表只存 Promise：settle 后从表中删除，因此不会缓存「上一次的失败」——
+* 下一次触发换票必须重新执行 `fn`（失败不该被静默复用）。
+*/
+function createReloginThrottle() {
+	const inflight = /* @__PURE__ */ new Map();
+	return { run(key, fn) {
+		const existing = inflight.get(key);
+		if (existing !== void 0) return existing;
+		let task;
+		try {
+			task = Promise.resolve(fn());
+		} catch (error) {
+			task = Promise.reject(error);
+		}
+		const shared = task.finally(() => {
+			if (inflight.get(key) === shared) inflight.delete(key);
+		});
+		inflight.set(key, shared);
+		return shared;
+	} };
+}
+
+//#endregion
 //#region src/orchestration/application.ts
 /**
 * 编排域的应用层：把 IF-1/2/3 的判定与错误折叠收在一处，工具壳（`src/tools.ts`）
@@ -7094,18 +7431,26 @@ function persistCookies(storePath, origin, setCookies, now) {
 *
 * @module dsh-dataforge/orchestration/application
 */
+/**
+* R-4 M3：跨运行换票单飞。key = 主链 origin + 登录链 site/flow。
+*
+* M2 的单飞只在一条 run 内；这里提到进程级：同一站点同一登录链被并发运行时，
+* 只打一次登录接口，其余运行等待并共享结果（避免账号锁定与握手风暴）。
+* 失败不缓存——settle 后清理，下一次触发重新登录。
+*/
+const reloginThrottle = createReloginThrottle();
 /** 逐条问题时给模型看的行：`nodes[0]: reason`。 */
 function issueLines(issues) {
 	return issues.map((issue) => `${issue.target}：${issue.reason}`);
 }
-function toChainIssues(issues) {
+function toChainIssues$1(issues) {
 	return issues.map((issue) => ({
 		target: issue.target,
 		code: issue.code,
 		reason: issue.reason
 	}));
 }
-function messageOf$3(error) {
+function messageOf$4(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function isLibraryError(error) {
@@ -7123,7 +7468,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `解析工作区根失败：${messageOf$3(error)}`,
+			message: `解析工作区根失败：${messageOf$4(error)}`,
 			hints: []
 		};
 	}
@@ -7154,7 +7499,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `导入接口库失败：${messageOf$3(error)}`,
+			message: `导入接口库失败：${messageOf$4(error)}`,
 			hints: []
 		};
 	}
@@ -7173,7 +7518,7 @@ async function upsertChainForTool(deps, exec, args) {
 			ok: false,
 			code: saved.issues.some((issue) => issue.code === "card-not-imported") ? "card-not-imported" : "invalid-chain",
 			message: saved.issues.some((issue) => issue.code === "card-not-imported") ? "链引用的接口卡不在项目接口库：先跑 dataforge_library_import" : `链未通过校验（${saved.issues.length} 条）：修好再提交，没有落盘`,
-			issues: toChainIssues(saved.issues)
+			issues: toChainIssues$1(saved.issues)
 		};
 		return {
 			ok: true,
@@ -7185,7 +7530,7 @@ async function upsertChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `落盘链失败：${messageOf$3(error)}`
+			message: `落盘链失败：${messageOf$4(error)}`
 		};
 	}
 }
@@ -7216,7 +7561,7 @@ async function getChainForTool(deps, exec, args) {
 		code: loaded.code,
 		message: loaded.message,
 		versions: loaded.availableVersions,
-		..."issues" in loaded && loaded.issues !== void 0 ? { issues: toChainIssues(loaded.issues) } : {},
+		..."issues" in loaded && loaded.issues !== void 0 ? { issues: toChainIssues$1(loaded.issues) } : {},
 		..."path" in loaded && loaded.path !== void 0 ? { path: loaded.path } : {}
 	};
 	return {
@@ -7383,99 +7728,104 @@ function jobDetailOf(result) {
 */
 function createReloginRunner(deps, workspaceRoot, expectedBaseUrl) {
 	return async (spec, signal) => {
-		if (spec.site.trim() === "" || spec.flow.trim() === "") return {
-			ok: false,
-			code: "relogin-unavailable",
-			message: "登录链的 site / flow 不能为空"
-		};
-		const loaded = loadChain(workspaceRoot, spec.site, spec.flow, { ...spec.version === void 0 ? {} : { version: spec.version } });
-		if (!loaded.ok) return {
-			ok: false,
-			code: "relogin-unavailable",
-			message: `登录链不可用：${loaded.message}`
-		};
-		const doc = loaded.doc;
-		if (doc.kind !== "interface-chain") return {
-			ok: false,
-			code: "relogin-unavailable",
-			message: `登录链必须是 interface-chain（当前 ${doc.kind}）`
-		};
-		const cards = cardsForChain(workspaceRoot, doc);
-		const inputCheck = validateChainInputs(doc, spec.inputs);
-		if (!inputCheck.ok) return {
-			ok: false,
-			code: "relogin-unavailable",
-			message: `登录链入参不合法：${inputCheck.message}`
-		};
-		const base = resolveChainBaseUrl(doc, cards, spec.baseUrl);
-		if (!base.ok) return {
-			ok: false,
-			code: "relogin-unavailable",
-			message: `登录链 baseUrl 无法确定：${base.message}`
-		};
-		const planned = buildPlan(doc, cards, spec.inputs ?? {}, base.baseUrl);
-		if (!planned.ok) return {
-			ok: false,
-			code: "relogin-unavailable",
-			message: `登录链不可执行：${planned.message}`
-		};
-		const expectedOrigin = originOf(expectedBaseUrl);
-		const loginOrigin = originOf(planned.plan.baseUrl);
-		if (expectedOrigin !== void 0 && loginOrigin !== void 0 && expectedOrigin !== loginOrigin) return {
-			ok: false,
-			code: "relogin-unavailable",
-			message: `登录链与主链不同源（登录 ${loginOrigin} / 主链 ${expectedOrigin}）：拒绝跨站复用凭证`
-		};
-		const cookies = [];
-		const chainDeps = {
-			dataRoot: deps.dataRoot,
-			config: deps.chain
-		};
-		const runInput = {
-			doc,
-			cards,
-			plan: planned.plan,
-			inputs: spec.inputs ?? {},
-			baseUrl: planned.plan.baseUrl,
-			chainPath: chainPathForRecord(workspaceRoot, loaded.path),
-			sensitive: true,
-			redactParams: true,
-			onSetCookies: (values) => {
-				for (const value of values) cookies.push(value);
-			}
-		};
-		const prepared = prepareChainRun(chainDeps, runInput);
-		const result = await executeChainRun(chainDeps, prepared, {
-			...runInput,
-			signal
-		});
-		if (!result.ok) return {
-			ok: false,
-			code: "relogin-failed",
-			message: result.message,
-			runId: prepared.runId
-		};
-		if (result.summary.status !== "completed") return {
-			ok: false,
-			code: "relogin-failed",
-			message: result.summary.message ?? `登录链未完成（${result.summary.status}）`,
-			runId: prepared.runId
-		};
-		const cookieHeader = cookieHeaderFromSetCookies(cookies);
-		if (cookieHeader === void 0) return {
-			ok: false,
-			code: "relogin-failed",
-			message: "登录链执行完成但没有下发可用的 set-cookie（登录接口可能不是 cookie 型）",
-			runId: prepared.runId
-		};
-		const persisted = deps.credentialStorePath !== void 0 && expectedOrigin !== void 0 ? persistCookies(deps.credentialStorePath, expectedOrigin, cookies, Date.now()) : 0;
-		return {
-			ok: true,
-			cookieHeader,
-			cookieNames: cookieNamesOf(cookieHeader),
-			runId: prepared.runId,
-			...persisted > 0 ? { persisted } : {}
-		};
+		const throttleKey = `${originOf(expectedBaseUrl) ?? "unknown"}|${spec.site}/${spec.flow}`;
+		return reloginThrottle.run(throttleKey, () => reloginOnce(deps, workspaceRoot, expectedBaseUrl, spec, signal));
+	};
+}
+/** 真正执行一条登录链（单飞的实际负载；同一时刻同 key 只有一个在飞）。 */
+async function reloginOnce(deps, workspaceRoot, expectedBaseUrl, spec, signal) {
+	if (spec.site.trim() === "" || spec.flow.trim() === "") return {
+		ok: false,
+		code: "relogin-unavailable",
+		message: "登录链的 site / flow 不能为空"
+	};
+	const loaded = loadChain(workspaceRoot, spec.site, spec.flow, { ...spec.version === void 0 ? {} : { version: spec.version } });
+	if (!loaded.ok) return {
+		ok: false,
+		code: "relogin-unavailable",
+		message: `登录链不可用：${loaded.message}`
+	};
+	const doc = loaded.doc;
+	if (doc.kind !== "interface-chain") return {
+		ok: false,
+		code: "relogin-unavailable",
+		message: `登录链必须是 interface-chain（当前 ${doc.kind}）`
+	};
+	const cards = cardsForChain(workspaceRoot, doc);
+	const inputCheck = validateChainInputs(doc, spec.inputs);
+	if (!inputCheck.ok) return {
+		ok: false,
+		code: "relogin-unavailable",
+		message: `登录链入参不合法：${inputCheck.message}`
+	};
+	const base = resolveChainBaseUrl(doc, cards, spec.baseUrl);
+	if (!base.ok) return {
+		ok: false,
+		code: "relogin-unavailable",
+		message: `登录链 baseUrl 无法确定：${base.message}`
+	};
+	const planned = buildPlan(doc, cards, spec.inputs ?? {}, base.baseUrl);
+	if (!planned.ok) return {
+		ok: false,
+		code: "relogin-unavailable",
+		message: `登录链不可执行：${planned.message}`
+	};
+	const expectedOrigin = originOf(expectedBaseUrl);
+	const loginOrigin = originOf(planned.plan.baseUrl);
+	if (expectedOrigin !== void 0 && loginOrigin !== void 0 && expectedOrigin !== loginOrigin) return {
+		ok: false,
+		code: "relogin-unavailable",
+		message: `登录链与主链不同源（登录 ${loginOrigin} / 主链 ${expectedOrigin}）：拒绝跨站复用凭证`
+	};
+	const cookies = [];
+	const chainDeps = {
+		dataRoot: deps.dataRoot,
+		config: deps.chain
+	};
+	const runInput = {
+		doc,
+		cards,
+		plan: planned.plan,
+		inputs: spec.inputs ?? {},
+		baseUrl: planned.plan.baseUrl,
+		chainPath: chainPathForRecord(workspaceRoot, loaded.path),
+		sensitive: true,
+		redactParams: true,
+		onSetCookies: (values) => {
+			for (const value of values) cookies.push(value);
+		}
+	};
+	const prepared = prepareChainRun(chainDeps, runInput);
+	const result = await executeChainRun(chainDeps, prepared, {
+		...runInput,
+		signal
+	});
+	if (!result.ok) return {
+		ok: false,
+		code: "relogin-failed",
+		message: result.message,
+		runId: prepared.runId
+	};
+	if (result.summary.status !== "completed") return {
+		ok: false,
+		code: "relogin-failed",
+		message: result.summary.message ?? `登录链未完成（${result.summary.status}）`,
+		runId: prepared.runId
+	};
+	const cookieHeader = cookieHeaderFromSetCookies(cookies);
+	if (cookieHeader === void 0) return {
+		ok: false,
+		code: "relogin-failed",
+		message: "登录链执行完成但没有下发可用的 set-cookie（登录接口可能不是 cookie 型）",
+		runId: prepared.runId
+	};
+	const persisted = deps.credentialStorePath !== void 0 && expectedOrigin !== void 0 ? persistCookies(deps.credentialStorePath, expectedOrigin, cookies, Date.now()) : 0;
+	return {
+		ok: true,
+		cookieHeader,
+		cookieNames: cookieNamesOf(cookieHeader),
+		runId: prepared.runId,
+		...persisted > 0 ? { persisted } : {}
 	};
 }
 /**
@@ -7502,7 +7852,7 @@ async function chainRunForTool(deps, exec, args) {
 			accepted: false,
 			gate: "blocked",
 			code: "invalid-chain",
-			message: `解析工作区根失败：${messageOf$3(error)}`
+			message: `解析工作区根失败：${messageOf$4(error)}`
 		};
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
@@ -7519,7 +7869,7 @@ async function chainRunForTool(deps, exec, args) {
 			accepted: false,
 			code: "invalid-chain",
 			message: loaded.message,
-			issues: toChainIssues(loaded.issues),
+			issues: toChainIssues$1(loaded.issues),
 			versions: loaded.availableVersions
 		};
 	}
@@ -7740,6 +8090,266 @@ function listChainRunsForTool(deps, args) {
 /** 非 plain object（数组/缺失）一律 undefined。 */
 function plainRecordOf(value) {
 	if (value !== null && typeof value === "object" && !Array.isArray(value)) return value;
+}
+
+//#endregion
+//#region src/orchestration/bind.ts
+function messageOf$3(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+function toChainIssues(issues) {
+	return issues.map((issue) => ({
+		target: issue.target,
+		code: issue.code,
+		reason: issue.reason
+	}));
+}
+/**
+* 入参边的形状兜底。
+*
+* 为什么不把这些也交给 saveChain：`from`/`to` 不是字符串时合并逻辑自身会崩，`pick` 形状坏
+* 时 R-1 的 normalizePick 会**静默丢掉** pick（schema 里是 Schema.any），agent 会以为
+* 「按字段选元素」生效了。这里只挡形状（不是语义：字段是否存在、卡是否存在仍由 saveChain 判），
+* 并且一次把坏边全报完，沿用 validate.ts 的「报全不 fail-fast」纪律。
+*/
+function specShapeIssues(specs) {
+	const issues = [];
+	specs.forEach((spec, index) => {
+		const target = `edges[${index}]`;
+		const from = typeof spec?.from === "string" ? spec.from : "";
+		const to = typeof spec?.to === "string" ? spec.to : "";
+		if (from.trim() === "" || to.trim() === "") {
+			issues.push({
+				target,
+				code: "invalid-chain",
+				reason: "from/to 必须是非空字符串：from 是 <节点 id>.<出参路径> 或 $inputs.<槽位名>，to 是 <节点 id>.<入参路径>"
+			});
+			return;
+		}
+		const pickProblem = pickShapeProblemOf(spec.pick);
+		if (pickProblem !== void 0) issues.push({
+			target,
+			code: "invalid-chain",
+			reason: pickProblem
+		});
+	});
+	return issues;
+}
+/** pick 的形状检查（语义解释见 specShapeIssues 的注释）。 */
+function pickShapeProblemOf(pick) {
+	if (pick === void 0) return void 0;
+	if (typeof pick !== "object" || pick === null || Array.isArray(pick)) return "pick 必须是对象：{ match: { field, equals }, field? }";
+	const record = pick;
+	const match = record["match"];
+	if (typeof match !== "object" || match === null || Array.isArray(match)) return "pick.match 必须是对象：{ field, equals }";
+	const matchRecord = match;
+	const field = matchRecord["field"];
+	if (typeof field !== "string" || field.trim() === "") return "pick.match.field 必须是非空字符串（从数组元素里按哪个字段匹配）";
+	const equals = matchRecord["equals"];
+	if (typeof equals !== "string" && typeof equals !== "number" && typeof equals !== "boolean") return "pick.match.equals 必须是 string / number / boolean";
+	const take = record["field"];
+	if (take !== void 0 && (typeof take !== "string" || take.trim() === "")) return "pick.field 若给出必须是非空字符串（命中后取哪个字段；缺省取整个元素）";
+}
+/** 入参边 → 链边（不写 `suggested`：这是明确绑定，不是编译期的建议）。 */
+function edgeOf(spec) {
+	return {
+		from: spec.from,
+		to: spec.to,
+		...spec.transform === void 0 ? {} : { transform: spec.transform },
+		...spec.pick === void 0 ? {} : { pick: spec.pick }
+	};
+}
+/** 同一次调用里 `to` 重复时以后者为准；保留各个 to 最后一次出现的位置。 */
+function lastWinsByTo(specs) {
+	const lastIndex = /* @__PURE__ */ new Map();
+	specs.forEach((spec, index) => lastIndex.set(spec.to, index));
+	return specs.filter((spec, index) => lastIndex.get(spec.to) === index);
+}
+function samePick(left, right) {
+	if (left === void 0 || right === void 0) return left === right;
+	return left.match.field === right.match.field && left.match.equals === right.match.equals && left.field === right.field;
+}
+/** 两条边是否「完全相同的绑定」（比较 from/to/transform/pick；`suggested` 不参与）。 */
+function sameEdge(left, right) {
+	return left.from === right.from && left.to === right.to && left.transform === right.transform && samePick(left.pick, right.pick);
+}
+/**
+* 把入参边合入现有边集。
+*
+* 同 `to` 的既有边被整体替换（即使历史上有重复 to 也收敛成一条），新边占第一条旧边的位置，
+* 其余边的相对顺序不变——这样版本 diff 只显示真正的绑定变化。
+*/
+function mergeEdges(current, specs) {
+	let edges = current.map((edge) => ({ ...edge }));
+	const tally = {
+		added: 0,
+		replaced: 0,
+		unchanged: 0
+	};
+	for (const spec of lastWinsByTo(specs)) {
+		const incoming = edgeOf(spec);
+		const firstIndex = edges.findIndex((edge) => edge.to === incoming.to);
+		if (firstIndex === -1) {
+			edges.push(incoming);
+			tally.added += 1;
+			continue;
+		}
+		const sameTo = edges.filter((edge) => edge.to === incoming.to);
+		if (sameTo.length === 1 && sameEdge(sameTo[0], incoming)) {
+			tally.unchanged += 1;
+			continue;
+		}
+		edges = edges.filter((edge) => edge.to !== incoming.to);
+		edges.splice(firstIndex, 0, incoming);
+		tally.replaced += 1;
+	}
+	return {
+		edges,
+		tally
+	};
+}
+/**
+* 绑定回写工具入口：载链 → 合并边 → saveChain 新版本 → 回读。
+*
+* 所有链相关的失败都折成回执（不抛）：语义校验失败原样带 issues（逐条指到 edges[j]），
+* 且一定没有落盘——saveChain 的「全过才写」保证了这一点。
+*/
+async function bindChainForTool(deps, exec, args) {
+	const site = typeof args.site === "string" ? args.site : "";
+	const flow = typeof args.flow === "string" ? args.flow : "";
+	if (site.trim() === "" || flow.trim() === "") return {
+		ok: false,
+		code: "invalid-chain",
+		message: "site 与 flow 不能为空：链按「站点 / 流程」归档"
+	};
+	const specs = Array.isArray(args.edges) ? args.edges : [];
+	if (specs.length === 0) return {
+		ok: false,
+		code: "invalid-chain",
+		message: "edges 不能为空：至少给一条要回写的绑定边（from → to）",
+		site,
+		flow
+	};
+	const shapeIssues = specShapeIssues(specs);
+	if (shapeIssues.length > 0) return {
+		ok: false,
+		code: "invalid-chain",
+		message: `绑定边入参不合法（${shapeIssues.length} 条）：没有读写链`,
+		issues: toChainIssues(shapeIssues),
+		site,
+		flow
+	};
+	const workspaceRoot = await deps.resolveWorkspaceRoot(exec) ?? process.cwd();
+	let loaded;
+	try {
+		loaded = loadChain(workspaceRoot, site, flow, { ...args.version === void 0 ? {} : { version: args.version } });
+	} catch (error) {
+		return {
+			ok: false,
+			code: "invalid-chain",
+			message: `读取链失败：${messageOf$3(error)}`,
+			site,
+			flow
+		};
+	}
+	if (!loaded.ok) {
+		if (loaded.code === "chain-not-found") {
+			const hints = loaded.availableVersions.length === 0 ? ["该站点/流程还没有任何链版本：先跑 dataforge_chain_upsert 建一份链，再用本入口回写绑定边"] : [`可用版本：${loaded.availableVersions.map((version) => `v${version}`).join("、")}；不传 version 即取最新`];
+			return {
+				ok: false,
+				code: "chain-not-found",
+				message: loaded.message,
+				hints,
+				site,
+				flow
+			};
+		}
+		return {
+			ok: false,
+			code: "invalid-chain",
+			message: loaded.message,
+			issues: toChainIssues(loaded.issues),
+			path: loaded.path,
+			site,
+			flow
+		};
+	}
+	if (loaded.doc.kind !== "interface-chain") return {
+		ok: false,
+		code: "invalid-chain",
+		message: `绑定边只适用于 interface-chain（当前 ${loaded.doc.kind}）：页面动线是节点到节点的顺序，请直接 dataforge_chain_upsert`,
+		site,
+		flow
+	};
+	const merged = mergeEdges(loaded.doc.edges, specs);
+	const nextDoc = {
+		...loaded.doc,
+		edges: merged.edges
+	};
+	let saved;
+	try {
+		saved = saveChain(workspaceRoot, chainToYaml(nextDoc), { source: "agent" });
+	} catch (error) {
+		return {
+			ok: false,
+			code: "invalid-chain",
+			message: `落盘链失败：${messageOf$3(error)}`,
+			site,
+			flow
+		};
+	}
+	if (!saved.ok) {
+		const code = chainErrorCode(saved.issues);
+		return {
+			ok: false,
+			code,
+			message: code === "card-not-imported" ? "链引用的接口卡不在项目接口库：先跑 dataforge_library_import" : `绑定后的链未通过校验（${saved.issues.length} 条）：修好再提交，没有落盘`,
+			issues: toChainIssues(saved.issues),
+			site,
+			flow
+		};
+	}
+	let persisted;
+	try {
+		persisted = loadChain(workspaceRoot, saved.doc.meta.site, saved.doc.meta.flow, { version: saved.version });
+	} catch (error) {
+		return {
+			ok: false,
+			code: "invalid-chain",
+			message: `绑定已落盘为 v${saved.version}，但回读失败：${messageOf$3(error)}`,
+			version: saved.version,
+			path: saved.path,
+			site,
+			flow
+		};
+	}
+	if (!persisted.ok) return {
+		ok: false,
+		code: "invalid-chain",
+		message: `绑定已落盘为 v${saved.version}，但回读失败：${persisted.message}`,
+		version: saved.version,
+		path: saved.path,
+		site,
+		flow
+	};
+	const hints = [];
+	if (merged.tally.added === 0 && merged.tally.replaced === 0) hints.push(`绑定无变化（unchanged ${merged.tally.unchanged}）：本入口仍按 saveChain 的「每次落盘即新快照」纪律写成新版本，旧版本可回读`);
+	if (saved.warnings.length > 0) hints.push(...saved.warnings.map((issue) => `${issue.target}：${issue.reason}`));
+	return {
+		ok: true,
+		site: saved.doc.meta.site,
+		flow: saved.doc.meta.flow,
+		version: saved.version,
+		path: saved.path,
+		added: merged.tally.added,
+		replaced: merged.tally.replaced,
+		unchanged: merged.tally.unchanged,
+		edges: persisted.doc.edges.map((edge) => ({
+			from: edge.from,
+			to: edge.to
+		})),
+		...hints.length === 0 ? {} : { hints }
+	};
 }
 
 //#endregion
@@ -8424,7 +9034,7 @@ function stringifyValue(value) {
 		return String(value);
 	}
 }
-function plainRecord$1(value) {
+function plainRecord$2(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 function sourceOf(value) {
@@ -8445,7 +9055,7 @@ function probeRunsOf(input) {
 	for (const runId of listRunIds(input.dataRoot, 200)) {
 		const record = readRunRecord(input.dataRoot, runId);
 		if (record === void 0 || record["kind"] !== "probe-run") continue;
-		const probe = plainRecord$1(record["probe"]);
+		const probe = plainRecord$2(record["probe"]);
 		if (probe === void 0) continue;
 		if (probe["site"] !== input.site || probe["flow"] !== input.flow) continue;
 		if (input.version !== void 0 && probe["version"] !== input.version) continue;
@@ -8456,9 +9066,9 @@ function probeRunsOf(input) {
 		const cardId = typeof probe["cardId"] === "string" ? probe["cardId"] : "";
 		if (nodeId === "" || cardId === "") continue;
 		const provenanceRaw = record["provenance"];
-		const provenance = Array.isArray(provenanceRaw) ? provenanceRaw.filter((item) => plainRecord$1(item) !== void 0) : [];
+		const provenance = Array.isArray(provenanceRaw) ? provenanceRaw.filter((item) => plainRecord$2(item) !== void 0) : [];
 		if (provenance.length === 0) continue;
-		const values = plainRecord$1(record["values"]) ?? {};
+		const values = plainRecord$2(record["values"]) ?? {};
 		runs.push({
 			runId,
 			startedAt: typeof record["startedAt"] === "number" ? record["startedAt"] : 0,
@@ -8900,6 +9510,388 @@ async function crystalForTool(deps, exec, args) {
 		runDir,
 		warnings: applied.warnings
 	};
+}
+
+//#endregion
+//#region src/orchestration/compare.ts
+/**
+* 复跑对照（R-6 M2 / FR-6.7）：把两次 `chain-run` 的留痕并排投影成一张差异视图。
+*
+* 为什么要单独一个模块：`diagnose` 回答「一条失败的 run 断在哪」，对照要回答
+* 「换入参复跑之后什么变了、链生成值是不是重新求解」。两者都是只读投影，
+* 只是这里一次读一对 run，输出要能直接给模型看「入参 / 出参 / 节点状态」的差异。
+*
+* 只读铁律：只走 `readRunRecord` + `loadRunEvents`；不重跑、不发请求、不写留痕、
+* 不碰凭证。事件形状完全复用 R-3 已写入的事实（step done 的 `data.emitted` /
+* `data.response`、result 的 `businessData`），不发明第二套执行语义。
+*
+* @module dsh-dataforge/orchestration/compare
+*/
+/** 工具回执的 JSON 安全投影（照 `diagnoseOutputOf` 的做法，二次序列化兜底）。 */
+function compareOutputOf(value) {
+	return JSON.parse(JSON.stringify(value));
+}
+function plainRecord$1(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function stringOf$1(value) {
+	return typeof value === "string" ? value : void 0;
+}
+function numberOrUndefined$1(value) {
+	return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+/**
+* 敏感键名片段（小写子串匹配）。
+*
+* 为什么用「命中即打码」而不是精确键名表：留痕里的键名有 `access_token`、
+* `x-api-key`、`Authorization` 等各种写法，漏一个就是一次泄漏；宁可多打码。
+*/
+const SENSITIVE_KEY_MARKERS = [
+	"password",
+	"passwd",
+	"pwd",
+	"secret",
+	"token",
+	"authorization",
+	"cookie",
+	"api-key",
+	"apikey",
+	"api_key",
+	"private-key",
+	"access-key"
+];
+function isSensitiveKey(key) {
+	const lower = key.toLowerCase();
+	return SENSITIVE_KEY_MARKERS.some((marker) => lower.includes(marker));
+}
+/** 递归把敏感键名的值换成 `***`；数组/对象深拷贝，只用于输出投影。 */
+function redactValue(value) {
+	if (Array.isArray(value)) return value.map(redactValue);
+	if (value !== null && typeof value === "object") {
+		const out = {};
+		for (const [key, child] of Object.entries(value)) out[key] = isSensitiveKey(key) ? "***" : redactValue(child);
+		return out;
+	}
+	return value;
+}
+/** 把 unknown 折成 JSON 安全叶子；序列化不了的值不投影（诚实留空，不塞 `[object]`）。 */
+function jsonValueOf(value) {
+	try {
+		const text = JSON.stringify(value);
+		if (text === void 0) return void 0;
+		return JSON.parse(text);
+	} catch {
+		return;
+	}
+}
+/** 递归 JSON 比较（对象键序无关）：判断「值是否真的变了」只看原始值，不看打码后的投影。 */
+function deepEqual(left, right) {
+	if (left === right) return true;
+	if (Array.isArray(left) || Array.isArray(right)) {
+		if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+		return left.every((item, index) => deepEqual(item, right[index]));
+	}
+	if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+	const leftRecord = left;
+	const rightRecord = right;
+	const leftKeys = Object.keys(leftRecord);
+	if (leftKeys.length !== Object.keys(rightRecord).length) return false;
+	return leftKeys.every((key) => key in rightRecord && deepEqual(leftRecord[key], rightRecord[key]));
+}
+/**
+* 从事件流里取节点状态。
+*
+* 只认 step 事件：`start` 标 started，`done`/`error` 取 response.status 与 elapsed。
+* 没启动过的节点（失败后下游被跳过）不会有 step —— 由 `businessNodesOf` 补。
+*/
+function stepNodesOf(events) {
+	const nodes = /* @__PURE__ */ new Map();
+	const order = [];
+	for (const event of events) {
+		if (event.event !== "step" || typeof event.id !== "string") continue;
+		const nodeId = event.id;
+		const info = { ...nodes.get(nodeId) ?? {} };
+		if (!nodes.has(nodeId)) order.push(nodeId);
+		if (event.status === "start") info.status = "started";
+		if (event.status === "done") info.status = "done";
+		if (event.status === "error") info.status = "error";
+		const httpStatus = numberOrUndefined$1(plainRecord$1(plainRecord$1(event.data)?.["response"])?.["status"]);
+		if (httpStatus !== void 0) info.httpStatus = httpStatus;
+		const elapsedMs = numberOrUndefined$1(event.elapsed);
+		if (elapsedMs !== void 0) info.elapsedMs = elapsedMs;
+		nodes.set(nodeId, info);
+	}
+	return {
+		order,
+		nodes
+	};
+}
+/** `result.businessData.nodes`：全量节点列表（含 skipped），事件流里没有的靠它补。 */
+function businessNodesOf(events) {
+	let result;
+	for (const event of events) if (event.event === "result") result = event;
+	const raw = plainRecord$1(result?.businessData)?.["nodes"];
+	if (!Array.isArray(raw)) return [];
+	const out = [];
+	for (const item of raw) {
+		const record = plainRecord$1(item);
+		const nodeId = stringOf$1(record?.["nodeId"]);
+		if (nodeId === void 0) continue;
+		const status = stringOf$1(record?.["status"]);
+		const httpStatus = numberOrUndefined$1(record?.["httpStatus"]);
+		const elapsedMs = numberOrUndefined$1(record?.["elapsedMs"]);
+		out.push({
+			nodeId,
+			...status === void 0 ? {} : { status },
+			...httpStatus === void 0 ? {} : { httpStatus },
+			...elapsedMs === void 0 ? {} : { elapsedMs }
+		});
+	}
+	return out;
+}
+/** 出参实际值：step done 的 `data.emitted`，键就是绑定边 `from`（如 `query.body.items[0].internalId`）。 */
+function emittedOf(events) {
+	const values = /* @__PURE__ */ new Map();
+	const order = [];
+	for (const event of events) {
+		if (event.event !== "step" || event.status !== "done") continue;
+		const emitted = plainRecord$1(plainRecord$1(event.data)?.["emitted"]);
+		if (emitted === void 0) continue;
+		for (const [path, value] of Object.entries(emitted)) {
+			if (isInputSlotRef(path)) continue;
+			if (splitBindingPath(path) === void 0) continue;
+			if (!values.has(path)) order.push(path);
+			values.set(path, value);
+		}
+	}
+	return {
+		order,
+		values
+	};
+}
+/** 链身份：以 run.json 的 `chain` 快照为准（写入时的版本），旧 run 退回 meta 折叠。 */
+function chainOf(record, summary) {
+	const recordChain = plainRecord$1(record["chain"]);
+	const site = stringOf$1(recordChain?.["site"]) ?? summary.chain?.site;
+	const flow = stringOf$1(recordChain?.["flow"]) ?? summary.chain?.flow;
+	const version = numberOrUndefined$1(recordChain?.["version"]) ?? summary.chain?.version;
+	if (site === void 0 && flow === void 0 && version === void 0) return void 0;
+	return {
+		site: site ?? "",
+		flow: flow ?? "",
+		version: version ?? 0
+	};
+}
+/** 把一条 run 的留痕折成投影；事件流为空时调用方已经先报 run-not-found。 */
+function snapshotOf(runId, record, events) {
+	const summary = foldSummary(runId, events);
+	const step = stepNodesOf(events);
+	for (const business of businessNodesOf(events)) {
+		const existing = step.nodes.get(business.nodeId);
+		if (existing === void 0) {
+			step.order.push(business.nodeId);
+			step.nodes.set(business.nodeId, {
+				...business.status === void 0 ? {} : { status: business.status },
+				...business.httpStatus === void 0 ? {} : { httpStatus: business.httpStatus },
+				...business.elapsedMs === void 0 ? {} : { elapsedMs: business.elapsedMs }
+			});
+			continue;
+		}
+		if (existing.status === void 0 && business.status !== void 0) existing.status = business.status;
+		if (existing.httpStatus === void 0 && business.httpStatus !== void 0) existing.httpStatus = business.httpStatus;
+		if (existing.elapsedMs === void 0 && business.elapsedMs !== void 0) existing.elapsedMs = business.elapsedMs;
+	}
+	const emitted = emittedOf(events);
+	const chain = chainOf(record, summary);
+	const failedNode = summary.chain?.failedNode ?? (summary.status === "failed" ? summary.lastStepId : void 0);
+	return {
+		runId,
+		status: summary.status,
+		startedAt: numberOrUndefined$1(record["startedAt"]) ?? summary.startedAt,
+		...chain === void 0 ? {} : { chain },
+		params: plainRecord$1(record["params"]) ?? {},
+		...failedNode === void 0 ? {} : { failedNode },
+		nodeOrder: step.order,
+		nodes: step.nodes,
+		emittedOrder: emitted.order,
+		emitted: emitted.values
+	};
+}
+function inputsOf(base, target) {
+	return [.../* @__PURE__ */ new Set([...Object.keys(base.params), ...Object.keys(target.params)])].map((key) => {
+		const hasBase = Object.prototype.hasOwnProperty.call(base.params, key);
+		const hasTarget = Object.prototype.hasOwnProperty.call(target.params, key);
+		const baseValue = base.params[key];
+		const targetValue = target.params[key];
+		const changed = hasBase !== hasTarget ? true : !deepEqual(baseValue, targetValue);
+		const baseJson = hasBase ? jsonValueOf(isSensitiveKey(key) ? "***" : redactValue(baseValue)) : void 0;
+		const targetJson = hasTarget ? jsonValueOf(isSensitiveKey(key) ? "***" : redactValue(targetValue)) : void 0;
+		return {
+			key,
+			...baseJson === void 0 ? {} : { base: baseJson },
+			...targetJson === void 0 ? {} : { target: targetJson },
+			changed
+		};
+	});
+}
+function emittedDiffsOf(base, target) {
+	const keys = [...base.emittedOrder, ...target.emittedOrder.filter((key) => !base.emitted.has(key))];
+	const out = [];
+	for (const key of keys) {
+		const split = splitBindingPath(key);
+		if (split === void 0) continue;
+		const hasBase = base.emitted.has(key);
+		const hasTarget = target.emitted.has(key);
+		const baseRaw = base.emitted.get(key);
+		const targetRaw = target.emitted.get(key);
+		const changed = hasBase !== hasTarget ? true : !deepEqual(baseRaw, targetRaw);
+		const sensitive = isSensitiveKey(key);
+		const baseJson = hasBase ? jsonValueOf(sensitive ? "***" : redactValue(baseRaw)) : void 0;
+		const targetJson = hasTarget ? jsonValueOf(sensitive ? "***" : redactValue(targetRaw)) : void 0;
+		out.push({
+			nodeId: split.nodeId,
+			path: split.fieldPath,
+			...baseJson === void 0 ? {} : { base: baseJson },
+			...targetJson === void 0 ? {} : { target: targetJson },
+			changed
+		});
+	}
+	return out;
+}
+function nodesOf(base, target) {
+	return [...base.nodeOrder, ...target.nodeOrder.filter((nodeId) => !base.nodes.has(nodeId))].map((nodeId) => {
+		const baseInfo = base.nodes.get(nodeId);
+		const targetInfo = target.nodes.get(nodeId);
+		const changed = baseInfo?.status !== targetInfo?.status || baseInfo?.httpStatus !== targetInfo?.httpStatus || baseInfo?.elapsedMs !== targetInfo?.elapsedMs;
+		return {
+			nodeId,
+			...baseInfo?.status === void 0 ? {} : { baseStatus: baseInfo.status },
+			...targetInfo?.status === void 0 ? {} : { targetStatus: targetInfo.status },
+			...baseInfo?.httpStatus === void 0 ? {} : { baseHttpStatus: baseInfo.httpStatus },
+			...targetInfo?.httpStatus === void 0 ? {} : { targetHttpStatus: targetInfo.httpStatus },
+			...baseInfo?.elapsedMs === void 0 ? {} : { baseElapsedMs: baseInfo.elapsedMs },
+			...targetInfo?.elapsedMs === void 0 ? {} : { targetElapsedMs: targetInfo.elapsedMs },
+			changed
+		};
+	});
+}
+/** 建议只给「下一步能做什么」，不重复回执里已有的事实。 */
+function hintsOf$1(base, target, inputs, emitted, nodes) {
+	const hints = [];
+	const baseVersion = base.chain?.version;
+	const targetVersion = target.chain?.version;
+	if (baseVersion !== void 0 && targetVersion !== void 0 && baseVersion !== targetVersion) hints.push(`链版本不同（v${baseVersion} → v${targetVersion}）：两次跑的不是同一版链，出参差异也可能来自链定义变化`);
+	const inputsChanged = inputs.filter((input) => input.changed).length;
+	const emittedChanged = emitted.filter((item) => item.changed).length;
+	if (inputsChanged > 0) hints.push(`入参有 ${inputsChanged} 个不同（inputs.changed）：复跑换的就是这些槽位`);
+	if (emittedChanged > 0) hints.push(`出参有 ${emittedChanged} 个不同（emitted.changed）：链生成值由上游响应重新求解，不是首跑缓存`);
+	if (base.failedNode !== void 0 && target.failedNode === void 0) hints.push(`基线失败于节点 ${base.failedNode}、对照运行已完成：对照 nodes 里该节点的状态变化可确认修复点`);
+	if (base.failedNode === void 0 && target.failedNode !== void 0) hints.push(`对照运行失败于节点 ${target.failedNode}：用 dataforge_chain_diagnose(runId=${target.runId}) 看该节点的入边与上游状态`);
+	if (base.failedNode !== void 0 && target.failedNode !== void 0) hints.push(base.failedNode === target.failedNode ? `两次都失败在同一节点 ${base.failedNode}：先核对入参与绑定边，再决定是否重跑` : `两次分别失败在 ${base.failedNode} / ${target.failedNode}：断点变了，先修对照运行的新断点`);
+	const statusSame = nodes.every((node) => node.baseStatus === node.targetStatus && node.baseHttpStatus === node.targetHttpStatus);
+	if (inputsChanged === 0 && emittedChanged === 0 && statusSame) hints.push("两次运行在入参、出参与节点状态上没有差异（耗时可能不同）：复跑没有改变求解结果");
+	return hints;
+}
+function failureOf(code, message) {
+	return {
+		ok: false,
+		code,
+		message
+	};
+}
+function sideLabelOf(side) {
+	return side === "base" ? "基线运行（runIds[0]）" : "对照运行（runIds[1]）";
+}
+/**
+* 读一条 run 并折成投影。
+*
+* 只读：没有就如实报错，不猜测、不回退到「最近一次运行」——对照的对象必须是
+* 调用方明确给的那两条留痕。
+*/
+function loadSnapshotOf(deps, runId, side) {
+	const label = sideLabelOf(side);
+	const record = readRunRecord(deps.dataRoot, runId);
+	if (record === void 0) return {
+		ok: false,
+		value: failureOf("run-not-found", `${label} ${runId} 不存在（没有 run.json 留痕）`)
+	};
+	if (record["kind"] !== "chain-run") return {
+		ok: false,
+		value: failureOf("not-chain-run", `${label} ${runId} 不是链运行（kind=${String(record["kind"])}）：复跑对照只接受 dataforge_chain_run 的留痕`)
+	};
+	const events = loadRunEvents(deps.dataRoot, runId);
+	if (events === void 0 || events.length === 0) return {
+		ok: false,
+		value: failureOf("run-not-found", `${label} ${runId} 还没有事件留痕，无法对照`)
+	};
+	return {
+		ok: true,
+		snapshot: snapshotOf(runId, record, events)
+	};
+}
+/**
+* 对照两条链运行（只读）。
+*
+* 顺序语义：`runIds[0]` = 基线（base），`runIds[1]` = 对照（target）；
+* 输出的 `runs` 固定 [base, target]，`inputs`/`nodes`/`emitted` 的 base/target
+* 字段也按同样顺序，避免调用方还要猜。
+*/
+async function compareForTool(deps, args) {
+	const runIds = args.runIds;
+	if (!Array.isArray(runIds) || runIds.length !== 2) return failureOf("invalid-run-ids", "runIds 必须是 [baseRunId, targetRunId]：两个 runId 缺一不可");
+	const [rawBase, rawTarget] = runIds;
+	if (typeof rawBase !== "string" || typeof rawTarget !== "string") return failureOf("invalid-run-ids", "runIds 的两个元素都必须是字符串 runId");
+	const baseRunId = rawBase.trim();
+	const targetRunId = rawTarget.trim();
+	if (baseRunId === "" || targetRunId === "") return failureOf("invalid-run-ids", "runIds 的两个元素都不能为空字符串");
+	const baseLoaded = loadSnapshotOf(deps, baseRunId, "base");
+	if (!baseLoaded.ok) return baseLoaded.value;
+	const targetLoaded = loadSnapshotOf(deps, targetRunId, "target");
+	if (!targetLoaded.ok) return targetLoaded.value;
+	const base = baseLoaded.snapshot;
+	const target = targetLoaded.snapshot;
+	const inputs = inputsOf(base, target);
+	const emitted = emittedDiffsOf(base, target);
+	const nodes = nodesOf(base, target);
+	const hints = hintsOf$1(base, target, inputs, emitted, nodes);
+	return compareOutputOf({
+		ok: true,
+		runs: [{
+			runId: base.runId,
+			...base.chain === void 0 ? {} : { chain: base.chain },
+			params: jsonObjectOf(base.params),
+			status: base.status,
+			...base.failedNode === void 0 ? {} : { failedNode: base.failedNode },
+			startedAt: base.startedAt
+		}, {
+			runId: target.runId,
+			...target.chain === void 0 ? {} : { chain: target.chain },
+			params: jsonObjectOf(target.params),
+			status: target.status,
+			...target.failedNode === void 0 ? {} : { failedNode: target.failedNode },
+			startedAt: target.startedAt
+		}],
+		inputs,
+		nodes,
+		emitted,
+		summary: {
+			nodesChanged: nodes.filter((node) => node.changed).length,
+			emittedChanged: emitted.filter((item) => item.changed).length,
+			inputsChanged: inputs.filter((input) => input.changed).length,
+			...base.failedNode === void 0 ? {} : { baseFailedNode: base.failedNode },
+			...target.failedNode === void 0 ? {} : { targetFailedNode: target.failedNode }
+		},
+		...hints.length === 0 ? {} : { hints }
+	});
+}
+/** run.json 的 params 投影：顶层敏感键打码，嵌套值递归打码。 */
+function jsonObjectOf(params) {
+	const out = {};
+	for (const [key, value] of Object.entries(params)) {
+		const encoded = jsonValueOf(isSensitiveKey(key) ? "***" : redactValue(value));
+		if (encoded !== void 0) out[key] = encoded;
+	}
+	return out;
 }
 
 //#endregion
@@ -9808,21 +10800,29 @@ function defineBrowserCloseTool(deps) {
 							additionalProperties: true
 						}
 					},
-					captureId: { type: "string" }
+					captureId: { type: "string" },
+					tokensHarvested: { type: "number" }
 				}
 			},
 			render: (_args, value) => {
 				const v = tighten(value);
+				const tokens = v.tokensHarvested === void 0 || v.tokensHarvested === 0 ? "" : `，补采 token ${v.tokensHarvested} 条`;
 				return [{
 					type: "text",
-					text: v.ok ? `🔒 会话已关（cookie ${v.cookies.length} 个${v.captureId === void 0 ? "" : `，已挂到 ${v.captureId}`}）` : "❌ 会话不存在或已关闭"
+					text: v.ok ? `🔒 会话已关（cookie ${v.cookies.length} 个${v.captureId === void 0 ? "" : `，已挂到 ${v.captureId}`}${tokens}）` : "❌ 会话不存在或已关闭"
 				}];
 			}
 		},
 		async execute(args) {
 			const closed = await deps.registry.close(args.session_id);
+			let tokensHarvested = 0;
 			if (closed.captureId !== void 0) {
 				for (const c of closed.cookies) deps.store.upsertCredential(closed.captureId, "cookie", String(c["domain"] ?? ""), String(c["name"] ?? ""), Date.now(), c);
+				try {
+					tokensHarvested = harvestTokenCredentials(deps.store, closed.captureId);
+				} catch {
+					tokensHarvested = 0;
+				}
 				if (deps.store.getRun(closed.captureId)?.status === "running") deps.store.finishRun(closed.captureId, "done");
 			}
 			const summarized = {
@@ -9831,7 +10831,8 @@ function defineBrowserCloseTool(deps) {
 					name: String(c["name"] ?? ""),
 					domain: String(c["domain"] ?? "")
 				})),
-				...closed.captureId === void 0 ? {} : { captureId: closed.captureId }
+				...closed.captureId === void 0 ? {} : { captureId: closed.captureId },
+				...tokensHarvested === 0 ? {} : { tokensHarvested }
 			};
 			return lossless(summarized);
 		}
@@ -10087,6 +11088,190 @@ function defineChainGetTool(deps) {
 		}
 	});
 }
+/**
+* 工具入参 → bind 核心的严格边形状。
+*
+* 嵌套对象在参数 DSL 里的 required 推断偏松（TS 侧 match 可能被当成可选），所以这里显式收敛：
+* 缺失的 match 字段补空串，交给 bind 的 pickShapeProblemOf 给出「pick.match.field 必须是非空字符串」
+* 这类可读拒绝，而不是在工具壳里静默丢掉 pick。
+*/
+function bindEdgeSpecsOf(raw) {
+	return raw.map((edge) => ({
+		from: edge.from,
+		to: edge.to,
+		...edge.transform === void 0 ? {} : { transform: edge.transform },
+		...edge.pick === void 0 ? {} : { pick: {
+			match: {
+				field: edge.pick.match?.field ?? "",
+				equals: edge.pick.match?.equals ?? ""
+			},
+			...edge.pick.field === void 0 ? {} : { field: edge.pick.field }
+		} }
+	}));
+}
+function renderChainBind(value) {
+	if (!value.ok) return `❌ 绑定未写入（${value.code ?? "invalid-chain"}）：${value.message ?? ""}${renderChainIssues(value.issues)}` + ((value.hints ?? []).length === 0 ? "" : `\n建议：\n${(value.hints ?? []).map((hint) => `- ${hint}`).join("\n")}`);
+	const edges = value.edges ?? [];
+	const shown = edges.slice(0, RECEIPT_MAX_LINES).map((edge) => `- ${edge.from} → ${edge.to}`);
+	const rest = edges.length > RECEIPT_MAX_LINES ? `\n… 还有 ${edges.length - RECEIPT_MAX_LINES} 条（edges 里有全量）` : "";
+	const hints = (value.hints ?? []).length === 0 ? "" : `\n提醒：\n${(value.hints ?? []).map((hint) => `- ${hint}`).join("\n")}`;
+	return [
+		`🔗 绑定已写入 ${value.site ?? ""}/${value.flow ?? ""} v${value.version ?? 0}（新增 ${value.added ?? 0} / 替换 ${value.replaced ?? 0} / 未变 ${value.unchanged ?? 0}）`,
+		`文件：${value.path ?? ""}`,
+		edges.length === 0 ? "- 新版本没有任何绑定边" : `边：\n${shown.join("\n")}${rest}`
+	].join("\n") + hints;
+}
+function defineChainBindTool(deps) {
+	return defineTool({
+		name: "dataforge_chain_bind",
+		description: `把 probe 发现的绑定边**回写进链**（R-5 M2）：不需要手抄整份 YAML，只给边 → 自增版本。
+
+入参 edges：每条 { from, to, transform?, pick? }
+- from 是「节点.出参路径」（如上一步 probe 的 outputs 里那条 body.items[0].internalId），也允许 $inputs.槽位名；
+- to 是「节点.入参路径」（下游卡的入参，如 body.lines[0].materialId）；
+- transform（string/json/array-json）与 pick（按数组元素字段选值）原样写进边，语义同 dataforge_chain_run。
+
+合并语义（同一次只增改给定的边，其余边原样保留）：
+- to 相同 = 重写这条绑定（替换，不会叠加两条指向同一入参的边）；
+- from/to/transform/pick 全同 = 未变化（只计数）；
+- to 不同 = 新增；同一次调用里 to 重复，以后者为准。
+
+写链纪律不打折：仍只经 R-1 的 saveChain —— 卡引用/两端字段存在性/成环/绑定与常量互斥/僵尸槽位全部校验，失败零落盘并逐条给 issues（指向 edges[i]）。版本只增不删，旧版本永远可回读；内容无变化也会落 max+1 新版本（回执 added=0/replaced=0/unchanged>0 说明原因）。
+
+失败时：chain-not-found（先 upsert）/ invalid-chain（含 page-chain 不支持、边形状坏、R-1 语义不符）/ card-not-imported（先 dataforge_library_import）。
+
+首跑闭环：dataforge_chain_probe 试探 → 读 outputs 发现绑定 → **dataforge_chain_bind 回写边** → dataforge_chain_run 整链。`,
+		parameters: {
+			site: {
+				type: "string",
+				required: true,
+				description: "站点名（链的 meta.site）"
+			},
+			flow: {
+				type: "string",
+				required: true,
+				description: "流程名（链的 meta.flow）"
+			},
+			version: {
+				type: "number",
+				description: "以哪个版本为基（缺省最新）；落盘永远是 max+1 新版本"
+			},
+			edges: {
+				type: "array",
+				required: true,
+				description: "要回写的绑定边；to 相同视为重写同一条绑定",
+				items: {
+					type: "object",
+					additionalProperties: false,
+					properties: {
+						from: {
+							type: "string",
+							required: true,
+							description: "「节点.出参路径」或 $inputs.槽位名"
+						},
+						to: {
+							type: "string",
+							required: true,
+							description: "「节点.入参路径」"
+						},
+						transform: {
+							type: "string",
+							enum: [
+								"string",
+								"json",
+								"array-json"
+							],
+							description: "缺省原样传值（不隐式转换）"
+						},
+						pick: {
+							type: "object",
+							additionalProperties: false,
+							description: "{ match: { field, equals }, field? }：从数组出参按字段选元素再取字段（equals 按字符串比较）",
+							properties: {
+								match: {
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										field: {
+											type: "string",
+											required: true
+										},
+										equals: {
+											type: "string",
+											required: true,
+											description: "匹配值（按字符串比较，数字写 \"123\" 即可）"
+										}
+									}
+								},
+								field: { type: "string" }
+							}
+						}
+					}
+				}
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					code: {
+						type: "string",
+						description: "chain-not-found / invalid-chain / card-not-imported"
+					},
+					message: { type: "string" },
+					hints: {
+						type: "array",
+						items: { type: "string" }
+					},
+					site: { type: "string" },
+					flow: { type: "string" },
+					version: { type: "number" },
+					path: { type: "string" },
+					added: { type: "number" },
+					replaced: { type: "number" },
+					unchanged: { type: "number" },
+					edges: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								from: { type: "string" },
+								to: { type: "string" }
+							}
+						}
+					},
+					issues: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								target: { type: "string" },
+								code: { type: "string" },
+								reason: { type: "string" }
+							}
+						}
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderChainBind(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(await bindChainForTool(deps, exec, {
+				site: args.site,
+				flow: args.flow,
+				...args.version === void 0 ? {} : { version: args.version },
+				edges: bindEdgeSpecsOf(args.edges)
+			}));
+		}
+	});
+}
 /** 计划卡的人话版：目标 host + 拓扑序 + 写类节点（这三样是确认的前提）。 */
 function renderPlan(plan) {
 	if (plan === void 0) return "";
@@ -10151,7 +11336,7 @@ function defineChainRunTool(deps) {
 
 运行期失败（binding-* / node-* / response-too-large / cancelled）不自动重试：链已中止，错误进运行记录，修好后用新 run 重跑（绝不自动重放写请求）。
 
-鉴权：卡声明 cookie-session 时，引擎会按卡的采集来源自动注入 cookie；token 型一期未采集，不猜 Authorization。401 回执区分「未注入可用凭证」与「已注入但仍 401」。
+鉴权（R-4 M1/M3）：按卡的采集来源自动注入本地凭证——cookie-session 注 cookie；token-header 注 Authorization（采集到的原文，Bearer/Basic 原样）；token-param 注 URL query。body token / localStorage token 本期只记录不注入（回执如实 unsupported，不猜）。401 回执区分「未采集到可用凭证」与「已注入但仍 401」。
 
 自动换票：传 relogin（一条普通 interface-chain）后，401 会执行登录链、收割 set-cookie、单飞换票并重放当前节点一次；重放仍 401 就中止并报「换票后仍 401」。登录链的 inputs 只进内存，不写运行记录。
 
@@ -10912,6 +12097,170 @@ function defineChainDiagnoseTool(deps) {
 		}
 	});
 }
+/** 对照值的人话预览：对象/数组截 120 字，避免回执被整段正文撑爆。 */
+function previewOfJson(value) {
+	if (value === void 0) return "（缺）";
+	const text = typeof value === "string" ? value : JSON.stringify(value);
+	return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+function renderChainCompare(value) {
+	if (!value.ok) return `❌ 对照失败（${value.code ?? "unknown"}）：${value.message ?? ""}`;
+	const runs = value.runs ?? [];
+	const base = runs[0];
+	const target = runs[1];
+	if (base === void 0 || target === void 0) return "❌ 对照失败：回执缺少一侧 run";
+	const versionOf = (run) => run.chain === void 0 ? "" : ` v${run.chain.version}`;
+	const header = `🆚 复跑对照：${base.runId}${versionOf(base)} → ${target.runId}${versionOf(target)}`;
+	const stateOf = (run) => `${run.status}${run.failedNode === void 0 ? "" : `（断在 ${run.failedNode}）`}`;
+	const inputLines = (value.inputs ?? []).filter((row) => row.changed).slice(0, RECEIPT_MAX_LINES).map((row) => `- ${row.key}：${previewOfJson(row.base)} → ${previewOfJson(row.target)}`);
+	const nodeLines = (value.nodes ?? []).filter((row) => row.changed).slice(0, RECEIPT_MAX_LINES).map((row) => {
+		const http = (from, to) => from === to ? from === void 0 ? "" : ` HTTP ${from}` : ` HTTP ${from ?? "?"} → ${to ?? "?"}`;
+		const elapsed = (from, to) => from === to ? from === void 0 ? "" : ` ${from}ms` : ` ${from ?? "?"}ms → ${to ?? "?"}ms`;
+		return `- ${row.nodeId}：${row.baseStatus ?? "缺"} → ${row.targetStatus ?? "缺"}${http(row.baseHttpStatus, row.targetHttpStatus)}${elapsed(row.baseElapsedMs, row.targetElapsedMs)}`;
+	});
+	const emittedLines = (value.emitted ?? []).filter((row) => row.changed).slice(0, RECEIPT_MAX_LINES).map((row) => `- ${row.nodeId} · ${row.path}：${previewOfJson(row.base)} → ${previewOfJson(row.target)}`);
+	const summary = value.summary;
+	const summaryLine = summary === void 0 ? "" : `差异：入参 ${summary.inputsChanged} / 出参 ${summary.emittedChanged} / 节点 ${summary.nodesChanged}`;
+	return [
+		header,
+		`状态：${stateOf(base)} → ${stateOf(target)}`,
+		inputLines.length === 0 ? "入参：无差异" : `入参变化：\n${inputLines.join("\n")}`,
+		emittedLines.length === 0 ? "出参：无差异" : `出参变化（链生成值重新求解）：\n${emittedLines.join("\n")}`,
+		nodeLines.length === 0 ? "节点：无差异" : `节点变化：\n${nodeLines.join("\n")}`,
+		summaryLine,
+		(value.hints ?? []).length === 0 ? "" : `提示：\n${(value.hints ?? []).map((hint) => `- ${hint}`).join("\n")}`
+	].filter(Boolean).join("\n");
+}
+function defineChainCompareTool(deps) {
+	return defineTool({
+		name: "dataforge_chain_compare",
+		description: `复跑对照（R-6 M2）：把两次 chain-run 的留痕并排投影成差异视图，回答「换入参复跑后什么变了、链生成值是不是重新求解」。
+
+输入 run_ids = [基线 runId, 对照 runId]（runId 来自 dataforge_chain_run / dataforge_status / dataforge_chain_runs）。
+输出：
+- runs：两侧的身份快照（链版本、params、状态、failedNode）；
+- inputs：链级入参逐槽位差异（changed）；
+- emitted：各节点出参（绑定边 from 取到的实际值）差异——复跑换了 C/D 时这里应看到新求解值，证明没吃首跑缓存；
+- nodes：节点状态/HTTP/耗时对照；
+- summary + hints：版本不同、入参变化、失败节点变化等提示。
+
+只读：不重跑、不发请求、不改链；敏感键（password/token/authorization/cookie 等）在输出里一律 ***，不含任何 header 原文。
+
+失败时：invalid-run-ids（须恰好两个非空 runId）/ run-not-found（run.json 或事件留痕缺失）/ not-chain-run（不是链运行）。`,
+		parameters: { run_ids: {
+			type: "array",
+			required: true,
+			items: { type: "string" },
+			description: "[基线 runId, 对照 runId]：先首跑、后复跑"
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					code: {
+						type: "string",
+						description: "invalid-run-ids / run-not-found / not-chain-run"
+					},
+					message: { type: "string" },
+					runs: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								runId: { type: "string" },
+								chain: {
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										site: { type: "string" },
+										flow: { type: "string" },
+										version: { type: "number" }
+									}
+								},
+								params: {
+									type: "object",
+									additionalProperties: true
+								},
+								status: { type: "string" },
+								failedNode: { type: "string" },
+								startedAt: { type: "number" }
+							}
+						}
+					},
+					inputs: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								key: { type: "string" },
+								base: { type: "json" },
+								target: { type: "json" },
+								changed: { type: "boolean" }
+							}
+						}
+					},
+					nodes: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								nodeId: { type: "string" },
+								baseStatus: { type: "string" },
+								targetStatus: { type: "string" },
+								baseHttpStatus: { type: "number" },
+								targetHttpStatus: { type: "number" },
+								baseElapsedMs: { type: "number" },
+								targetElapsedMs: { type: "number" },
+								changed: { type: "boolean" }
+							}
+						}
+					},
+					emitted: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								nodeId: { type: "string" },
+								path: { type: "string" },
+								base: { type: "json" },
+								target: { type: "json" },
+								changed: { type: "boolean" }
+							}
+						}
+					},
+					summary: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							nodesChanged: { type: "number" },
+							emittedChanged: { type: "number" },
+							inputsChanged: { type: "number" },
+							baseFailedNode: { type: "string" },
+							targetFailedNode: { type: "string" }
+						}
+					},
+					hints: {
+						type: "array",
+						items: { type: "string" }
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderChainCompare(tighten(value))
+			}]
+		},
+		async execute(args) {
+			return lossless(await compareForTool(deps, { runIds: [args.run_ids[0], args.run_ids[1]] }));
+		}
+	});
+}
 function renderChainRuns(value) {
 	if (value.notice !== void 0 && (value.runs ?? []).length === 0) return `📭 ${value.notice}`;
 	const lines = (value.runs ?? []).map((run) => {
@@ -11502,7 +12851,7 @@ function parseArray(raw) {
 //#endregion
 //#region src/capture/credentials.ts
 /**
-* 采集库 → 执行期凭证的只读适配器（R-4 M1）。
+* 采集库 → 执行期凭证的只读适配器（R-4 M1/M3）。
 *
 * 为什么单独一层：执行层（`execute/*`）不认识 SQLite、不认识采集表；它只认
 * `CredentialProvider` 这个函数形状。本模块把「一期采集库」翻译成那个形状，
@@ -11510,8 +12859,15 @@ function parseArray(raw) {
 *
 * 安全边界：
 *   - 只按卡的 `sources[].captureId` 查，**不做全库兜底扫描**（避免把 A 站凭证发给 B 站）；
-*   - 只取 `kind='cookie'`；token/localStorage 一期没采到，M1 明确 `unsupported`，不猜；
-*   - 返回值里的摘要只含名字/域/来源，值只进 `headers.cookie` 这一条出站请求头。
+*   - cookie 型只取 `kind='cookie'`；token 型（M3）只取 `kind='token'`，且只按卡声明的
+*     `auth` 与 evidence 名匹配，不猜 Authorization 的 scheme；
+*   - body token 本期**不注入**，如实标 `unsupported`（注入语义与 query/header 不同）；
+*   - 返回值里的摘要只含名字/域/来源，值只进 `headers.*` 或 `query` 这一条出站请求。
+*
+* 运行级缓存（M3）：
+*   - `cache: true` 时按「db 文件 mtimeMs+size」与「持久化 jar 文件 mtimeMs+size」做键缓存行；
+*   - 文件内容变化 → 自动失效并重读；文件被删除 → 沿用缓存（同一运行内不因中途删库丢凭证）；
+*   - 缺省关闭，保证不传 `cache` 的调用方行为与 M1 完全一致。
 *
 * @module dsh-dataforge/capture/credentials
 */
@@ -11531,18 +12887,41 @@ function hostOf(url) {
 		return url;
 	}
 }
-/** 只读打开采集库，查这批 captureId 的 cookie 行；读不到就抛给调用方折成降级。 */
-function readCookieRows(dbPath, captureIds) {
+/**
+* 文件签名（缓存键）：`mtimeMs:size`；不存在返回 `missing`。
+*
+* 采集库是 SQLite WAL：提交只写 `-wal` 边车文件，主库文件的 mtime/size 可能长期不变。
+* 所以 db 的签名 = 主库 + `-wal` 两个文件；否则一次运行写入的新 token 会被缓存挡住，
+* 变成「跨 run 陈旧数据」。运行级缓存的语义是「同一份采集库内容内不重复开库」，不是永久缓存。
+*/
+function fileSignature(path) {
+	try {
+		const stat = statSync(path);
+		return `${stat.mtimeMs}:${stat.size}`;
+	} catch {
+		return "missing";
+	}
+}
+/** 缓存命中判据：文件现在不存在（运行中被删）或与缓存时签名一致。 */
+function signatureStillValid(current, cached) {
+	return current === "missing" || current === cached;
+}
+/** 只读打开采集库，一次查询取回 cookie 与 token 行；读不到就抛给调用方折成降级。 */
+function readCredentialRows(dbPath, captureIds) {
 	const db = new Database(dbPath, {
 		readonly: true,
 		fileMustExist: true
 	});
 	try {
 		const placeholders = captureIds.map(() => "?").join(",");
-		return db.prepare(`SELECT capture_id, url, name, value_json, obtained_at
-         FROM credential_events
-         WHERE capture_id IN (${placeholders}) AND kind = 'cookie'
-         ORDER BY obtained_at ASC`).all(...captureIds);
+		const select = (kind) => db.prepare(`SELECT capture_id, url, name, value_json, obtained_at
+           FROM credential_events
+           WHERE capture_id IN (${placeholders}) AND kind = ?
+           ORDER BY obtained_at ASC`).all(...captureIds, kind);
+		return {
+			cookieRows: select("cookie"),
+			tokenRows: select("token")
+		};
 	} finally {
 		db.close();
 	}
@@ -11581,44 +12960,116 @@ function cookieOfRow(row) {
 		obtainedAt: row.obtained_at
 	};
 }
+/** 一行 → token（坏 JSON/缺字段跳过）。 */
+function tokenOfRow(row) {
+	const value = tokenValueOfJson(row.value_json);
+	if (value === void 0) return void 0;
+	return {
+		...value,
+		captureId: row.capture_id,
+		obtainedAt: row.obtained_at
+	};
+}
+/** 取 `obtainedAt` 最新的一条（同时间取后出现者，与 SQL ASC 顺序对齐）。 */
+function latestOf(items) {
+	let best;
+	for (const item of items) if (best === void 0 || item.obtainedAt >= best.obtainedAt) best = item;
+	return best;
+}
+/**
+* 读卡的鉴权证据名（如 `header:authorization` / `query:access_token`）。
+*
+* 卡 schema 从 R-4 M3 起显式收 `authEvidence`（只存名字）；老卡没有该字段时
+* 返回 undefined，由 provider 按 token 位置的缺省名兜底。
+*/
+function authEvidenceOf(card) {
+	const raw = card.authEvidence;
+	return typeof raw === "string" && raw !== "" ? raw : void 0;
+}
+/** `evidence` 前缀匹配：`header:authorization` + kind=`header` → `authorization`。 */
+function evidenceNameOf(evidence, kind) {
+	if (evidence === void 0) return void 0;
+	const prefix = `${kind}:`;
+	if (!evidence.toLowerCase().startsWith(prefix)) return void 0;
+	const name = evidence.slice(prefix.length).trim();
+	return name === "" ? void 0 : name;
+}
 function none(reason, captureIds) {
 	return {
 		headers: {},
 		application: emptyCredentialApplication("none", reason, captureIds)
 	};
 }
-function unsupported(card, captureIds) {
-	const reason = card.auth === "token-header" || card.auth === "token-param" ? `token 型凭证一期未采集（auth=${card.auth}）：需要补采集或改用 cookie 型站点` : `未知鉴权类型「${String(card.auth)}」：不注入`;
+/** 卡声明了 token 型鉴权，但采集库里没有可注入的值：如实 unsupported + 原因。 */
+function unsupportedReason(reason, captureIds) {
 	return {
 		headers: {},
 		application: emptyCredentialApplication("unsupported", reason, captureIds)
 	};
 }
+function unsupported(card, captureIds) {
+	return unsupportedReason(`未知鉴权类型「${String(card.auth)}」：不注入`, captureIds);
+}
+/** token 型注入摘要（只留头/参数名，不含值）。 */
+function appliedTokenApplication(header, names, captureIds) {
+	return {
+		status: "applied",
+		source: "capture",
+		header,
+		names: [...names],
+		domains: [],
+		captureIds: [...captureIds],
+		expired: 0
+	};
+}
 /**
 * 创建执行期凭证 provider。
 *
-* 每次调用按需只读打开/关闭 SQLite：节点量级几十到几百，打开开销可接受；
-* M1 以「正确、无状态」优先，缓存留到 M3 有实测瓶颈再加。
+* 缺省每次调用按需只读打开/关闭 SQLite（节点量级几十到几百，打开开销可接受）；
+* `cache: true` 时按文件签名复用行（M3 运行级缓存）。
 */
 function createCaptureCredentialProvider(options) {
 	const now = options.now ?? (() => Date.now());
-	return (need) => {
-		const card = need.card;
-		const captureIds = captureIdsOf(card);
-		if (card.auth === void 0 || card.auth === "none") return none("该卡无鉴权", captureIds);
-		if (card.auth === "unknown") return none("鉴权标志未判定，不注入", captureIds);
-		if (card.auth !== "cookie-session") return unsupported(card, captureIds);
-		const entries = [];
-		let databaseError;
-		if (captureIds.length > 0) try {
-			const rows = readCookieRows(options.dbPath, captureIds);
-			for (const row of rows) {
-				const cookie = cookieOfRow(row);
-				if (cookie !== void 0) entries.push(cookie);
-			}
-		} catch (error) {
-			databaseError = messageOf(error);
+	const useCache = options.cache === true;
+	const rowCache = /* @__PURE__ */ new Map();
+	const storeSig = () => options.storePath === void 0 ? "absent" : fileSignature(options.storePath);
+	const loadRows = (captureIds) => {
+		if (captureIds.length === 0) return {
+			cookieRows: [],
+			tokenRows: []
+		};
+		const key = captureIds.join("\0");
+		const dbSig = fileSignature(options.dbPath);
+		const dbWalSig = fileSignature(`${options.dbPath}-wal`);
+		const jarSig = storeSig();
+		if (useCache) {
+			const hit = rowCache.get(key);
+			if (hit !== void 0 && signatureStillValid(dbSig, hit.dbSig) && signatureStillValid(dbWalSig, hit.dbWalSig) && signatureStillValid(jarSig, hit.storeSig)) return hit;
 		}
+		try {
+			const rows = readCredentialRows(options.dbPath, captureIds);
+			if (useCache) rowCache.set(key, {
+				dbSig,
+				dbWalSig,
+				storeSig: jarSig,
+				...rows
+			});
+			return rows;
+		} catch (error) {
+			return {
+				cookieRows: [],
+				tokenRows: [],
+				databaseError: messageOf(error)
+			};
+		}
+	};
+	const resolveCookies = (need, captureIds, rows) => {
+		const entries = [];
+		for (const row of rows.cookieRows) {
+			const cookie = cookieOfRow(row);
+			if (cookie !== void 0) entries.push(cookie);
+		}
+		const databaseError = rows.databaseError;
 		if (options.storePath !== void 0) {
 			const origin = originOfUrl(need.url);
 			if (origin !== void 0) entries.push(...readPersistedCookies(options.storePath, origin, now()));
@@ -11647,6 +13098,64 @@ function createCaptureCredentialProvider(options) {
 			headers: { cookie: header },
 			application
 		};
+	};
+	/** token-header：按 evidence 名取最新 token（缺省 `authorization`），值原样注入。 */
+	const resolveTokenHeader = (captureIds, tokens, evidence) => {
+		const proposed = evidenceNameOf(evidence, "header");
+		const headerTokens = tokens.filter((token) => token.location === "header");
+		const wanted = (proposed ?? "authorization").toLowerCase();
+		let headerName = wanted;
+		let pick = latestOf(headerTokens.filter((token) => token.name.toLowerCase() === wanted));
+		if (pick === void 0 && proposed === void 0) {
+			pick = latestOf(headerTokens);
+			if (pick !== void 0) headerName = pick.name.toLowerCase();
+		}
+		if (pick === void 0) return unsupportedReason(`token 型凭证未采集：采集库里没有 ${wanted} 头，需重新采集登录态站点（不猜 Authorization scheme）`, captureIds);
+		return {
+			headers: { [headerName]: pick.value },
+			application: appliedTokenApplication("authorization", [headerName], captureIds)
+		};
+	};
+	/** token-param：按 evidence 名取最新 query token；body token 如实 unsupported。 */
+	const resolveTokenParam = (captureIds, tokens, evidence) => {
+		if (evidence !== void 0 && evidence.toLowerCase().startsWith("body:")) return unsupportedReason(`token 型凭证暂不支持 body 注入（证据 ${evidence}）：body 字段不是 query 参数，本期只注入 header/query token`, captureIds);
+		const proposed = evidenceNameOf(evidence, "query");
+		const queryTokens = tokens.filter((token) => token.location === "query");
+		const wanted = proposed?.toLowerCase();
+		let pick = wanted === void 0 ? latestOf(queryTokens) : latestOf(queryTokens.filter((token) => token.name.toLowerCase() === wanted));
+		if (pick === void 0 && proposed === void 0 && queryTokens.length > 0) pick = latestOf(queryTokens);
+		if (pick === void 0) {
+			const bodyTokens = tokens.filter((token) => token.location === "body");
+			if (proposed === void 0 && bodyTokens.length > 0) return unsupportedReason(`token 型凭证暂不支持 body 注入（采到 ${bodyTokens.length} 条 body token）：本期只注入 header/query token`, captureIds);
+			return unsupportedReason(`token 型凭证未采集：采集库里没有 ${proposed ?? "query token"} 参数，需重新采集登录态站点`, captureIds);
+		}
+		const paramName = pick.name;
+		return {
+			headers: {},
+			query: { [paramName]: pick.value },
+			application: appliedTokenApplication("query", [paramName], captureIds)
+		};
+	};
+	const resolveToken = (card, captureIds, rows) => {
+		if (captureIds.length === 0) return unsupportedReason("卡没有采集来源（sources[].captureId 为空），无法补采 token", captureIds);
+		if (rows.databaseError !== void 0) return unsupportedReason(`采集库不可用，无法补采 token：${rows.databaseError}`, captureIds);
+		const tokens = [];
+		for (const row of rows.tokenRows) {
+			const token = tokenOfRow(row);
+			if (token !== void 0) tokens.push(token);
+		}
+		const evidence = authEvidenceOf(card);
+		return card.auth === "token-header" ? resolveTokenHeader(captureIds, tokens, evidence) : resolveTokenParam(captureIds, tokens, evidence);
+	};
+	return (need) => {
+		const card = need.card;
+		const captureIds = captureIdsOf(card);
+		if (card.auth === void 0 || card.auth === "none") return none("该卡无鉴权", captureIds);
+		if (card.auth === "unknown") return none("鉴权标志未判定，不注入", captureIds);
+		const tokenAuth = card.auth === "token-header" || card.auth === "token-param";
+		if (card.auth !== "cookie-session" && !tokenAuth) return unsupported(card, captureIds);
+		const rows = loadRows(captureIds);
+		return tokenAuth ? resolveToken(card, captureIds, rows) : resolveCookies(need, captureIds, rows);
 	};
 }
 
@@ -12406,7 +13915,8 @@ const EXPLORE_POLICY = [
 	"- 首跑用 dataforge_chain_probe 单节点试探；不要把整条不完整的链反复整链重跑。",
 	"- probe 的 values 必须带 source：user / agent-inferred / upstream；agent-inferred 与 upstream 必须写 evidence，禁止把猜测标成 user。",
 	"- 写操作（POST/PUT/PATCH/DELETE）必须经用户确认后带 confirm=true；没有确认只出计划卡。",
-	"- probe 返回的 outputs 用来发现绑定边；回写链只走 dataforge_chain_upsert（R-1 校验）。",
+	"- probe 返回的 outputs 用来发现绑定边；回写只走 dataforge_chain_bind（只给边，自增版本；仍过 R-1 校验），不要手抄整份 YAML。",
+	"- 复跑前后要对照时用 dataforge_chain_compare(runIds) 看入参/节点出参/状态差异，先对照再解释。",
 	"- 结晶只经 dataforge_chain_crystallize：upstream 值绝不冻常量；agent-inferred 必须用户确认；复跑用 dataforge_chain_run.inputs。",
 	"- 复跑失败先用 dataforge_chain_diagnose(run_id) 读断点/绑定边，再决定 probe 还是修链；不要盲目重跑写链。"
 ].join("\n");
@@ -12452,7 +13962,8 @@ function apply(ctx, rawConfig) {
 		resolveJobs: () => jobsService,
 		credentials: createCaptureCredentialProvider({
 			dbPath: orchestrationDeps.captureDbPath,
-			...credentialStorePath === void 0 ? {} : { storePath: credentialStorePath }
+			...credentialStorePath === void 0 ? {} : { storePath: credentialStorePath },
+			cache: true
 		}),
 		...credentialStorePath === void 0 ? {} : { credentialStorePath }
 	};
@@ -12494,13 +14005,15 @@ function apply(ctx, rawConfig) {
 			defineLibraryImportTool(orchestrationDeps),
 			defineChainUpsertTool(orchestrationDeps),
 			defineChainGetTool(orchestrationDeps),
+			defineChainBindTool(orchestrationDeps),
 			defineChainRunTool(chainRunDeps),
 			defineChainRunsTool(chainRunDeps),
 			defineChainProbeTool(chainRunDeps),
 			defineChainCrystalTool(chainRunDeps),
-			defineChainDiagnoseTool(chainRunDeps)
+			defineChainDiagnoseTool(chainRunDeps),
+			defineChainCompareTool(chainRunDeps)
 		]) tools.register(tool);
-		logger?.info?.(`已注册 19 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_run/chain_runs/chain_probe/chain_crystallize/chain_diagnose（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
+		logger?.info?.(`已注册 21 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_bind/chain_run/chain_runs/chain_probe/chain_crystallize/chain_diagnose/chain_compare（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
 		if (!config.chainRunEnabled) logger?.info?.("执行开关 chainRunEnabled=false：dataforge_chain_run 一律 execution-disabled");
 	});
 	if (config.injectPolicy) try {
