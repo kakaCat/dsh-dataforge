@@ -26,7 +26,7 @@ import { DataforgeError } from './shared/errors.js'
 import {
   defineBrowserActTool, defineBrowserCloseTool, defineBrowserOpenTool, defineBrowserSnapshotTool,
   defineCaptureCancelTool, defineCaptureResultTool, defineCaptureStatusTool, defineCaptureTool,
-  defineChainGetTool, defineChainProbeTool, defineChainRunsTool, defineChainRunTool, defineChainUpsertTool,
+  defineChainCrystalTool, defineChainGetTool, defineChainProbeTool, defineChainRunsTool, defineChainRunTool, defineChainUpsertTool,
   defineFlowsTool, defineLibraryImportTool, defineRunTool, defineStatusTool,
 } from './tools.js'
 import type { ChainRunToolDeps, OrchestrationDeps } from './orchestration/application.js'
@@ -97,6 +97,7 @@ const EXPLORE_POLICY = [
   '- probe 的 values 必须带 source：user / agent-inferred / upstream；agent-inferred 与 upstream 必须写 evidence，禁止把猜测标成 user。',
   '- 写操作（POST/PUT/PATCH/DELETE）必须经用户确认后带 confirm=true；没有确认只出计划卡。',
   '- probe 返回的 outputs 用来发现绑定边；回写链只走 dataforge_chain_upsert（R-1 校验）。',
+  '- 结晶只经 dataforge_chain_crystallize：upstream 值绝不冻常量；agent-inferred 必须用户确认；复跑用 dataforge_chain_run.inputs。',
 ].join('\n')
 
 /** 装载插件。 */
@@ -226,11 +227,12 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       defineChainRunTool(chainRunDeps),
       defineChainRunsTool(chainRunDeps),
       defineChainProbeTool(chainRunDeps),
+      defineChainCrystalTool(chainRunDeps),
     ]) {
       tools.register(tool)
     }
-    logger?.info?.(`已注册 17 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
-      + ` + library_import/chain_upsert/chain_get/chain_run/chain_runs/chain_probe（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
+    logger?.info?.(`已注册 18 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close`
+      + ` + library_import/chain_upsert/chain_get/chain_run/chain_runs/chain_probe/chain_crystallize（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`)
     if (!config.chainRunEnabled) logger?.info?.('执行开关 chainRunEnabled=false：dataforge_chain_run 一律 execution-disabled')
   })
 

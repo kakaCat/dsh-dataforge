@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../src/index.js'
 
-it('index: 注册 17 个工具（含编排三件套与首跑 probe），策略段含采集/首跑纪律', () => {
+it('index: 注册 18 个工具（含编排三件套、首跑 probe 与结晶），策略段含采集/首跑/结晶纪律', () => {
   const dir = mkdtempSync(join(tmpdir(), 'cap-idx-'))
   const registered: Array<{ name: string }> = []
   const sections: Array<{ name: string; text: string }> = []
@@ -32,7 +32,7 @@ it('index: 注册 17 个工具（含编排三件套与首跑 probe），策略�
     captureChromeChannel: 'chrome',
     chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true,
   } as never)
-  expect(registered).toHaveLength(17)
+  expect(registered).toHaveLength(18)
   const names = registered.map((t) => t.name)
   expect(names.filter((n) => n.startsWith('dataforge_browser_'))).toHaveLength(4)
   expect(names).toContain('dataforge_capture')
@@ -45,7 +45,9 @@ it('index: 注册 17 个工具（含编排三件套与首跑 probe），策略�
   expect(names).toContain('dataforge_chain_run')
   expect(names).toContain('dataforge_chain_runs')
   expect(names).toContain('dataforge_chain_probe')
+  expect(names).toContain('dataforge_chain_crystallize')
   expect(sections.some((s) => s.text.includes('dataforge-capture（接口采集）'))).toBe(true)
   expect(sections.some((s) => s.text.includes('不贴 token/cookie 原文'))).toBe(true)
   expect(sections.some((s) => s.text.includes('dataforge-explore（首跑试探）'))).toBe(true)
+  expect(sections.some((s) => s.text.includes('upstream 值绝不冻常量'))).toBe(true)
 })

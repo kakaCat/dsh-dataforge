@@ -27,6 +27,7 @@ import {
   type ChainRunToolValue, type ChainUpsertToolValue, type ImportLibraryToolValue, type OrchestrationDeps,
 } from './orchestration/application.js'
 import { probeForTool, type ChainProbeToolArgs } from './orchestration/explore.js'
+import { crystalForTool, crystalOutputOf, type CrystalToolArgs, type CrystalToolOutput, type CrystalToolValue } from './orchestration/crystal.js'
 import type { ProbeResult } from './execute/probe.js'
 
 /** 渲染边界单向收紧：进 render 的值已被 defineTool 按 schema 运行时校验，只是 TS 推断偏松。 */
@@ -1318,6 +1319,111 @@ export function defineChainProbeTool(deps: ChainRunToolDeps) {
         ...(args.retry === undefined ? {} : { retry: args.retry }),
         ...(args.explorationId === undefined ? {} : { explorationId: args.explorationId }),
       }))
+    },
+  })
+}
+
+function renderChainCrystal(value: CrystalToolValue): string {
+  if (value.gate === 'blocked') {
+    const issues = (value.issues ?? []).map((issue) => `- ${issue.target}：${issue.reason}`).join('\n')
+    return `❌ 结晶未完成（${value.code ?? 'unknown'}）：${value.message ?? ''}${issues === '' ? '' : `\n${issues}`}`
+  }
+  const rows = value.draft?.rows ?? value.rows ?? []
+  const lines = rows.slice(0, RECEIPT_MAX_LINES).map((row) => {
+    const flags = [
+      row.requiresUserConfirmation ? '需用户确认' : '',
+      row.conflict ? '冲突' : '',
+      row.excluded === undefined ? '' : `排除：${row.excluded}`,
+    ].filter(Boolean).join('；')
+    const valueText = row.excluded === undefined ? ` = ${row.value === undefined ? '' : JSON.stringify(row.value)}` : ''
+    return `- ${row.nodeId} · ${row.path} ← ${row.source} → ${row.suggestion}${valueText}${flags === '' ? '' : `（${flags}）`}`
+  })
+  const more = rows.length > RECEIPT_MAX_LINES ? `\n… 还有 ${rows.length - RECEIPT_MAX_LINES} 行` : ''
+  const inputs = (value.inputs ?? []).map((slot) => `- ${slot.name}: ${slot.type}${slot.required ? '（必填）' : ''}${slot.example === undefined ? '' : `，例 ${slot.example}`}`).join('\n')
+  const head = value.gate === 'written'
+    ? `✅ ${value.message ?? '结晶已写回'}\n版本：v${value.version ?? '?'}（${value.path ?? '?'}）`
+    : `📝 结晶草案（未写链）：${rows.length} 行\n${lines.join('\n')}${more}`
+  return [
+    head,
+    value.gate === 'written' && lines.length > 0 ? `\n本次分类：\n${lines.join('\n')}${more}` : '',
+    inputs === '' ? '' : `\n链级槽位：\n${inputs}`,
+    value.runId === undefined ? '' : `\n留痕：${value.runId}`,
+    value.gate === 'written'
+      ? '\n下一步：dataforge_chain_run(inputs:{...}, confirm:true) 换入参复跑。'
+      : '\n确认草案后带 confirm=true 重调；agent-inferred 行需在 decisions 里 confirmed:true。',
+    (value.warnings ?? []).length === 0 ? '' : `\n提醒：${(value.warnings ?? []).join('；')}`,
+  ].filter(Boolean).join('\n')
+}
+
+export function defineChainCrystalTool(deps: ChainRunToolDeps) {
+  return defineTool({
+    name: 'dataforge_chain_crystallize',
+    description: `结晶（R-6）：读同一 explorationId 的 probe 留痕，按来源给出三分类草案；confirm=true 后写回链的新版本。
+
+分类铁律（工具层强制）：
+- source=user → 入参槽位（链级 inputs + 节点 constants: "$inputs.<name>"）；
+- source=constant → 节点 constants；
+- source=upstream → 链生成值，**绝不冻结**，只校验已有绑定边；任何把 upstream 当 constant/input 的决策都会被 crystal-iron-rule 拒绝；
+- source=agent-inferred → 入参候选，必须在 decisions 里 confirmed:true（用户确认过）才写。
+
+用法：
+- 不带 confirm 只返回草案（draft），不写链；
+- decisions 的键是 "<nodeId>:<path>"，值形如 { "as": "input"|"constant", "slotName"?: "...", "confirmed"?: true }；
+- 冲突行（同一 path 多条 probe 值/来源不一致）必须用 decisions 明确选一个，否则 crystal-conflict；
+- 写回只走 saveChain（R-1 校验 + 新版本），失败不落盘。
+
+结晶后复跑：dataforge_chain_run(site, flow, inputs:{...}, confirm:true)；链生成值会由上游响应重新求解。`,
+    parameters: {
+      site: { type: 'string', required: true, description: '站点名（链的 meta.site）' },
+      flow: { type: 'string', required: true, description: '流程名（链的 meta.flow）' },
+      version: { type: 'number', description: '链版本；缺省最新' },
+      explorationId: { type: 'string', description: '要结晶的探索组；缺省 = 该 site/flow 最近一组 probe' },
+      confirm: { type: 'boolean', description: '确认草案后才允许 true；缺省只返回草案，不写链' },
+      decisions: {
+        type: 'object',
+        additionalProperties: true,
+        description: '键 "<nodeId>:<path>"，值 { as: "input"|"constant", slotName?, confirmed? }；agent-inferred 行必须 confirmed:true',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          gate: { type: 'string', description: 'draft / written / blocked' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+          draft: { type: 'object', additionalProperties: true },
+          rows: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          inputs: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          version: { type: 'number' },
+          path: { type: 'string' },
+          runId: { type: 'string' },
+          runDir: { type: 'string' },
+          issues: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { target: { type: 'string' }, code: { type: 'string' }, reason: { type: 'string' } },
+            },
+          },
+          warnings: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderChainCrystal(tighten<CrystalToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<CrystalToolOutput> {
+      const decisions = args.decisions as CrystalToolArgs['decisions'] | undefined
+      return lossless(crystalOutputOf(await crystalForTool(deps, exec, {
+        site: args.site,
+        flow: args.flow,
+        ...(args.version === undefined ? {} : { version: args.version }),
+        ...(args.explorationId === undefined ? {} : { explorationId: args.explorationId }),
+        ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
+        ...(decisions === undefined ? {} : { decisions }),
+      })))
     },
   })
 }
