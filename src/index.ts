@@ -32,6 +32,7 @@ import {
 import type { ChainRunToolDeps, OrchestrationDeps } from './orchestration/application.js'
 import { openCapturingPage } from './capture/browser.js'
 import { CaptureStore } from './capture/store.js'
+import { createCaptureCredentialProvider } from './capture/credentials.js'
 import { startCapture } from './capture/application.js'
 import { PANEL_API_PREFIX, registerCapturePanelRoutes, type PanelRouteRegistrar } from './capture/panel-routes.js'
 import { createOrchestrationPanelHandler } from './orchestration/panel-routes.js'
@@ -146,6 +147,9 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       foregroundTimeoutSeconds: config.timeoutSeconds,
     },
     resolveJobs: () => jobsService,
+    // R-4 M1：执行期按卡的来源 captureId 只读采集库注入 cookie。
+    // 采集库缺席/坏库由 provider 自己降级，不阻断无鉴权链。
+    credentials: createCaptureCredentialProvider({ dbPath: orchestrationDeps.captureDbPath }),
   }
 
   // 面板数据面：/dashboard/api/dataforge 只读路由（webServer 惰性注入；服务缺席 → 工具面照常）。

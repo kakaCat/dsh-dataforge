@@ -45,6 +45,8 @@ import { buildRequest } from './request.js'
 import type { StaticGap } from './coverage.js'
 import { normalizePath } from './coverage.js'
 import { httpRequest, redactHeaders } from './http.js'
+import type { CredentialApplication, CredentialProvider } from './credentials.js'
+import { mergeCredentialHeaders } from './credentials.js'
 
 /* ================================================================== 常量 */
 
@@ -134,6 +136,8 @@ export type NodeResult = {
   responseDigest?: ResponseDigest
   bindings: BindingRecord[]
   truncated?: boolean
+  /** R-4 M1：这一发请求的凭证摘要（只含名字/域/来源，不含值）。 */
+  credentials?: CredentialApplication
 }
 
 /** `run.json` 的内容（写入一次，先于第一个请求；崩溃时至少留下计划与目标）。 */
@@ -219,6 +223,11 @@ export type RunChainInput = {
   runId?: string
   /** 链文件相对路径（写进 run.json，事后能对上「当时跑的是哪一版」）。 */
   chainPath?: string
+  /**
+   * R-4 M1：凭证提供者。缺席 = 不注入（与 R-3 行为完全一致）；
+   * 提供者自身不抛异常，降级通过 `application.status` 表达。
+   */
+  credentials?: CredentialProvider
 }
 
 /* ================================================================== 能力探测 */
@@ -472,23 +481,48 @@ export async function executeChainRun(
       return failAfterStart(bindings, built.code, message)
     }
 
-    const request = built.request
+    // 2.5) R-4 M1：凭证注入（buildRequest 之后、发请求之前——唯一注入点）。
+    //      provider 缺席 = R-3 行为；provider 自身不抛异常，降级只体现在摘要里。
+    let request = built.request
+    let credentialApplication: CredentialApplication | undefined
+    if (input.credentials !== undefined) {
+      const resolution = input.credentials({ card, url: request.url, method: request.method, nodeId })
+      credentialApplication = resolution.application
+      if (Object.keys(resolution.headers).length > 0) {
+        request = { ...request, headers: mergeCredentialHeaders(request.headers, resolution.headers) }
+      }
+      result.credentials = credentialApplication
+    }
+
+    // 凭证值只用于两件事：发请求、给留痕做脱敏。绝不写进事件/摘要/回执。
+    const secrets = credentialApplication?.status === 'applied' ? secretValuesOf(request.headers) : []
+    if (secrets.length > 0) {
+      for (const binding of bindings) {
+        if (binding.valuePreview !== undefined) binding.valuePreview = redactSecrets(binding.valuePreview, secrets)
+      }
+    }
     const requestDigest: RequestDigest = {
       method: request.method,
       url: request.url,
       headers: redactHeaders(request.headers),
-      ...(request.body === undefined ? {} : { bodyPreview: previewText(request.body) }),
+      ...(request.body === undefined ? {} : { bodyPreview: previewText(redactSecrets(request.body, secrets)) }),
     }
     result.requestDigest = requestDigest
     result.url = request.url
 
     // 3) start 事件先于请求落盘：请求一旦发出，记录里必须已经有它。
+    //    凭证摘要只在这里出现一次；值永远不会进事件。
     emit({
       event: 'step',
       id: nodeId,
       action: `${request.method} ${request.url}`,
       status: 'start',
-      data: { card: planNode.cardId, attempt: 1, request: requestDigest },
+      data: {
+        card: planNode.cardId,
+        attempt: 1,
+        request: requestDigest,
+        ...(credentialApplication === undefined ? {} : { credentials: credentialApplication }),
+      },
     })
     input.onProgress?.(`▶ ${nodeId}：${request.method} ${request.url}`)
 
@@ -541,7 +575,8 @@ export async function executeChainRun(
       status: response.status,
       bytes: response.bytes,
       truncated: response.truncated,
-      bodyPreview: previewText(response.bodyText),
+      // 服务端可能把 cookie/token 回显在错误体里：留痕前按已知凭证值再脱敏一次。
+      bodyPreview: previewText(redactSecrets(response.bodyText, secrets)),
     }
     result.httpStatus = response.status
     result.responseDigest = responseDigest
@@ -557,7 +592,7 @@ export async function executeChainRun(
             : 'node-http-error'
           : 'node-http-error'
       const hint = code === 'node-auth-required'
-        ? `HTTP ${response.status}：该卡声明了鉴权（${card.auth}），凭证注入是 R-4 的事；引擎不换票、不重试`
+        ? authHint(card, response.status, credentialApplication)
         : `HTTP ${response.status}`
       result.errorCode = code
       result.error = hint
@@ -585,7 +620,10 @@ export async function executeChainRun(
 
     // 6) 成功：存响应根（供下游绑定求值）→ 报出参 → step(done)。
     roots.set(nodeId, { body: response.json ?? response.bodyText, status: response.status, headers: response.headers })
-    const emitted = collectEmitted(doc, cards, nodeId, roots.get(nodeId) as BindingRoot)
+    const emitted = redactRecord(
+      collectEmitted(doc, cards, nodeId, roots.get(nodeId) as BindingRoot),
+      secrets,
+    )
     result.status = 'done'
     results.set(nodeId, result)
     emit({
@@ -807,6 +845,31 @@ function authRequired(card: InterfaceCardDoc): boolean {
   return typeof card.auth === 'string' && card.auth.length > 0 && card.auth !== 'none'
 }
 
+/**
+ * 401/403 的诊断：必须能回答「到底带没带凭证」。
+ *
+ * R-3 的旧文案把 401 一律推给 R-4；现在注入了就说明「带了但仍被拒（可能过期）」，
+ * 没注入就说明「没带上以及为什么」——两种下一步不同，不能混成一句。
+ */
+function authHint(
+  card: InterfaceCardDoc,
+  status: number,
+  application: CredentialApplication | undefined,
+): string {
+  if (application?.status === 'applied') {
+    return `HTTP ${status}：已注入 ${application.names.length} 个 cookie（${application.names.join('、')}）但仍被拒；凭证可能过期。自动重登换票属 R-4 M2，尚未实现——请重新采集/登录后重跑`
+  }
+  const reason =
+    application === undefined
+      ? '本次运行未配置凭证注入（R-4 注入缝未装配）'
+      : application.status === 'expired'
+        ? '匹配到的 cookie 全部过期'
+        : application.status === 'unsupported'
+          ? (application.reason ?? 'token 型凭证未采集')
+          : (application.reason ?? '没有可用凭证')
+  return `HTTP ${status}：该卡声明了鉴权（${String(card.auth)}），但没有注入可用凭证（${reason}）；引擎不换票、不重试`
+}
+
 /** 节点级超时优先（R-1 预留位），否则用全局缺省。 */
 function timeoutOf(node: ChainNode, fallbackMs: number): number {
   const seconds = node.timeoutSeconds
@@ -826,6 +889,50 @@ export function previewText(text: string): string {
   const buffer = Buffer.from(text ?? '', 'utf8')
   if (buffer.byteLength <= DIGEST_PREVIEW_BYTES) return text ?? ''
   return buffer.subarray(0, DIGEST_PREVIEW_BYTES).toString('utf8')
+}
+
+/**
+ * 从已注入的请求头里取「需要从留痕中抹掉的值」。
+ *
+ * 只认 cookie 头的值；太短（< 4 字符）的值不参与替换，避免把正常业务文本打碎。
+ * 这些值只在本次节点的内存里存在，函数返回后不写任何地方。
+ */
+function secretValuesOf(headers: Record<string, string>): string[] {
+  const cookie = Object.entries(headers).find(([name]) => name.toLowerCase() === 'cookie')?.[1]
+  if (cookie === undefined || cookie === '') return []
+  const secrets = new Set<string>()
+  for (const part of cookie.split(';')) {
+    const trimmed = part.trim()
+    const at = trimmed.indexOf('=')
+    if (at === -1) continue
+    const value = trimmed.slice(at + 1)
+    if (value.length >= 4) secrets.add(value)
+  }
+  return [...secrets]
+}
+
+/** 文本脱敏：把已知凭证值替换成 `***`。 */
+function redactSecrets(text: string, secrets: string[]): string {
+  if (secrets.length === 0) return text
+  let out = text
+  for (const secret of secrets) out = out.split(secret).join('***')
+  return out
+}
+
+/** 递归脱敏（只用于事件里的 emitted 值，不改变绑定求值本身）。 */
+function redactRecord(record: Record<string, unknown>, secrets: string[]): Record<string, unknown> {
+  if (secrets.length === 0) return record
+  const redactUnknown = (value: unknown): unknown => {
+    if (typeof value === 'string') return redactSecrets(value, secrets)
+    if (Array.isArray(value)) return value.map(redactUnknown)
+    if (typeof value === 'object' && value !== null) {
+      const out: Record<string, unknown> = {}
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) out[key] = redactUnknown(child)
+      return out
+    }
+    return value
+  }
+  return redactUnknown(record) as Record<string, unknown>
 }
 
 /** 绑定值预览：标量原样，对象/数组序列化后截断（事件流不做数据仓库）。 */

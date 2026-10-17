@@ -940,6 +940,8 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
 
 运行期失败（binding-* / node-* / response-too-large / cancelled）不自动重试：链已中止，错误进运行记录，修好后用新 run 重跑（绝不自动重放写请求）。
 
+鉴权：卡声明 cookie-session 时，引擎会按卡的采集来源自动注入 cookie；token 型一期未采集，不猜 Authorization。401 回执区分「未注入可用凭证」与「已注入但仍 401」，后者可能需要重新登录/采集——自动换票尚未实现。
+
 幂等性：**不幂等**。同一参数重复调用就是新 run、新请求。长链走宿主后台 job，用 dataforge_status 轮询、job_kill 取消。`,
     parameters: {
       site: { type: 'string', required: true, description: '站点名（链的 meta.site）' },

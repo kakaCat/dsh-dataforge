@@ -26,6 +26,7 @@ import {
 } from '../execute/run.js'
 import { foldSummary, listRunIds, loadRunEvents, readRunRecord } from '../runs/store.js'
 import type { RunSummary } from '../shared/types.js'
+import type { CredentialProvider } from '../execute/credentials.js'
 import { extractJobId, ownerOf } from '../application.js'
 
 export type OrchestrationDeps = {
@@ -48,6 +49,11 @@ export type ChainRunToolDeps = OrchestrationDeps & {
   chain: ChainRunConfig & { foregroundTimeoutSeconds: number }
   /** ctx.jobs 服务（可能 undefined —— 诚实降级前台）。 */
   resolveJobs: () => unknown
+  /**
+   * R-4 M1：凭证提供者。缺席 = 不注入（R-3 行为）；
+   * 装配处（`index.ts`）把采集库只读适配器注进来，工具壳不认识 SQLite。
+   */
+  credentials?: CredentialProvider
 }
 
 /** 逐条问题时给模型看的行：`nodes[0]: reason`。 */
@@ -607,6 +613,7 @@ export async function chainRunForTool(
     ...(args.concurrency === undefined ? {} : { concurrency: args.concurrency }),
     chainPath: chainPathForRecord(workspaceRoot, loaded.path),
     ...(args.dryRun === true ? { dryRun: true } : {}),
+    ...(deps.credentials === undefined ? {} : { credentials: deps.credentials }),
   }
 
   // dry-run：同一份计划、永不发请求，但落一条 `dryRun: true` 留痕（计划本身要能被复查）。

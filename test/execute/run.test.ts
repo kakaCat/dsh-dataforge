@@ -24,6 +24,7 @@ import {
   type ChainRunConfig,
 } from '../../src/execute/run.js'
 import { foldSummary, loadRunEvents, readRunRecord } from '../../src/runs/store.js'
+import type { CredentialProvider } from '../../src/execute/credentials.js'
 
 /* ================================================================== 假服务端 */
 
@@ -31,7 +32,7 @@ let server: Server
 let base = ''
 
 /** 服务端看到的请求（顺序即真实发出顺序）。 */
-let seen: Array<{ method: string; url: string; body: string }> = []
+let seen: Array<{ method: string; url: string; body: string; headers: Record<string, string | string[] | undefined> }> = []
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -39,7 +40,22 @@ beforeAll(async () => {
     const chunks: Buffer[] = []
     req.on('data', (chunk: Buffer) => chunks.push(chunk))
     req.on('end', () => {
-      seen.push({ method: req.method ?? '', url, body: Buffer.concat(chunks).toString('utf8') })
+      seen.push({
+        method: req.method ?? '',
+        url,
+        body: Buffer.concat(chunks).toString('utf8'),
+        headers: req.headers,
+      })
+      if (url.startsWith('/api/cookie')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ cookie: req.headers.cookie ?? '' }))
+        return
+      }
+      if (url.startsWith('/api/auth-only')) {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end('{"error":"login required"}')
+        return
+      }
       if (url.startsWith('/api/materials/detail')) {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ materialCode: 'CODE-9' }))
@@ -130,6 +146,40 @@ const slowACard = cardOf('card_slow_a', 'GET', '/api/slow-a', [])
 const slowBCard = cardOf('card_slow_b', 'GET', '/api/slow-b', [])
 const hangCard = cardOf('card_hang', 'GET', '/api/hang', [])
 const bigCard = cardOf('card_big', 'GET', '/api/big', [], [{ path: 'body.items[*].internalId', type: 'string' }])
+/** R-4 M1：声明了 cookie-session 的卡（卡文件本身仍零凭证）。 */
+const cookieCard: InterfaceCardDoc = { ...cardOf('card_cookie', 'GET', '/api/cookie', []), auth: 'cookie-session' }
+const authOnlyCard: InterfaceCardDoc = { ...cardOf('card_auth_only', 'GET', '/api/auth-only', []), auth: 'cookie-session' }
+
+/** 测试用 provider：只回一份固定 cookie，摘要里不含值。 */
+function providerOf(cookie: string): CredentialProvider {
+  const name = cookie.split('=')[0] ?? 'sid'
+  return () => ({
+    headers: { cookie },
+    application: {
+      status: 'applied',
+      source: 'capture',
+      header: 'cookie',
+      names: [name],
+      domains: ['127.0.0.1'],
+      captureIds: ['cap_1'],
+      expired: 0,
+    },
+  })
+}
+
+/** 测试用 provider：什么都没匹配到。 */
+const emptyProvider: CredentialProvider = () => ({
+  headers: {},
+  application: {
+    status: 'none',
+    source: 'capture',
+    names: [],
+    domains: [],
+    captureIds: ['cap_1'],
+    expired: 0,
+    reason: '没有匹配 127.0.0.1 的 cookie',
+  },
+})
 
 function cardsOf(...cards: InterfaceCardDoc[]): Map<string, InterfaceCardDoc> {
   return new Map(cards.map((card) => [card.cardId, card]))
@@ -322,6 +372,113 @@ describe('主路径：拓扑执行 + 绑定传值', () => {
     await runChain(deps, { doc, cards, plan, baseUrl: base, concurrency: 1 })
 
     expect(seen.map((entry) => entry.url)).toEqual(['/api/slow-a', '/api/slow-b'])
+  })
+})
+
+/* ================================================================== 凭证注入（R-4 M1） */
+
+describe('凭证注入：cookie 只进出站请求，不进入任何留痕', () => {
+  it('cookie-session 卡：请求带上注入的 cookie，事件全文扫不到值', async () => {
+    seen = []
+    const deps = depsOf()
+    const cards = cardsOf(cookieCard)
+    const doc = chainOf([{ id: 'cookie-node', card: 'card_cookie', constants: {} }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, {
+      doc,
+      cards,
+      plan,
+      baseUrl: base,
+      credentials: providerOf('sid=SECRET-123'),
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('completed')
+
+    // 服务端真的收到了 cookie。
+    expect(seen[0]?.headers.cookie).toBe('sid=SECRET-123')
+
+    const events = loadRunEvents(deps.dataRoot, result.runId) ?? []
+    const text = JSON.stringify(events)
+    expect(text).not.toContain('SECRET-123')
+    // 摘要里能回答「带了哪个名字」，但不含值。
+    const start = events.find((event) => event.event === 'step' && event.status === 'start' && event.id === 'cookie-node')
+    expect(start?.data?.['credentials']).toMatchObject({
+      status: 'applied',
+      names: ['sid'],
+      header: 'cookie',
+    })
+    // 请求摘要里的 cookie 头已打码。
+    const digest = start?.data?.['request'] as { headers?: Record<string, string> } | undefined
+    expect(digest?.headers?.['cookie']).toBe('***')
+  })
+
+  it('provider 缺席：行为与 R-3 完全一致（不发 cookie、无 credentials 摘要）', async () => {
+    seen = []
+    const deps = depsOf()
+    const cards = cardsOf(cookieCard)
+    const doc = chainOf([{ id: 'cookie-node', card: 'card_cookie', constants: {} }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, { doc, cards, plan, baseUrl: base })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(seen[0]?.headers.cookie).toBeUndefined()
+    const events = loadRunEvents(deps.dataRoot, result.runId) ?? []
+    const start = events.find((event) => event.event === 'step' && event.status === 'start' && event.id === 'cookie-node')
+    expect(start?.data?.['credentials']).toBeUndefined()
+  })
+
+  it('注入了但仍 401：诊断说清「已注入 N 个 cookie」，不再推给「凭证注入是 R-4 的事」', async () => {
+    seen = []
+    const deps = depsOf()
+    const cards = cardsOf(authOnlyCard)
+    const doc = chainOf([{ id: 'auth-node', card: 'card_auth_only', constants: {} }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, {
+      doc,
+      cards,
+      plan,
+      baseUrl: base,
+      credentials: providerOf('sid=STALE'),
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('failed')
+    expect(result.failedNode).toBe('auth-node')
+    const node = result.nodes.find((candidate) => candidate.nodeId === 'auth-node')
+    expect(node?.errorCode).toBe('node-auth-required')
+    expect(node?.error).toContain('已注入 1 个 cookie')
+    expect(node?.error).toContain('R-4 M2')
+    expect(node?.credentials?.status).toBe('applied')
+  })
+
+  it('没有可用凭证时 401：诊断说清「没有注入」以及原因', async () => {
+    seen = []
+    const deps = depsOf()
+    const cards = cardsOf(authOnlyCard)
+    const doc = chainOf([{ id: 'auth-node', card: 'card_auth_only', constants: {} }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, {
+      doc,
+      cards,
+      plan,
+      baseUrl: base,
+      credentials: emptyProvider,
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const node = result.nodes.find((candidate) => candidate.nodeId === 'auth-node')
+    expect(node?.errorCode).toBe('node-auth-required')
+    expect(node?.error).toContain('没有注入可用凭证')
+    expect(node?.error).toContain('没有匹配')
   })
 })
 
