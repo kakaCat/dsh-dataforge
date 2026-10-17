@@ -4295,11 +4295,11 @@ function missingInputs(node, card, covered) {
 	for (const field of card.inputs ?? []) {
 		if (field.role === "credential") continue;
 		if (covered.has(normalizePath(field.path))) continue;
-		gaps.push(gapOf(node, field));
+		gaps.push(gapOf$1(node, field));
 	}
 	return gaps;
 }
-function gapOf(node, field) {
+function gapOf$1(node, field) {
 	return {
 		nodeId: node.id,
 		path: field.path,
@@ -5608,7 +5608,7 @@ const MAX_CONCURRENCY = 16;
 /** 节点级重试硬上限（与 IF-4 的 retry 上限一致）。 */
 const MAX_NODE_RETRY = 5;
 /** 幂等方法：只有它们才吃 `node.retry`（写方法重试 = 重放写请求，绝不默认）。 */
-const IDEMPOTENT_METHODS = /* @__PURE__ */ new Set([
+const IDEMPOTENT_METHODS$1 = /* @__PURE__ */ new Set([
 	"GET",
 	"HEAD",
 	"OPTIONS"
@@ -5878,7 +5878,7 @@ async function executeChainRun(deps, prepared, input) {
 			bindings.push({
 				from: edge.from,
 				to: edge.to,
-				valuePreview: previewValue(bound.value)
+				valuePreview: previewValue$1(bound.value)
 			});
 		}
 		const built = buildRequest({
@@ -6374,7 +6374,7 @@ function timeoutOf(node, fallbackMs) {
 }
 /** 只有幂等方法才吃节点级 retry：写方法重试就是重放写请求。 */
 function retryOf(node, method) {
-	if (!IDEMPOTENT_METHODS.has(method)) return 0;
+	if (!IDEMPOTENT_METHODS$1.has(method)) return 0;
 	const raw = node.retry;
 	if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
 	return Math.max(0, Math.min(MAX_NODE_RETRY, Math.floor(raw)));
@@ -6427,7 +6427,7 @@ function redactRecord(record, secrets) {
 	return redactUnknown(record);
 }
 /** 绑定值预览：标量原样，对象/数组序列化后截断（事件流不做数据仓库）。 */
-function previewValue(value) {
+function previewValue$1(value) {
 	if (typeof value === "string") return value.length <= 512 ? value : `${value.slice(0, 512)}…`;
 	if (value === null) return "null";
 	if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -6658,7 +6658,7 @@ function toChainIssues(issues) {
 		reason: issue.reason
 	}));
 }
-function messageOf$1(error) {
+function messageOf$2(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function isLibraryError(error) {
@@ -6676,7 +6676,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `解析工作区根失败：${messageOf$1(error)}`,
+			message: `解析工作区根失败：${messageOf$2(error)}`,
 			hints: []
 		};
 	}
@@ -6707,7 +6707,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `导入接口库失败：${messageOf$1(error)}`,
+			message: `导入接口库失败：${messageOf$2(error)}`,
 			hints: []
 		};
 	}
@@ -6738,7 +6738,7 @@ async function upsertChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `落盘链失败：${messageOf$1(error)}`
+			message: `落盘链失败：${messageOf$2(error)}`
 		};
 	}
 }
@@ -6781,6 +6781,7 @@ async function getChainForTool(deps, exec, args) {
 	};
 }
 /** 链执行节点的卡：逐 cardId 解析（默认解析器直读接口库，单次调用内缓存）。 */
+/** 逐 cardId 解析卡（probe/整链共用；单次调用内缓存）。 */
 function cardsForChain(workspaceRoot, doc) {
 	const resolve = defaultCardResolver(workspaceRoot);
 	const cards = /* @__PURE__ */ new Map();
@@ -7054,7 +7055,7 @@ async function chainRunForTool(deps, exec, args) {
 			accepted: false,
 			gate: "blocked",
 			code: "invalid-chain",
-			message: `解析工作区根失败：${messageOf$1(error)}`
+			message: `解析工作区根失败：${messageOf$2(error)}`
 		};
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
@@ -7292,6 +7293,655 @@ function listChainRunsForTool(deps, args) {
 /** 非 plain object（数组/缺失）一律 undefined。 */
 function plainRecordOf(value) {
 	if (value !== null && typeof value === "object" && !Array.isArray(value)) return value;
+}
+
+//#endregion
+//#region src/execute/probe.ts
+/**
+* 单节点试探（R-5 M1）：链上某一个节点的一发请求 + 值来源 + 独立 run 留痕。
+*
+* 与整链执行（`run.ts`）的分工：
+*   - probe **不消费绑定边**、不写链文件、不做换票；它只回答「这个节点用这些值发一发，
+*     会发生什么、能取到哪些出参」；
+*   - 缺参不整链拒跑，而是在发请求前返回 `paused`：缺什么 + 卡模板长什么样；
+*   - 写方法没有 `confirm=true` 只出计划卡，一个请求都不发（R-5 的用户确认闸）。
+*
+* 安全面：
+*   - 敏感路径（password/token/secret/authorization/cookie/api-key…）的值一律写 `***`，
+*     不进 run.json / 事件 / 回执；
+*   - 请求头走 `redactHeaders`；正文与响应预览按敏感值再做一次文本脱敏；
+*   - probe 不处理凭证；需要登录态的节点由调用方装配的 R-4 provider 注入。
+*
+* @module dsh-dataforge/execute/probe
+*/
+const WRITE_METHODS = /* @__PURE__ */ new Set([
+	"POST",
+	"PUT",
+	"PATCH",
+	"DELETE"
+]);
+const IDEMPOTENT_METHODS = /* @__PURE__ */ new Set([
+	"GET",
+	"HEAD",
+	"OPTIONS"
+]);
+const MAX_PROBE_RETRY = 3;
+const SENSITIVE_PATH_RE = /(pass(word)?|pwd|secret|token|authorization|cookie|api[-_]?key|credential)/i;
+function isSensitivePath(path) {
+	return SENSITIVE_PATH_RE.test(path);
+}
+function previewValue(value) {
+	if (typeof value === "string") return value.length <= 512 ? value : `${value.slice(0, 512)}…`;
+	if (value === null) return "null";
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	try {
+		const text = JSON.stringify(value);
+		return text.length <= 512 ? text : `${text.slice(0, 512)}…`;
+	} catch {
+		return "[不可序列化]";
+	}
+}
+/** 文本脱敏：把已知敏感值替换成 `***`（防请求/响应回显）。 */
+function redactText(text, sensitiveValues) {
+	if (sensitiveValues.length === 0) return text;
+	let out = text;
+	for (const value of sensitiveValues) {
+		if (value === void 0 || value === null) continue;
+		const raw = typeof value === "string" ? value : previewValue(value);
+		if (raw.length < 2) continue;
+		out = out.split(raw).join("***");
+	}
+	return out;
+}
+function redactHeaderValues(headers, sensitiveValues) {
+	const out = {};
+	for (const [name, value] of Object.entries(headers)) out[name] = redactText(value, sensitiveValues);
+	return out;
+}
+function cardInputsOf(card) {
+	return (card.inputs ?? []).filter((field) => field.role !== "credential").map((field) => ({
+		path: field.path,
+		type: field.type,
+		required: field.required === true,
+		...field.role === void 0 ? {} : { role: field.role }
+	}));
+}
+function newProbeRunId(dataRoot, flow, now) {
+	const base = `probe-${slugOf(flow) || "flow"}-${now}`;
+	let candidate = base;
+	let suffix = 2;
+	while (existsSync(join(runsRoot(dataRoot), candidate))) {
+		candidate = `${base}-${suffix}`;
+		suffix += 1;
+	}
+	return candidate;
+}
+function gapOf(gap) {
+	return {
+		path: gap.path,
+		type: gap.type,
+		target: gap.target
+	};
+}
+/**
+* 值来源校验 + 缺参判定。
+*
+* 缺参不走错误：返回 `gaps` 让调用方 `paused`；值形状错误才是 blocked。
+* 常量的来源自动标 `constant`；`$inputs.x` 常量从 `chainInputs` 取，来源标 `user`。
+*/
+function prepareProbeValues(input) {
+	const { card, node } = input;
+	const allInputs = new Map((card.inputs ?? []).map((field) => [normalizePath(field.path), field]));
+	const cardInputs = cardInputsOf(card);
+	const provided = /* @__PURE__ */ new Map();
+	for (const [rawPath, spec] of Object.entries(input.values ?? {})) {
+		const path = normalizePath(rawPath);
+		const field = allInputs.get(path);
+		if (field === void 0) return {
+			ok: false,
+			code: "unknown-value",
+			message: `${rawPath} 不在卡入参模板里；可用字段：${[...allInputs.keys()].join("、") || "（卡里没有入参）"}`
+		};
+		if (field.role === "credential") return {
+			ok: false,
+			code: "invalid-source",
+			message: `${rawPath} 是凭证字段：probe 不接受凭证值，请走 R-4 凭证注入`
+		};
+		if (spec === null || typeof spec !== "object" || Array.isArray(spec)) return {
+			ok: false,
+			code: "invalid-source",
+			message: `${rawPath} 的值必须形如 { value, source, evidence? }`
+		};
+		const source = spec.source;
+		if (source !== "user" && source !== "agent-inferred" && source !== "upstream") return {
+			ok: false,
+			code: "invalid-source",
+			message: `${rawPath} 的 source 非法：只允许 user / agent-inferred / upstream`
+		};
+		const value = spec.value;
+		if (value === void 0) return {
+			ok: false,
+			code: "invalid-source",
+			message: `${rawPath} 缺少 value`
+		};
+		const evidence = typeof spec.evidence === "string" ? spec.evidence.trim() : "";
+		if ((source === "agent-inferred" || source === "upstream") && evidence === "") return {
+			ok: false,
+			code: "invalid-source",
+			message: `${rawPath} 的来源是 ${source}：必须给 evidence（推断依据/上游绑定证据）`
+		};
+		provided.set(path, {
+			rawPath,
+			path,
+			value,
+			source,
+			...evidence === "" ? {} : { evidence },
+			sensitive: isSensitivePath(rawPath)
+		});
+	}
+	const covered = /* @__PURE__ */ new Set();
+	const provenance = [];
+	const valuesRecord = {};
+	const sensitiveValues = [];
+	const push = (field, value, source, evidence, sensitive) => {
+		covered.add(normalizePath(field.path));
+		provenance.push({
+			path: field.path,
+			source,
+			...evidence === void 0 || evidence === "" ? {} : { evidence },
+			valuePreview: sensitive ? "***" : previewValue(value),
+			...sensitive ? { redacted: true } : {}
+		});
+		valuesRecord[field.path] = sensitive ? "***" : value;
+		if (sensitive) sensitiveValues.push(value);
+	};
+	for (const field of card.inputs ?? []) {
+		if (field.role === "credential") continue;
+		const key = normalizePath(field.path);
+		const direct = provided.get(key);
+		if (direct !== void 0) {
+			push(field, direct.value, direct.source, direct.evidence, direct.sensitive);
+			continue;
+		}
+		const constantKey = Object.keys(node.constants ?? {}).find((candidate) => normalizePath(candidate) === key);
+		if (constantKey === void 0) continue;
+		const raw = (node.constants ?? {})[constantKey];
+		const slot = typeof raw === "string" ? inputSlotNameOf(raw) : void 0;
+		if (slot !== void 0) {
+			const slotValue = input.chainInputs?.[slot];
+			if (slotValue === void 0) continue;
+			push(field, slotValue, "user", `链级槽位 ${slot}`, isSensitivePath(field.path));
+			continue;
+		}
+		push(field, raw, "constant", `节点常量 ${constantKey}`, isSensitivePath(field.path) || isSensitivePath(constantKey));
+	}
+	return {
+		ok: true,
+		prepared: {
+			cardInputs,
+			provided,
+			provenance,
+			valuesRecord,
+			sensitiveValues,
+			gaps: missingInputs(node, card, covered).map(gapOf)
+		}
+	};
+}
+/** 一次单节点试探。不抛异常：所有失败折成 `ProbeResult`。 */
+async function probeNode(input) {
+	const { node, card, doc } = input;
+	const method = card.identity.method.toUpperCase();
+	const writes = WRITE_METHODS.has(method);
+	const preparedResult = prepareProbeValues(input);
+	if (!preparedResult.ok) return {
+		ok: false,
+		gate: "blocked",
+		code: preparedResult.code,
+		message: preparedResult.message,
+		nodeId: node.id,
+		cardId: card.cardId,
+		method
+	};
+	const prepared = preparedResult.prepared;
+	if (writes && input.confirm !== true) {
+		const plan = {
+			nodeId: node.id,
+			method,
+			urlTemplate: card.identity.urlTemplate,
+			writes: true,
+			cardInputs: prepared.cardInputs
+		};
+		return {
+			ok: true,
+			gate: "confirm-required",
+			code: "confirm-required",
+			message: `节点 ${node.id} 是写操作（${method}）：向用户确认后带 confirm=true 重调；本次没有发出任何请求`,
+			nodeId: node.id,
+			cardId: card.cardId,
+			method,
+			cardInputs: prepared.cardInputs,
+			plan,
+			provenance: prepared.provenance
+		};
+	}
+	const now = Date.now();
+	const explorationId = input.explorationId ?? `exp_${now}`;
+	const runId = newProbeRunId(input.dataRoot, doc.meta.flow, now);
+	const runRecord = {
+		kind: "probe-run",
+		flow: doc.meta.flow,
+		flowName: doc.meta.flow,
+		probe: {
+			site: doc.meta.site,
+			flow: doc.meta.flow,
+			version: doc.meta.version,
+			nodeId: node.id,
+			cardId: card.cardId,
+			method,
+			urlTemplate: card.identity.urlTemplate,
+			explorationId,
+			writes,
+			paused: prepared.gaps.length > 0
+		},
+		params: prepared.valuesRecord,
+		values: prepared.valuesRecord,
+		provenance: prepared.provenance,
+		baseUrl: input.baseUrl,
+		startedAt: now
+	};
+	const runDir = startRunRecord(input.dataRoot, runId, runRecord);
+	appendEvent(input.dataRoot, runId, {
+		event: "meta",
+		flow: doc.meta.flow,
+		name: doc.meta.flow,
+		steps: [node.id],
+		dryRun: false
+	});
+	if (prepared.gaps.length > 0) {
+		const message = `暂停：节点 ${node.id} 缺 ${prepared.gaps.length} 个入参，未发送任何请求`;
+		appendEvent(input.dataRoot, runId, {
+			event: "terminal",
+			success: false,
+			cancelled: false,
+			message
+		});
+		appendEvent(input.dataRoot, runId, {
+			event: "result",
+			success: false,
+			businessData: {
+				probe: true,
+				paused: true,
+				gaps: prepared.gaps,
+				provenance: prepared.provenance
+			}
+		});
+		return {
+			ok: true,
+			gate: "paused",
+			code: "missing-params",
+			message,
+			runId,
+			runDir,
+			explorationId,
+			nodeId: node.id,
+			cardId: card.cardId,
+			method,
+			gaps: prepared.gaps,
+			cardInputs: prepared.cardInputs,
+			provenance: prepared.provenance
+		};
+	}
+	const planNode = {
+		nodeId: node.id,
+		cardId: card.cardId,
+		method,
+		urlTemplate: card.identity.urlTemplate,
+		dependsOn: [],
+		constants: node.constants ?? {},
+		gaps: []
+	};
+	const providedValues = Object.fromEntries([...prepared.provided.values()].map((value) => [value.path, value.value]));
+	const built = buildRequest({
+		node: planNode,
+		card,
+		baseUrl: input.baseUrl,
+		provided: providedValues,
+		inputs: input.chainInputs ?? {}
+	});
+	if (!built.ok) {
+		appendEvent(input.dataRoot, runId, {
+			event: "terminal",
+			success: false,
+			cancelled: false,
+			message: `请求构造失败：${built.message}`
+		});
+		appendEvent(input.dataRoot, runId, {
+			event: "result",
+			success: false,
+			businessData: {
+				probe: true,
+				code: built.code,
+				provenance: prepared.provenance
+			}
+		});
+		return {
+			ok: false,
+			gate: "blocked",
+			code: built.code,
+			message: built.message,
+			runId,
+			runDir,
+			explorationId,
+			nodeId: node.id,
+			cardId: card.cardId,
+			method,
+			cardInputs: prepared.cardInputs,
+			provenance: prepared.provenance
+		};
+	}
+	let request = built.request;
+	let credentialApplication;
+	if (input.credentials !== void 0) {
+		const resolution = input.credentials({
+			card,
+			url: request.url,
+			method,
+			nodeId: node.id
+		});
+		credentialApplication = resolution.application;
+		if (Object.keys(resolution.headers).length > 0) request = {
+			...request,
+			headers: mergeCredentialHeaders(request.headers, resolution.headers)
+		};
+	}
+	const sessionCookie = cookieHeaderIn(request.headers);
+	const sensitiveValues = [...prepared.sensitiveValues];
+	if (sessionCookie !== void 0) for (const part of sessionCookie.split(";")) {
+		const at = part.indexOf("=");
+		if (at > 0) {
+			const value = part.slice(at + 1).trim();
+			if (value.length >= 4) sensitiveValues.push(value);
+		}
+	}
+	const redactedHeaders = redactHeaderValues(redactHeaders(request.headers), sensitiveValues);
+	const requestDigest = {
+		method: request.method,
+		url: request.url,
+		headers: redactedHeaders,
+		...request.body === void 0 ? {} : { bodyPreview: previewText(redactText(request.body, sensitiveValues)) }
+	};
+	appendEvent(input.dataRoot, runId, {
+		event: "step",
+		id: node.id,
+		action: `${request.method} ${request.url}`,
+		status: "start",
+		data: {
+			card: card.cardId,
+			request: requestDigest,
+			provenance: prepared.provenance,
+			...credentialApplication === void 0 ? {} : { credentials: credentialApplication }
+		}
+	});
+	const retry = IDEMPOTENT_METHODS.has(method) ? Math.max(0, Math.min(MAX_PROBE_RETRY, Math.floor(input.retry ?? 0))) : 0;
+	const outcome = await httpRequest({
+		method: request.method,
+		url: request.url,
+		headers: request.headers,
+		...request.body === void 0 ? {} : { body: request.body },
+		timeoutMs: Math.max(1, Math.floor(input.config.nodeTimeoutSeconds)) * 1e3,
+		retry,
+		limitBytes: Math.max(1, Math.floor(input.config.responseLimitBytes)),
+		...input.signal === void 0 ? {} : { signal: input.signal }
+	});
+	if (!outcome.ok) {
+		const code = outcome.code === "aborted" ? "cancelled" : outcome.code === "timeout" ? "node-timeout" : outcome.code === "bad-url" ? "bad-url-template" : "node-network-error";
+		const message = `节点 ${node.id}：${outcome.message}`;
+		appendEvent(input.dataRoot, runId, {
+			event: "step",
+			id: node.id,
+			status: "error",
+			elapsed: outcome.elapsedMs,
+			error: message,
+			data: {
+				code,
+				attempts: outcome.attempts
+			}
+		});
+		appendEvent(input.dataRoot, runId, {
+			event: "terminal",
+			success: false,
+			cancelled: code === "cancelled",
+			message
+		});
+		appendEvent(input.dataRoot, runId, {
+			event: "result",
+			success: false,
+			businessData: {
+				probe: true,
+				code,
+				provenance: prepared.provenance,
+				attempts: outcome.attempts
+			}
+		});
+		return {
+			ok: false,
+			gate: code === "cancelled" ? "blocked" : "failed",
+			code,
+			message,
+			runId,
+			runDir,
+			explorationId,
+			nodeId: node.id,
+			cardId: card.cardId,
+			method,
+			request: requestDigest,
+			provenance: prepared.provenance,
+			attempts: outcome.attempts,
+			...credentialApplication === void 0 ? {} : { credentials: credentialApplication }
+		};
+	}
+	const response = outcome.response;
+	const responseDigest = {
+		status: response.status,
+		bytes: response.bytes,
+		truncated: response.truncated,
+		bodyPreview: previewText(redactText(response.bodyText, sensitiveValues))
+	};
+	const root = {
+		body: response.json ?? response.bodyText,
+		status: response.status,
+		headers: response.headers
+	};
+	const outputs = [];
+	for (const field of card.outputs ?? []) {
+		const bound = resolveBinding(root, field.path, field.type);
+		const sensitive = isSensitivePath(field.path);
+		if (!bound.ok) {
+			outputs.push({
+				path: field.path,
+				type: field.type,
+				error: bound.message
+			});
+			continue;
+		}
+		outputs.push({
+			path: field.path,
+			type: field.type,
+			valuePreview: sensitive ? "***" : redactText(previewValue(bound.value), sensitiveValues),
+			...sensitive ? { redacted: true } : {}
+		});
+	}
+	if (response.status < 200 || response.status >= 300) {
+		const code = response.status === 401 || response.status === 403 ? typeof card.auth === "string" && card.auth !== "none" ? "node-auth-required" : "node-http-error" : "node-http-error";
+		const message = code === "node-auth-required" ? `HTTP ${response.status}：该卡声明了鉴权（${String(card.auth)}）；probe 不换票，请先确认凭证或走 dataforge_chain_run 的 relogin` : `HTTP ${response.status}`;
+		appendEvent(input.dataRoot, runId, {
+			event: "step",
+			id: node.id,
+			status: "error",
+			elapsed: outcome.response.elapsedMs,
+			error: message,
+			data: {
+				code,
+				response: responseDigest,
+				outputs
+			}
+		});
+		appendEvent(input.dataRoot, runId, {
+			event: "terminal",
+			success: false,
+			cancelled: false,
+			message
+		});
+		appendEvent(input.dataRoot, runId, {
+			event: "result",
+			success: false,
+			businessData: {
+				probe: true,
+				code,
+				provenance: prepared.provenance,
+				outputs,
+				attempts: response.attempts
+			}
+		});
+		return {
+			ok: false,
+			gate: "failed",
+			code,
+			message,
+			runId,
+			runDir,
+			explorationId,
+			nodeId: node.id,
+			cardId: card.cardId,
+			method,
+			request: requestDigest,
+			response: responseDigest,
+			outputs,
+			provenance: prepared.provenance,
+			attempts: response.attempts,
+			...credentialApplication === void 0 ? {} : { credentials: credentialApplication }
+		};
+	}
+	appendEvent(input.dataRoot, runId, {
+		event: "step",
+		id: node.id,
+		status: "done",
+		elapsed: response.elapsedMs,
+		data: {
+			response: responseDigest,
+			outputs
+		}
+	});
+	appendEvent(input.dataRoot, runId, {
+		event: "terminal",
+		success: true,
+		cancelled: false,
+		message: `节点 ${node.id} 试探完成：HTTP ${response.status}`
+	});
+	appendEvent(input.dataRoot, runId, {
+		event: "result",
+		success: true,
+		businessData: {
+			probe: true,
+			provenance: prepared.provenance,
+			outputs,
+			attempts: response.attempts
+		}
+	});
+	return {
+		ok: true,
+		gate: "executed",
+		runId,
+		runDir,
+		explorationId,
+		nodeId: node.id,
+		cardId: card.cardId,
+		method,
+		request: requestDigest,
+		response: responseDigest,
+		outputs,
+		provenance: prepared.provenance,
+		attempts: response.attempts,
+		...credentialApplication === void 0 ? {} : { credentials: credentialApplication }
+	};
+}
+
+//#endregion
+//#region src/orchestration/explore.ts
+/**
+* 探索执行的应用层（R-5 M1）：把「链 + 节点 + 带来源的值」拼成一次 probe。
+*
+* 工具壳只做参数声明与回执；载链、找节点/卡、baseUrl 解析、错误折叠都收在这里。
+* 与整链执行共用同一套 `loadChain` / `cardsForChain` / `resolveChainBaseUrl`，
+* 不另造第二套链读取规则。
+*
+* @module dsh-dataforge/orchestration/explore
+*/
+function messageOf$1(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+function blocked(code, message, extra = {}) {
+	return {
+		ok: false,
+		gate: "blocked",
+		code,
+		message,
+		nodeId: "",
+		cardId: "",
+		method: "",
+		...extra
+	};
+}
+/** 一次单节点试探（工具入口）。所有失败折成 `ProbeResult`，不抛。 */
+async function probeForTool(deps, exec, args) {
+	if (deps.chain.enabled !== true) return blocked("probe-disabled", "执行开关已关闭（config.chainRunEnabled=false）：probe 一律拒绝");
+	let workspaceRoot;
+	try {
+		workspaceRoot = await deps.resolveWorkspaceRoot(exec) ?? process.cwd();
+	} catch (error) {
+		return blocked("workspace-unavailable", `解析工作区根失败：${messageOf$1(error)}`);
+	}
+	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
+	if (!loaded.ok) return {
+		ok: false,
+		gate: "blocked",
+		code: loaded.code === "chain-not-found" ? "chain-not-found" : "invalid-chain",
+		message: loaded.message,
+		nodeId: args.node,
+		cardId: "",
+		method: ""
+	};
+	const doc = loaded.doc;
+	if (doc.kind !== "interface-chain") return blocked("invalid-chain", `链 ${doc.meta.site}/${doc.meta.flow} 是 ${doc.kind}：probe 只支持 interface-chain`);
+	const node = doc.nodes.find((candidate) => candidate.id === args.node);
+	if (node === void 0) {
+		const known = doc.nodes.map((candidate) => candidate.id).join("、");
+		return blocked("node-not-found", `链上没有节点「${args.node}」；可用节点：${known || "（无）"}`);
+	}
+	if (typeof node.card !== "string" || node.card === "") return blocked("card-not-imported", `节点 ${node.id} 没有 card 引用（page-chain 需先编译）`);
+	const cards = cardsForChain(workspaceRoot, doc);
+	const card = cards.get(node.card);
+	if (card === void 0) return blocked("card-not-imported", `节点 ${node.id} 引用的卡 ${node.card} 不在项目接口库：先 dataforge_library_import`);
+	const base = resolveChainBaseUrl(doc, cards, args.baseUrl);
+	if (!base.ok) return blocked("base-url-unresolved", base.message);
+	if (base.baseUrl === void 0) return blocked("base-url-unresolved", "推不出目标站点源：显式传 baseUrl（卡的来源页面跨多个 origin 时只能人来定）");
+	return probeNode({
+		dataRoot: deps.dataRoot,
+		doc,
+		node,
+		card,
+		...args.values === void 0 ? {} : { values: args.values },
+		...args.inputs === void 0 ? {} : { chainInputs: args.inputs },
+		baseUrl: base.baseUrl,
+		...args.confirm === void 0 ? {} : { confirm: args.confirm },
+		...args.retry === void 0 ? {} : { retry: args.retry },
+		...args.explorationId === void 0 ? {} : { explorationId: args.explorationId },
+		config: {
+			nodeTimeoutSeconds: deps.chain.nodeTimeoutSeconds,
+			responseLimitBytes: deps.chain.responseLimitBytes
+		},
+		...deps.credentials === void 0 ? {} : { credentials: deps.credentials }
+	});
 }
 
 //#endregion
@@ -8550,6 +9200,262 @@ function defineChainRunTool(deps) {
 				...args.dry_run === void 0 ? {} : { dryRun: args.dry_run },
 				...args.confirm === void 0 ? {} : { confirm: args.confirm },
 				...args.relogin === void 0 ? {} : { relogin: args.relogin }
+			}));
+		}
+	});
+}
+function renderChainProbe(value) {
+	const head = `🔎 节点试探：${value.nodeId || "?"}（${value.method || "?"}）`;
+	if (value.gate === "confirm-required") {
+		const plan = value.plan;
+		const inputs = (plan?.cardInputs ?? []).map((input) => `- ${input.path}（${input.type}${input.required ? "，必填" : ""}）`).join("\n");
+		return [
+			`⚠️ 写操作需要确认：${plan?.method ?? value.method} ${plan?.urlTemplate ?? ""}`,
+			"向用户确认后带 confirm=true 重调；本次没有发出任何请求。",
+			inputs === "" ? "" : `卡入参模板：\n${inputs}`
+		].filter(Boolean).join("\n");
+	}
+	if (value.gate === "paused") {
+		const gaps = (value.gaps ?? []).map((gap) => `- ${gap.path}（${gap.type}）`).join("\n");
+		const inputs = (value.cardInputs ?? []).map((input) => `- ${input.path}（${input.type}${input.required ? "，必填" : ""}）`).join("\n");
+		return [
+			`⏸ 缺参暂停（未发请求）：${value.message ?? ""}`,
+			gaps === "" ? "" : `缺什么：\n${gaps}`,
+			inputs === "" ? "" : `卡入参模板：\n${inputs}`,
+			value.runId === void 0 ? "" : `留痕：${value.runId}`
+		].filter(Boolean).join("\n");
+	}
+	if (!value.ok) {
+		const response = value.response === void 0 ? "" : `\nHTTP ${value.response.status}：${value.response.bodyPreview}`;
+		return `❌ 试探未完成（${value.code ?? "unknown"}）：${value.message ?? ""}${response}${value.runId === void 0 ? "" : `\n留痕：${value.runId}`}`;
+	}
+	const req = value.request === void 0 ? "" : `→ ${value.request.method} ${value.request.url}`;
+	const resp = value.response === void 0 ? "" : `← HTTP ${value.response.status}（${value.response.bytes}B${value.response.truncated ? "，截断" : ""}）`;
+	const provenance = (value.provenance ?? []).map((item) => {
+		const evidence = item.evidence === void 0 ? "" : `，依据：${item.evidence}`;
+		return `- ${item.path} ← ${item.source}${evidence}${item.valuePreview === void 0 ? "" : `（${item.valuePreview}）`}`;
+	});
+	const outputs = (value.outputs ?? []).slice(0, RECEIPT_MAX_LINES).map((output) => {
+		if (output.error !== void 0) return `- ${output.path}（${output.type}）：取不到（${output.error}）`;
+		return `- ${output.path}（${output.type}）：${output.valuePreview ?? "（空）"}`;
+	});
+	return [
+		`${head} ${req} ${resp}`,
+		value.attempts === void 0 ? "" : `尝试：${value.attempts}`,
+		provenance.length === 0 ? "" : `值来源：\n${provenance.join("\n")}`,
+		outputs.length === 0 ? "" : `卡出参实际值（用来发现绑定）：\n${outputs.join("\n")}`,
+		value.runId === void 0 ? "" : `留痕：${value.runId}（explorationId ${value.explorationId ?? "?"}）`,
+		"下一步：用 dataforge_chain_upsert 把发现的绑定边写回链，再 dataforge_chain_run 整链执行。"
+	].filter(Boolean).join("\n");
+}
+function defineChainProbeTool(deps) {
+	return defineTool({
+		name: "dataforge_chain_probe",
+		description: `单节点试探（R-5 首跑）：只对链上的一个节点发**一发**请求，返回请求/响应摘要与卡出参实际值；不消费绑定边、不写链文件、不整链重跑。
+
+值的形状：values = { "<卡字段路径>": { value, source, evidence? } }。
+- source=user：用户明确给出的值（evidence 建议写原话）；
+- source=agent-inferred：agent 推断的值，**必须给 evidence**；
+- source=upstream：来自某次 probe 的响应，**必须给 evidence**（如 probe:<runId> · body.items[0].internalId）；
+- 节点 constants 自动标 constant，不用放进 values。
+
+三道门：
+- 缺参：在发请求前返回 paused + gaps + 卡入参模板，一个请求都不发；
+- 写操作（POST/PUT/PATCH/DELETE）：没有 confirm=true 只出计划卡，一个请求都不发；
+- 敏感字段（password/token/secret/authorization/cookie/api-key…）的值在留痕里写 ***。
+
+失败时：invalid-source / unknown-value / node-not-found / base-url-unresolved 在发请求前拒；HTTP 非 2xx、超时、网络错如实落 run 并返回 response 摘要。probe 不换票；需要登录态的节点请先确认凭证，或改走 dataforge_chain_run 的 relogin。
+
+首跑闭环：probe 试探 → 读 outputs 发现绑定 → dataforge_chain_upsert 写边 → dataforge_chain_run 整链。`,
+		parameters: {
+			site: {
+				type: "string",
+				required: true,
+				description: "站点名（链的 meta.site）"
+			},
+			flow: {
+				type: "string",
+				required: true,
+				description: "流程名（链的 meta.flow）"
+			},
+			version: {
+				type: "number",
+				description: "链版本；缺省最新"
+			},
+			node: {
+				type: "string",
+				required: true,
+				description: "链上的节点 id（nodes[].id）"
+			},
+			values: {
+				type: "object",
+				additionalProperties: true,
+				description: "卡字段路径 → { value, source, evidence? }；source 只允许 user / agent-inferred / upstream"
+			},
+			inputs: {
+				type: "object",
+				additionalProperties: true,
+				description: "链级槽位运行值（给节点常量里的 $inputs.x 用）"
+			},
+			baseUrl: {
+				type: "string",
+				description: "目标站点源；缺省从卡的来源页面 origin 推断"
+			},
+			confirm: {
+				type: "boolean",
+				description: "写操作必须显式确认；缺省 = 只出计划卡"
+			},
+			retry: {
+				type: "number",
+				description: "仅 GET/HEAD/OPTIONS 生效；0..3 封顶，写方法强制 0"
+			},
+			explorationId: {
+				type: "string",
+				description: "同一轮首跑的探索组 ID；缺省自动生成 exp_<timestamp>"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					gate: {
+						type: "string",
+						description: "executed / paused / confirm-required / failed / blocked"
+					},
+					code: { type: "string" },
+					message: { type: "string" },
+					runId: { type: "string" },
+					runDir: { type: "string" },
+					explorationId: { type: "string" },
+					nodeId: { type: "string" },
+					cardId: { type: "string" },
+					method: { type: "string" },
+					gaps: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								path: { type: "string" },
+								type: { type: "string" },
+								target: { type: "string" }
+							}
+						}
+					},
+					cardInputs: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								path: { type: "string" },
+								type: { type: "string" },
+								required: { type: "boolean" },
+								role: { type: "string" }
+							}
+						}
+					},
+					plan: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							nodeId: { type: "string" },
+							method: { type: "string" },
+							urlTemplate: { type: "string" },
+							writes: { type: "boolean" },
+							cardInputs: {
+								type: "array",
+								items: {
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										path: { type: "string" },
+										type: { type: "string" },
+										required: { type: "boolean" },
+										role: { type: "string" }
+									}
+								}
+							}
+						}
+					},
+					request: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							method: { type: "string" },
+							url: { type: "string" },
+							headers: {
+								type: "object",
+								additionalProperties: true
+							},
+							bodyPreview: { type: "string" }
+						}
+					},
+					response: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							status: { type: "number" },
+							bytes: { type: "number" },
+							truncated: { type: "boolean" },
+							bodyPreview: { type: "string" }
+						}
+					},
+					outputs: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								path: { type: "string" },
+								type: { type: "string" },
+								valuePreview: { type: "string" },
+								redacted: { type: "boolean" },
+								error: { type: "string" }
+							}
+						}
+					},
+					provenance: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								path: { type: "string" },
+								source: { type: "string" },
+								evidence: { type: "string" },
+								valuePreview: { type: "string" },
+								redacted: { type: "boolean" }
+							}
+						}
+					},
+					attempts: { type: "number" },
+					credentials: {
+						type: "object",
+						additionalProperties: true
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderChainProbe(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			const values = args.values;
+			return lossless(await probeForTool(deps, exec, {
+				site: args.site,
+				flow: args.flow,
+				node: args.node,
+				...args.version === void 0 ? {} : { version: args.version },
+				...values === void 0 ? {} : { values },
+				...args.inputs === void 0 ? {} : { inputs: args.inputs },
+				...args.baseUrl === void 0 ? {} : { baseUrl: args.baseUrl },
+				...args.confirm === void 0 ? {} : { confirm: args.confirm },
+				...args.retry === void 0 ? {} : { retry: args.retry },
+				...args.explorationId === void 0 ? {} : { explorationId: args.explorationId }
 			}));
 		}
 	});
@@ -10031,6 +10937,14 @@ const CAPTURE_POLICY = [
 	"- 采集结果用 dataforge_capture_result(scope=cards|samples|credentials|pages) 取回，报给用户时只说接口名/用途/出入参要点，不贴 token/cookie 原文。",
 	"- 诚实边界：遇风控/验证码/超限截断/外部域名跳过，如实转述 capture_status/capture_result 里的 notice，不隐瞒。"
 ].join("\n");
+/** 探索执行纪律：值来源必须诚实标注，写操作必须用户确认。 */
+const EXPLORE_POLICY = [
+	"## dataforge-explore（首跑试探）",
+	"- 首跑用 dataforge_chain_probe 单节点试探；不要把整条不完整的链反复整链重跑。",
+	"- probe 的 values 必须带 source：user / agent-inferred / upstream；agent-inferred 与 upstream 必须写 evidence，禁止把猜测标成 user。",
+	"- 写操作（POST/PUT/PATCH/DELETE）必须经用户确认后带 confirm=true；没有确认只出计划卡。",
+	"- probe 返回的 outputs 用来发现绑定边；回写链只走 dataforge_chain_upsert（R-1 校验）。"
+].join("\n");
 /** 装载插件。 */
 function apply(ctx, rawConfig) {
 	const anyCtx = ctx;
@@ -10116,14 +11030,15 @@ function apply(ctx, rawConfig) {
 			defineChainUpsertTool(orchestrationDeps),
 			defineChainGetTool(orchestrationDeps),
 			defineChainRunTool(chainRunDeps),
-			defineChainRunsTool(chainRunDeps)
+			defineChainRunsTool(chainRunDeps),
+			defineChainProbeTool(chainRunDeps)
 		]) tools.register(tool);
-		logger?.info?.(`已注册 16 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_run/chain_runs（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
+		logger?.info?.(`已注册 17 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_run/chain_runs/chain_probe（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
 		if (!config.chainRunEnabled) logger?.info?.("执行开关 chainRunEnabled=false：dataforge_chain_run 一律 execution-disabled");
 	});
 	if (config.injectPolicy) try {
 		const policy = loadPolicyText(config.engineRoot);
-		const combined = `${policy.text}\n\n${CAPTURE_POLICY}`;
+		const combined = `${policy.text}\n\n${CAPTURE_POLICY}\n\n${EXPLORE_POLICY}`;
 		const sectionName = "tool:dataforge";
 		anyCtx.systemPrompt?.section?.({
 			name: sectionName,
