@@ -17,8 +17,8 @@ updated: 2026-10-17
 - **方案（分三段交付，不一次做完）**：
   1. **M1 注入**：执行期从一期采集库（`capture.sqlite` 的 `credential_events`）按「卡的来源 captureId + 目标 origin」解析 cookie，在 `buildRequest()` 之后、`httpRequest()` 之前把 `cookie` 头注入；值只在进程内过手，运行记录只留名字/来源，不留值。
   2. **M2 换票**：401 时执行一条**显式声明的登录链**（普通 `interface-chain`，经 `dataforge_chain_run` 的 `relogin` 运行参数传入），从登录响应收割 `set-cookie` 进本次运行的内存 cookie jar，单飞换票后重放原请求一次；登录链的账号/密码来自运行期槽位，不落链文件、不写运行记录。
-  3. **M3 硬化**：换票节流与过期刷新、token 型凭证补课/持久化、零凭证泄漏的扫描门。
-- **本期实际落地**：M1（cookie 注入）+ M2（401 换票，2026-10-17）。M3（token 补课/持久化/节流/扫描门）的接口与失败语义仍按本设计推进。
+  3. **M3 硬化**：换票 cookie 持久化（0600、按 origin）、零泄漏扫描门、跨运行节流、token 型凭证补课。
+- **本期实际落地**：M1（cookie 注入）+ M2（401 换票）+ M3 的持久化与扫描门（2026-10-17）。M3 剩余项（token 补课、跨运行节流、运行级缓存）的接口与失败语义仍按本设计推进。
 - **关键决策（回答需求 Q1）**：**cookie 型先行，token 型如实拒绝**。一期采集只落 cookie（本机实查：48 条 `cookie`、0 条 `token`/`localStorage`、0 条 `login_sessions`），token 型站点在 M1 不伪造注入，回执明说「token 型凭证未采集」；补采集是 M3 的前置，不在 R-4 里偷做。
 - **影响面**：新增 `src/execute/credentials.ts`（纯函数 + 契约）与 `src/capture/credentials.ts`（只读采集库的 provider）；`src/execute/run.ts` 增加注入点与 401 诊断；`src/orchestration/application.ts` 加一个可选依赖缝；`src/index.ts` 装配。**不改**链/卡文件格式，**不新增 npm 依赖**，**不加数据库表**（M1）。
 
@@ -75,7 +75,7 @@ R-3 已经冻结了执行错误码与请求构造边界，401 现在有确定落
 - **不做跨站点凭证复用**：凭证按卡来源 captureId + origin/path 匹配；拒绝把 A 站 cookie 发给 B 站。
 - **不改 `apiVersion: dataforge/v1` 的已有字段语义**：M1 零格式变更；M2 若加链级 `auth` 段按可选字段加法，老链零迁移。
 - **不加 npm 依赖**：cookie 解析与匹配是本地纯函数；SQLite 用已装的 `better-sqlite3`（只读打开）。
-- **不新增数据库表**：M1 只读 `capture.sqlite`；M2 的换票结果先只活在一次运行内（内存 jar），持久化归 M3。
+- **不新增数据库表**：M1 只读 `capture.sqlite`；M2 换票结果先进内存 jar，M3 再落到 `dataRoot/credentials/cookies.json`（0600、按 origin），不建表。
 
 ## 方案总览  serves: FR-4.1
 
@@ -237,6 +237,30 @@ type ReloginRecord = {
 - **重放一次**：换票成功后只重放当前节点一次；重放仍 401 → 中止，报「换票后仍 401」。
 - **自环保护**：`relogin.site/flow` 与主链相同 → `relogin-cycle`，绝不递归登录。
 
+### 持久化 jar（M3）：`dataRoot/credentials/cookies.json`
+
+```jsonc
+{
+  "version": 1,
+  "origins": {
+    "https://scm.example.com": {
+      "updatedAt": 1792208073932,
+      "cookies": [
+        { "name": "JSESSIONID", "value": "<secret>", "expiresAt": 1792211673932 }
+      ]
+    }
+  }
+}
+```
+
+- **权限**：目录 0700、文件 0600，原子写（临时文件 → rename）；
+- **隔离**：键是**精确 origin**；provider 只读目标请求 URL 的 origin，不跨站复用；
+- **写入方**：只有换票（登录链）成功后写；主链普通响应的 `set-cookie` 不落盘；
+- **合并**：provider 把持久化 cookie 与采集库 cookie 一起交给 `selectCookies`，同名同路径时持久化（domain 更具体）胜出；
+- **过期**：`Max-Age` 优先于 `Expires`，`Max-Age=0` 立即过期；读时过滤过期项；会话 cookie（无 expires）不按时间过期；
+- **失败**：文件损坏/超大/无权限 → 当空库，不阻断执行；落盘失败不把换票判失败；
+- **关闭**：`config.chainCredentialPersistence=false` 时不装配 storePath，换票只活一次运行。
+
 ## 接口设计  serves: FR-4.1、FR-4.4
 
 | 编号 | 接口 | 输入 | 输出 | 失败与错误 | 兼容性 |
@@ -247,7 +271,7 @@ type ReloginRecord = {
 | IF-4 | `createCaptureCredentialProvider()` | `{ dbPath, now? }` | `CredentialProvider` | 库不存在/坏行 → `status:'none'` | 新工厂；只读打开 |
 | IF-5 | `runChain` 注入点 | 现有 `RunChainInput` + `credentials?` | 现有结果 + 节点摘要 | 401 诊断扩展，错误码只增 | 可选入参，旧调用零变化 |
 | IF-6 | `dataforge_chain_run.relogin`（M2） | `{ site, flow, version?, inputs?, baseUrl? }` | 主链继续执行；节点 `relogin` 摘要 | `relogin-failed` / `relogin-unavailable` / `relogin-cycle` | 新增可选运行参数；不传 = M1 行为 |
-| IF-6 | `dataforge_chain_run.relogin`（M2） | `{ site, flow, version?, inputs?, baseUrl? }` | 主链继续执行；节点 `relogin` 摘要 | `relogin-failed` / `relogin-unavailable` / `relogin-cycle` | 新增可选运行参数；不传 = M1 行为 |
+| IF-7 | 持久化 jar（M3） | `dataRoot/credentials/cookies.json` + `storePath` 装配 | 后续运行按 origin 读回新 cookie | 坏文件/无权限 → 空库；不产生错误码 | 新增本地文件；关闭配置即回 M2 行为 |
 
 #### IF-1 CredentialProvider
 
@@ -421,6 +445,27 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 
 新增可选参数；旧调用方不传即 M1 行为。`NodeResult.relogin` 与 `step` 事件里的 `relogin` 摘要都是只增字段，不含凭证值。登录链自己的运行记录沿用 `runs/`，但参数已脱敏，**不能**从运行记录回放账号密码。
 
+#### IF-7 持久化 jar（M3）
+
+**语义**
+
+`dataRoot/credentials/cookies.json` 是换票结果的本地落点，由 `capture/credential-store.ts` 读写：
+
+- 目录 0700、文件 0600、原子写（临时文件 → rename）；
+- 键是**精确 origin**（`http://host:port` / `https://host`），provider 只读目标请求 URL 的 origin；
+- 只有换票成功后写；主链普通响应的 `set-cookie` 不落盘；
+- provider 把持久化 cookie 与采集库 cookie 一起交给 `selectCookies`，同名同路径时持久化（domain 更具体）胜出；
+- 会话 cookie（无 `expiresAt`）不按时间过期；`Max-Age` 优先于 `Expires`，`Max-Age=0` 立即过期；
+- 单 origin 最多 100 条，同名覆盖。
+
+**错误码**
+
+不产生链级错误码。文件损坏/超大/无权限 → 当空库；落盘失败返回 0，不把已经成功的换票判失败。摘要里用 `relogin.persisted`（写入条数）与 `application.persisted`（使用条数）表达事实。
+
+**兼容性**
+
+新增本地文件，无迁移。`chainCredentialPersistence=false` 时不装配 `storePath`，provider 不读、runner 不写，行为回退到 M2（换票只活一次运行）。旧 run 目录不受影响。
+
 ## 备选方案  serves: 全文
 
 | 方案 | 一句话说明 | 优点 | 代价 | 为什么未选 |
@@ -440,7 +485,7 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 | 可用性 | agent 会用吗 | 工具面不需要新参数（M1）；回执只多一句 401 诊断；运行记录能回答「带没带凭证」 | 部分（真实登录站点样本不足） |
 | 可行性 | 我们建得出来吗 | cookie 匹配是纯函数；`better-sqlite3` 已装；R-3 注入点已收口；本地可起带 cookie 校验的 HTTP 服务做 e2e | 已验证（M1） |
 | 商业可行性 | 公司能接受吗 | 纯本地、零新依赖、零新表；凭证不出本机 | 已验证 |
-| **安全** | 会不会把凭证写进日志/链/事件 | R-3 的 `redactHeaders` 已覆盖 cookie/authorization；M1 摘要不含值；单测做事件全文扫描 | 需持续守住（M3 扫描门） |
+| **安全** | 会不会把凭证写进日志/链/事件 | R-3 的 `redactHeaders` 已覆盖 cookie/authorization；M1 摘要不含值；M2 登录链敏感模式；M3 扫描门扫 dataRoot 除持久化 jar 外所有文件 + 工具回执 | 已验证（M3 扫描门）；持续守住 |
 
 **未验证项的补课计划**：
 - 真实登录态站点（`cookie-session` 卡）当前样本库为 0 → M1 用本地 HTTP 服务 + 合成卡验证；真实站点首跑归 R-5 的 agent 在环场景，yunpeng 在 M2 前给一条真实链；
@@ -470,7 +515,7 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 | 隐私与合规 | 采集库本身含凭证原文 | 沿用一期红线：不做上传、不出路由；M1 不新增任何导出面；运行记录不含值 |
 | 成本 | 可忽略 | 每节点一次只读 SQLite 查询（毫秒级）；无新依赖、无新表、无后台服务 |
 | 可观测性 | 注入是否发生可审计 | `step.start.data.credentials` 与 `NodeResult.credentials`；401 文案区分「未注入 / 注入了仍 401」 |
-| 性能与容量 | 网络延迟主导 | 凭证查询是主键/索引级；cookie 数量通常 < 100；M3 若成瓶颈再加运行级缓存 |
+| 性能与容量 | 网络延迟主导 | 凭证查询是主键/索引级；cookie 数量通常 < 100；M3 每节点多一次 ≤512KB 的本地 JSON 读，成瓶颈再加运行级缓存 |
 | 文档与支持 | 需要新增凭证章节 | M1 更新 README「凭证注入」节：cookie 型可用、token 型未支持、401 怎么读；工具描述补一句 |
 
 ## 交付拆分与里程碑  serves: 全文
@@ -479,16 +524,16 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 |---|---|---|---|---|
 | M1 | `execute/credentials.ts` 纯函数 + `capture/credentials.ts` provider + `run.ts` 注入点 + 401 诊断 + 单测/e2e | 本地 HTTP 服务收到注入 cookie；事件全文无凭证原文；provider 缺席行为与 R-3 一致；typecheck/test/build 全绿 | yunpeng | 2026-10-18 |
 | M2 | `relogin` 运行参数 + Set-Cookie 收割 + 内存 jar + 单飞 + 重放一次 + 敏感模式 + 同源/自环保护 + `relogin-*` 错误码 | 401 → 换票 → 重放成功；换票失败中止且文案含「需人工重新登录」；并发 401 只换一次；登录链参数/正文/token 不进留痕 | yunpeng | 已完成（2026-10-17） |
-| M3 | 换票节流/过期刷新 + token 型补课（或明确降级）+ 零泄漏扫描门 + 运行级缓存 | token 卡可注入或回执给出补课路径；扫描门进 `pnpm test`；M2 的并发压测通过 | yunpeng | 2026-10-25 |
+| M3 | ✅ 换票持久化 jar（0600/按 origin）+ 零泄漏扫描门；⏳ token 型补课、跨运行节流、运行级缓存 | 换票跨运行复跑通过（第二次不再登录）；扫描门进 `pnpm test`；token/节流仍待做 | yunpeng | 部分完成（2026-10-17） |
 
 ## 需求追溯  serves: 全文
 
 | 需求编号 | 设计节 | 测试用例 | 指标 | 里程碑 |
 |---|---|---|---|---|
-| FR-4.1 | §方案总览 / IF-1～IF-5 / §数据模型 | `test/execute/credentials.test.ts`（匹配/合并）、`test/capture/credentials.test.ts`（provider）、`test/execute/run.test.ts`（注入到真实请求） | 注入成功率（本地服务断言 cookie 头命中 = 1） | M1 |
+| FR-4.1 | §方案总览 / IF-1～IF-7 / §数据模型 | `test/execute/credentials.test.ts`（匹配/合并）、`test/capture/credentials.test.ts`（provider + 持久化合并）、`test/capture/credential-store.test.ts`（0600/origin/过期）、`test/execute/run.test.ts`（注入到真实请求） | 注入成功率（本地服务断言 cookie 头命中 = 1）；跨运行复用成功率 = 1 | M1/M3 |
 | FR-4.2 | §方案总览 M2 / IF-6 | `test/orchestration/relogin.test.ts`：主链 401 → 登录链 → set-cookie → 重放 | 单次运行换票成功数 ≤ 1 | M2 |
 | FR-4.3 | §方案总览 M2 / IF-6 | `test/execute/run.test.ts`：换票成功重放 / 重放仍 401 中止 | 重放次数硬上限 = 1 | M2 |
-| FR-4.4 | §数据模型·注入摘要 / §跨关注点 | 事件全文扫描 `SECRET` 零命中；登录链 params/正文/token 扫描零命中；`redactHeaders` 单测 | 泄漏命中数 = 0 | M1/M2 |
+| FR-4.4 | §数据模型·注入摘要 / §跨关注点 | 事件全文扫描零命中；登录链 params/正文/token 扫描零命中；`dataRoot` 除持久化 jar 外全文件 + 工具回执扫描；持久化文件 0600 | 泄漏命中数 = 0 | M1/M2/M3 |
 | FR-4.5 | §失败模式与回滚 / IF-6 | `test/execute/run.test.ts`：登录链失败 → `relogin-failed` + 「需人工重新登录」 | 换票失败诊断完整率 = 100% | M2 |
 | FR-4.6 | §方案总览 M2 / M3 | `test/execute/run.test.ts` 单飞用例；M3 跨运行并发压测 | 并发 401 触发的登录请求数 = 1 | M2/M3 |
 
@@ -513,7 +558,7 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 |---|---|---|---|
 | Q1（需求原问题）token 型覆盖不足：本期补采集还是限定 cookie 型 | **已决：限定 cookie 型（M1/M2），token 补课归 M3** | yunpeng | 已决：2026-10-17 |
 | Q2 登录链怎么声明 | **已决（M2）：先用运行参数 `relogin: { site, flow, version?, inputs?, baseUrl? }`**——不改 R-1 schema、不动画布保存路径；链级 `auth.login` 留到画布能编辑登录链时再评估 | yunpeng | 已决：2026-10-17 |
-| Q3 换票后的新 cookie 是否持久化 | **已决（M2）：只活一次运行（内存 jar）**；跨运行持久化（`dataRoot/credentials/`，0600）归 M3 | yunpeng | 已决：2026-10-17 |
+| Q3 换票后的新 cookie 是否持久化 | **已决并实现：M2 只活一次运行；M3 落 `dataRoot/credentials/cookies.json`（0600、按 origin），`chainCredentialPersistence` 可关** | yunpeng | 已决：2026-10-17 |
 | Q4 登录链的账号/密码从哪来 | **已决（M2）：运行期 `relogin.inputs`**，敏感模式脱敏后不落盘；环境变量引用归 M3（无人值守复跑） | yunpeng | 已决：2026-10-17 |
 | Q5 同一站点多个 captureId 的 cookie 冲突怎么选 | 更近的 `obtainedAt` / 更具体的 domain（当前实现）；是否需要人工选择 | yunpeng | M3 |
 
@@ -529,13 +574,22 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
   - [x] provider 缺席时 R-3 既有 401 用例不变（`test/execute/failure.test.ts` 全绿）。
 
 - M2（2026-10-17）：
-  - [x] 全量 `pnpm test`：426 passed / 3 skipped（环境门控 e2e）；`pnpm typecheck` 0；`pnpm build` 通过；
+  - [x] 全量 `pnpm test`：437 passed / 3 skipped（环境门控 e2e）；`pnpm typecheck` 0；`pnpm build` 通过；
   - [x] 主链 401 → 登录链 → `set-cookie` → 重放成功（`test/orchestration/relogin.test.ts`）；
   - [x] 单飞：并发两个节点同时 401，登录链只执行一次（`test/execute/run.test.ts`）；
   - [x] 换票失败 → `relogin-failed`，文案含「需人工重新登录并更新凭证」；
   - [x] 换票成功但重放仍 401 → `node-auth-required`，文案含「已自动换票…重放」；
   - [x] 敏感模式：登录链 `run.json.params` 值写成 `***`，请求/响应正文 `[已脱敏]`，事件全文无密码/token；
   - [x] 同源 + 自环保护：跨源 `relogin-unavailable`、自环 `relogin-cycle`，均不发登录请求。
+
+- M3（2026-10-17，部分完成）：
+  - [x] 全量 `pnpm test`：437 passed / 3 skipped；`pnpm typecheck` 0；`pnpm build` 通过；
+  - [x] 持久化 jar：文件 0600、目录 0700、按 origin 隔离、同名覆盖、`Max-Age` 优先、坏文件降级（`test/capture/credential-store.test.ts`）；
+  - [x] 换票跨运行复跑：第二次运行直接带新 cookie，不再触发登录链（`test/orchestration/relogin.test.ts`）；
+  - [x] provider 合并持久化 cookie（摘要 `persisted` 计数），采集库缺席时可兜底（`test/capture/credentials.test.ts`）；
+  - [x] 零泄漏扫描门：`dataRoot` 下除持久化 jar 外所有文件 + 工具回执，密码/token/新 cookie 原文零命中；
+  - [ ] token 型凭证补课（`Authorization`/localStorage）；
+  - [ ] 跨运行换票节流 + 运行级缓存。
 
 ## 附录  serves: 全文
 

@@ -56,6 +56,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
     chainNodeTimeoutSeconds: 30
     chainConcurrency: 4            # 硬上限 16
     chainResponseLimitBytes: 2097152
+    chainCredentialPersistence: true  # 换票 cookie 落 dataRoot/credentials（0600）
 ```
 
 | 字段 | 说明 | 缺省 |
@@ -69,6 +70,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | `chainNodeTimeoutSeconds` | 执行：单节点请求超时（秒）；节点 `timeoutSeconds` 优先 | `30` |
 | `chainConcurrency` | 执行：默认并发（就绪节点同时发出数），硬上限 16 | `4` |
 | `chainResponseLimitBytes` | 执行：单响应正文读取上限（字节），超过标 `truncated` | `2097152` |
+| `chainCredentialPersistence` | 换票结果持久化到 `dataRoot/credentials/cookies.json`（0600、按 origin）；关闭后只活一次运行 | `true` |
 
 ## 流程包发现（后写赢）
 
@@ -162,7 +164,7 @@ runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result
 
 ### 凭证注入与自动换票（R-4 M1/M2）
 
-设计：[docs/projects/PRJ-0002/design/r4-credential-injection.md](docs/projects/PRJ-0002/design/r4-credential-injection.md)（M1 注入、M2 换票已实现；M3 硬化待做）。
+设计：[docs/projects/PRJ-0002/design/r4-credential-injection.md](docs/projects/PRJ-0002/design/r4-credential-injection.md)（M1 注入、M2 换票、M3 持久化与扫描门已实现；token 补课/跨运行节流待做）。
 
 - **来源**：只读 `dataRoot/capture/capture.sqlite` 的 `credential_events`，**只按卡的 `sources[].captureId`** 查，不做全库兜底（A 站 cookie 不会发给 B 站）；
 - **匹配**：domain / path / secure / expires 四道门，同名同路径去重（更具体的域优先），排序可复现；
@@ -189,6 +191,13 @@ runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result
 - 安全边界：登录链与主链必须**同源**（拒绝跨站复用凭证）；`relogin.site/flow` = 主链自身 → `relogin-cycle`；
 - 失败语义：登录链不存在/不可用 → `relogin-unavailable`；登录链失败或没有下发 `set-cookie` → `relogin-failed`，回执固定带「需人工重新登录并更新凭证」；换票后重放仍 401 → 中止，不二次换票；
 - 并发：同一运行内两个节点同时 401，只执行一次登录链，其它节点等结果。
+
+**换票持久化（M3 部分）**：
+
+- 换票成功后把 `set-cookie` 写入 `<dataRoot>/credentials/cookies.json`：目录 0700、文件 0600、**按 origin 隔离**、原子写；
+- 下一次运行由 provider 按目标 origin 读回，同名覆盖采集期的旧 cookie；采集库缺席时也能靠持久化 jar 兜底；
+- 关闭方式：`chainCredentialPersistence: false`（换票只活一次运行）；
+- **零泄漏扫描门**：换票端到端用例会扫描 `dataRoot` 下除持久化 jar 外的所有文件 + 工具回执，断言密码/token/新 cookie 原文零命中。
 
 ### 编排页签（面板内可视化编辑）
 
