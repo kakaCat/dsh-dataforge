@@ -118,6 +118,39 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | `dataforge_chain_upsert` | 唯一链写入口：schema + 语义校验全过才落盘为新版本 | `invalid-chain`（逐条指到 `nodes[i]`/`edges[j]`）、`card-not-imported` |
 | `dataforge_chain_get` | 回读链（缺省最新版本）；`export=true` 原文导出 | `chain-not-found`、`invalid-chain`（手改坏，可回读旧版本） |
 
+### 编排页签（面板内可视化编辑）
+
+面板第 5 个页签「编排」是链文件的图形前端（原型 `docs/prototypes/orchestration.html`）：
+
+```text
+网站选择 → 流程列表（页面编排 / 接口编排 × 业务域 → 流程 → 版本，带检索与分页）
+        → 编排图列表（每版本一张，分页）→ 画布（@xyflow/react v12）
+```
+
+数据面（与采集共用 `/dashboard/api/dataforge` 前缀）：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/orchestration/overview` | 网站 + 流程 + 逐版本摘要（来源/更新时间/节点边数/是否被取代） |
+| GET | `/orchestration/graph?site&flow&version` | 单版本**可编辑 doc** + 卡投影 + YAML 原文 |
+| POST | `/orchestration/graph` | 画布保存 / YAML 导入（`source` 区分），仍只经 `saveChain` |
+
+三条与原型**有意的偏差**（界面上也写了原因）：
+
+1. 节点的「名称 / 方法 / 地址」**只读**——它们属于接口卡，链里只存 `cardId`；可编辑的是常量绑定、页面地址、重试/超时、坐标；
+2. 「新建流程」不落盘空白链（R-1 要求链至少有 1 个节点），首次「保存为新版本」才落盘；
+3. 边的标签由 `from` 的叶子字段名自动生成，编辑边 = 编辑两个绑定路径。
+
+链文件因此多了三个可选字段（老链零迁移）：`meta.domain`（业务域）、`meta.source`（`agent`/`canvas`/`import`）、节点的 `layout: {x,y}`（缺省自动布局）。
+
+升级 `@xyflow/react` 后要重跑样式生成（产物进 git，构建不依赖它）：
+
+```bash
+pnpm gen:xyflow-css   # node_modules/@xyflow/react/dist/style.css → src/client/xyflow-css.ts
+```
+
+> 为什么样式要生成成字符串：client 半边只分发**一个 .cjs**，CSS 文件没人加载（详见 `tsdown.client.config.mjs` 注释）。
+
 ### 卡文件（不含凭证值、不冻结样本值）
 
 ```yaml
@@ -172,7 +205,7 @@ edges:                       # from 可为「节点.出参」或 $inputs.槽位�
 ```bash
 pnpm typecheck   # tsc --noEmit
 pnpm test        # vitest：全量用例（含真引擎 dry-run 集成；python3 + engineRoot 存在时自动启用）
-pnpm build       # tsdown → dist/
+pnpm build       # tsdown → dist/ + lib/client.js（含画布，约 325 KB）
 ```
 
 直接 CLI 冒烟：
