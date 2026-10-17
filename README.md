@@ -375,6 +375,9 @@ dataforge_chain_compare(run_ids: [首跑 runId, 复跑 runId])
 | GET | `/orchestration/palette` | 左栏拖拽源：库里的卡（cardId/方法/地址）+ 采集到的页面 |
 | GET | `/orchestration/graph?site&flow&version` | 单版本**可编辑 doc** + 卡投影 + YAML 原文 |
 | POST | `/orchestration/graph` | 画布保存 / YAML 导入（`source` 区分），仍只经 `saveChain` |
+| POST | `/orchestration/rename` | 业务域 / 流程改名：只同步目录名与各版本 `meta.domain` / `meta.flow`，节点/边/版本号不变 |
+
+编排页的**业务域 / 流程标题支持 ✎ 内联改名**（Enter 提交、Esc 取消）：流程改名会同步重命名版本目录并改写每个版本的 `meta.flow`；业务域改名同步组内各流程所有版本的 `meta.domain`。这是对「版本文件不可变」的**元数据修正例外**（R-2 M5 已记录该风险），链内容与版本号不变。
 
 三条与原型**有意的偏差**（界面上也写了原因）：
 
