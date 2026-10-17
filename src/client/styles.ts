@@ -474,6 +474,27 @@ const CSS = `
   outline: none; border-color: var(--dsh-df-accent); box-shadow: 0 0 0 3px var(--dsh-df-accent-soft); }
 .dsh-df-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .dsh-df-modal-ops { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+/* ── 编排：左栏调色板（拖入节点，FR-2.2） ── */
+.dsh-df-palette { width: 232px; background: var(--dsh-df-card); border: 1px solid var(--dsh-df-line);
+  border-radius: 10px; box-shadow: 0 4px 18px rgba(20,30,60,.10); overflow: hidden; }
+.dsh-df-palette-head { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  background: none; border: none; width: 100%; text-align: left; cursor: pointer; font-family: inherit; }
+.dsh-df-palette-count { font-size: 11px; color: var(--dsh-df-ink-3); margin-left: auto; }
+.dsh-df-palette-body { padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.dsh-df-palette-body .dsh-df-search { width: 100%; border: 1px solid #d4d8df; border-radius: 6px;
+  padding: 4px 8px; font-size: 12px; font-family: inherit; box-sizing: border-box; }
+.dsh-df-palette-body .dsh-df-search:focus { outline: none; border-color: var(--dsh-df-accent); }
+.dsh-df-palette-list { max-height: 300px; overflow: auto; display: flex; flex-direction: column; gap: 3px; }
+.dsh-df-palette-item { display: flex; flex-direction: column; gap: 1px; align-items: flex-start;
+  border: 1px solid var(--dsh-df-line); background: #fff; border-radius: 6px; padding: 4px 7px;
+  cursor: grab; font-family: inherit; text-align: left; width: 100%; }
+.dsh-df-palette-item:hover { border-color: var(--dsh-df-accent); }
+.dsh-df-palette-item:active { cursor: grabbing; }
+.dsh-df-palette-label { font-size: 12px; font-weight: 600; color: var(--dsh-df-ink);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-df-palette-url { font: 10px var(--dsh-df-mono); color: var(--dsh-df-ink-3);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ── 编排：链级入参槽位编辑（FR-2.6） ── */
 .dsh-df-inputs { background: var(--dsh-df-card); border: 1px solid var(--dsh-df-line);
   border-radius: var(--dsh-df-radius); margin-bottom: 12px; overflow: hidden; }

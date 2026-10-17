@@ -211,6 +211,22 @@ export type ChainGraph = {
   versions: number[]
 }
 
+/** GET /orchestration/palette：画布左栏可拖入的卡与页面。 */
+export type PaletteCard = {
+  cardId: string
+  name?: string
+  method: string
+  urlTemplate: string
+  inputCount: number
+  outputCount: number
+}
+
+export type OrchestrationPalette = {
+  cards: PaletteCard[]
+  pages: string[]
+  truncated?: string
+}
+
 /** POST /orchestration/graph 的回执。 */
 export type ChainSaveResult = {
   ok: boolean

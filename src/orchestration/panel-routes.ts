@@ -18,6 +18,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { listChainVersionInfos, listChainVersions, listChains, loadChain, readCard, readChainText, saveChain } from '../chains/store.js'
+import { listCards } from '../library/store.js'
 import type { ChainDoc, ChainIssue, ChainKind, ChainSource } from '../chains/schema.js'
 
 export const ORCHESTRATION_API_PREFIX = '/orchestration'
@@ -161,6 +162,11 @@ async function handle(deps: OrchestrationPanelDeps, req: IncomingMessage, res: S
       return
     }
 
+    if (suffix === '/palette') {
+      ok(res, await buildPalette(deps))
+      return
+    }
+
     fail(res, 404, `不认识的路径：${suffix}`, 'unknown-path')
   } catch (error) {
     fail(res, 500, error instanceof Error ? error.message : String(error), 'internal')
@@ -272,6 +278,66 @@ async function handleGraph(deps: OrchestrationPanelDeps, url: URL, res: ServerRe
     versions: listChainVersions(workspaceRoot, site, flow),
   }
   ok(res, value)
+}
+
+/**
+ * 画布左栏调色板：可拖进画布的卡（接口编排）与页面（页面编排）。
+ *
+ * 只给身份与字段计数——拖进去之后画布按 cardId 再取完整字段表（graph 的 cards）。
+ * 页面清单来自卡的 `sources[].pages`（采集时记下的页面），去重后作为页面编排的拖拽源。
+ */
+export type PaletteValue = {
+  cards: Array<{
+    cardId: string
+    name?: string
+    method: string
+    urlTemplate: string
+    inputCount: number
+    outputCount: number
+  }>
+  pages: string[]
+  /** 卡数超过上限时如实说明（不静默截断）。 */
+  truncated?: string
+}
+
+const MAX_PALETTE_CARDS = 500
+const MAX_PALETTE_PAGES = 200
+
+async function buildPalette(deps: OrchestrationPanelDeps): Promise<PaletteValue> {
+  const workspaceRoot = await deps.resolveWorkspaceRoot()
+  let cards: ReturnType<typeof listCards> = []
+  try {
+    cards = listCards(workspaceRoot)
+  } catch {
+    // 库不存在/读不出来就是空库：画布照样能开（手填 cardId 的路径仍在），不把页面弄挂
+    cards = []
+  }
+
+  const pages = new Set<string>()
+  for (const card of cards) {
+    for (const source of card.sources ?? []) {
+      for (const page of source.pages ?? []) {
+        if (page.length > 0) pages.add(page)
+      }
+    }
+  }
+
+  const truncated = cards.length > MAX_PALETTE_CARDS
+    ? `接口库有 ${cards.length} 张卡，调色板只列前 ${MAX_PALETTE_CARDS} 张（用搜索框缩小范围）`
+    : undefined
+
+  return {
+    cards: cards.slice(0, MAX_PALETTE_CARDS).map((card) => ({
+      cardId: card.cardId,
+      ...(card.name === undefined ? {} : { name: card.name }),
+      method: card.identity.method,
+      urlTemplate: card.identity.urlTemplate,
+      inputCount: card.inputs.length,
+      outputCount: card.outputs.length,
+    })),
+    pages: [...pages].slice(0, MAX_PALETTE_PAGES),
+    ...(truncated === undefined ? {} : { truncated }),
+  }
 }
 
 /** 节点引用的卡身份投影（读不到的卡不出现在表里，画布降级显示 cardId）。 */

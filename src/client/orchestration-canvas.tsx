@@ -12,17 +12,19 @@
  *
  * @module dsh-dataforge/client/orchestration-canvas
  */
-import { useCallback, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
-  ReactFlow, Background, Controls, MiniMap, Panel, Handle, Position, MarkerType,
-  applyEdgeChanges, applyNodeChanges, addEdge,
+  ReactFlow, ReactFlowProvider, Background, Controls, MiniMap, Panel, Handle, Position, MarkerType,
+  applyEdgeChanges, applyNodeChanges, addEdge, useReactFlow,
   type Connection, type Edge, type EdgeChange, type Node, type NodeChange, type NodeProps,
 } from '@xyflow/react'
 import { XYFLOW_CSS } from './xyflow-css.js'
 import { XYFLOW_STYLE_ID, injectCssOnce } from './styles.js'
 import type {
   CanvasEdge, CanvasNode, CardProjection, ChainDocLike, ChainGraph, ChainInputSlot, ChainSaveResult,
+  OrchestrationPalette, PaletteCard,
 } from './types.js'
+import { fetchPalette } from './api.js'
 
 /** 画布节点 data：label/url/method 是**展示投影**（来自卡或 page），constants 才是可编辑的链数据。 */
 type CanvasNodeData = {
@@ -40,6 +42,10 @@ type CanvasNodeData = {
 
 type FlowNode = Node<CanvasNodeData, 'page' | 'api' | 'pill'>
 type FlowEdge = Edge
+
+/** 拖拽载荷的 MIME：用自定义 type，避免把页面里其他拖拽（文件/文本）误当节点。 */
+export const CARD_MIME = 'application/x-dsh-dataforge-card'
+export const PAGE_MIME = 'application/x-dsh-dataforge-page'
 
 const NODE_WIDTH = 210
 const LEVEL_GAP = 300
@@ -192,17 +198,77 @@ export interface OrchestrationCanvasProps {
   onSave: (doc: ChainDocLike) => Promise<ChainSaveResult>
 }
 
-export function OrchestrationCanvas({ graph, onSave }: OrchestrationCanvasProps): ReactNode {
+/**
+ * 画布出口：外面套一层 ReactFlowProvider。
+ *
+ * 需要 provider 是因为「拖入节点」要用 `useReactFlow().screenToFlowPosition` 把鼠标坐标
+ * 换算成画布坐标；那个 hook 只能在 provider 内部调用，而 drop 处理器挂在 ReactFlow 自己
+ * 的 props 上（不是它的子节点），所以 provider 必须在我们这一层。
+ */
+export function OrchestrationCanvas(props: OrchestrationCanvasProps): ReactNode {
   injectCssOnce(XYFLOW_STYLE_ID, XYFLOW_CSS)
+  return (
+    <ReactFlowProvider>
+      <CanvasInner {...props} />
+    </ReactFlowProvider>
+  )
+}
+
+function CanvasInner({ graph, onSave }: OrchestrationCanvasProps): ReactNode {
+  const { screenToFlowPosition } = useReactFlow()
 
   const [nodes, setNodes] = useState<FlowNode[]>(() => projectNodes(graph))
   const [edges, setEdges] = useState<FlowEdge[]>(() => projectEdges(graph.doc))
   const [inputs, setInputs] = useState<ChainInputSlot[]>(() => graph.doc.inputs.map((slot) => ({ ...slot })))
   const [inputsOpen, setInputsOpen] = useState(false)
+  const [palette, setPalette] = useState<OrchestrationPalette | undefined>()
+  const [paletteError, setPaletteError] = useState<string | undefined>()
   const [selNodeId, setSelNodeId] = useState<string | undefined>()
   const [selEdgeId, setSelEdgeId] = useState<string | undefined>()
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | undefined>()
+
+  useEffect(() => {
+    let alive = true
+    void fetchPalette()
+      .then((value) => { if (alive) setPalette(value) })
+      .catch((error: unknown) => {
+        if (alive) setPaletteError(error instanceof Error ? error.message : String(error))
+      })
+    return () => { alive = false }
+  }, [])
+
+  /**
+   * 追加一个节点。
+   *
+   * id 在这里算好再 setNodes：**不能**在 setNodes 的 updater 里再调 setSelNodeId——
+   * updater 必须是纯函数（StrictMode 下会被调用两次，副作用会翻倍）。
+   * 同一张卡可以拖多次，所以 id 冲突时加序号。
+   */
+  const appendNode = useCallback((
+    seed: { kind: 'card' | 'page'; cardId?: string; page?: string; label: string; method?: string; url?: string },
+    position: { x: number; y: number },
+  ) => {
+    const raw = seed.cardId ?? seed.page ?? 'node'
+    const base = raw.replace(/[^A-Za-z0-9._-]/g, '_')
+    let id = base
+    let seq = 2
+    while (nodes.some((node) => node.id === id)) {
+      id = `${base}-${seq}`
+      seq += 1
+    }
+    const data: CanvasNodeData = {
+      label: seed.label,
+      constants: {},
+      ...(seed.cardId === undefined ? {} : { card: seed.cardId }),
+      ...(seed.page === undefined ? {} : { page: seed.page }),
+      ...(seed.method === undefined ? {} : { method: seed.method }),
+      ...(seed.url === undefined ? {} : { url: seed.url }),
+    }
+    setNodes((current) => [...current, { id, type: seed.kind === 'page' ? 'page' : 'api', position, data }])
+    setSelNodeId(id)
+    setSelEdgeId(undefined)
+  }, [nodes])
 
   const onNodesChange = useCallback((changes: NodeChange<FlowNode>[]) => {
     setNodes((current) => applyNodeChanges(changes, current))
@@ -396,6 +462,25 @@ export function OrchestrationCanvas({ graph, onSave }: OrchestrationCanvasProps)
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' }}
+          onDrop={(event) => {
+            event.preventDefault()
+            const cardId = event.dataTransfer.getData(CARD_MIME)
+            const page = event.dataTransfer.getData(PAGE_MIME)
+            if (cardId.length === 0 && page.length === 0) return
+            const position = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+            if (cardId.length > 0) {
+              const card = palette?.cards.find((item) => item.cardId === cardId)
+              appendNode({
+                kind: 'card',
+                cardId,
+                label: card?.name ?? cardId,
+                ...(card === undefined ? {} : { method: card.method, url: card.urlTemplate }),
+              }, position)
+            } else {
+              appendNode({ kind: 'page', page, label: `页面 ${pageTail(page)}`, url: page }, position)
+            }
+          }}
           onNodeClick={(_event, node) => { setSelNodeId(node.id); setSelEdgeId(undefined) }}
           onEdgeClick={(_event, edge) => { setSelEdgeId(edge.id); setSelNodeId(undefined) }}
           onPaneClick={() => { setSelNodeId(undefined); setSelEdgeId(undefined) }}
@@ -405,6 +490,19 @@ export function OrchestrationCanvas({ graph, onSave }: OrchestrationCanvasProps)
           <Background />
           <Controls />
           <MiniMap pannable zoomable />
+          <Panel position="center-left">
+            <CardPalette
+              kind={graph.kind}
+              palette={palette}
+              error={paletteError}
+              onAdd={(seed) => {
+                appendNode(seed, screenToFlowPosition({
+                  x: window.innerWidth / 2,
+                  y: window.innerHeight / 2,
+                }))
+              }}
+            />
+          </Panel>
           <Panel position="top-left">
             <div className="dsh-df-rf-toolbar">
               <button type="button" onClick={() => { addNode('page') }}>+ 页面节点</button>
@@ -566,6 +664,113 @@ function NodeEditor(props: {
           />
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * 左栏调色板（FR-2.2 的「从接口库拖入节点」）。
+ *
+ * 接口编排列卡（拖进画布 → 带 cardId 的 api 节点）；页面编排列页面（拖 → page 节点）。
+ * 两种都支持点击追加：拖拽在某些环境（触屏/受控浏览器）不可用，不能把唯一入口押在 DnD 上。
+ */
+function CardPalette(props: {
+  kind: ChainGraph['kind']
+  palette?: OrchestrationPalette
+  error?: string
+  onAdd: (seed: { kind: 'card' | 'page'; cardId?: string; page?: string; label: string; method?: string; url?: string }) => void
+}): ReactNode {
+  const { kind, palette, error, onAdd } = props
+  const [keyword, setKeyword] = useState('')
+  const [open, setOpen] = useState(true)
+
+  const isPage = kind === 'page-chain'
+  const cards = useMemo(() => {
+    const list = palette?.cards ?? []
+    const keywordLower = keyword.trim().toLowerCase()
+    if (keywordLower.length === 0) return list
+    return list.filter((card) => `${card.cardId} ${card.name ?? ''} ${card.method} ${card.urlTemplate}`
+      .toLowerCase().includes(keywordLower))
+  }, [keyword, palette])
+  const pages = useMemo(() => {
+    const list = palette?.pages ?? []
+    const keywordLower = keyword.trim().toLowerCase()
+    if (keywordLower.length === 0) return list
+    return list.filter((page) => page.toLowerCase().includes(keywordLower))
+  }, [keyword, palette])
+
+  return (
+    <div className={`dsh-df-palette${open ? '' : ' dsh-df-collapsed'}`}>
+      <button type="button" className="dsh-df-palette-head" onClick={() => { setOpen(!open) }}>
+        <span className="dsh-df-lv dsh-df-lv-1">{isPage ? '页面' : '接口库'}</span>
+        <span className="dsh-df-palette-count">{isPage ? pages.length : cards.length}</span>
+        <span className="dsh-df-caret">{open ? '▼' : '▶'}</span>
+      </button>
+      {open ? (
+        <div className="dsh-df-palette-body">
+          <input
+            className="dsh-df-search"
+            placeholder={isPage ? '搜索页面…' : '搜索卡 / 方法 / 地址…'}
+            value={keyword}
+            onChange={(event) => { setKeyword(event.target.value) }}
+          />
+          {error === undefined ? null : <p className="dsh-df-sub">调色板读取失败：{error}</p>}
+          {palette?.truncated === undefined ? null : <p className="dsh-df-sub">{palette.truncated}</p>}
+          <div className="dsh-df-palette-list">
+            {isPage
+              ? pages.map((page) => (
+                  <button
+                    key={page}
+                    type="button"
+                    className="dsh-df-palette-item"
+                    draggable
+                    onDragStart={(event) => {
+                      event.dataTransfer.setData(PAGE_MIME, page)
+                      event.dataTransfer.effectAllowed = 'copy'
+                    }}
+                    onClick={() => { onAdd({ kind: 'page', page, label: `页面 ${pageTail(page)}`, url: page }) }}
+                  >
+                    <span className="dsh-df-lv dsh-df-lv-2">页面</span>
+                    <span className="dsh-df-palette-label">{pageTail(page)}</span>
+                    <span className="dsh-df-palette-url">{page}</span>
+                  </button>
+                ))
+              : cards.map((card: PaletteCard) => (
+                  <button
+                    key={card.cardId}
+                    type="button"
+                    className="dsh-df-palette-item"
+                    draggable
+                    onDragStart={(event) => {
+                      event.dataTransfer.setData(CARD_MIME, card.cardId)
+                      event.dataTransfer.effectAllowed = 'copy'
+                    }}
+                    onClick={() => {
+                      onAdd({
+                        kind: 'card',
+                        cardId: card.cardId,
+                        label: card.name ?? card.cardId,
+                        method: card.method,
+                        url: card.urlTemplate,
+                      })
+                    }}
+                  >
+                    <span className={`dsh-df-method ${card.method === 'GET' ? 'GET' : card.method === 'POST' ? 'POST' : 'dsh-df-method-other'}`}>
+                      {card.method}
+                    </span>
+                    <span className="dsh-df-palette-label">{card.name ?? card.cardId}</span>
+                    <span className="dsh-df-palette-url">{card.urlTemplate}</span>
+                  </button>
+                ))}
+          </div>
+          {(isPage ? pages.length : cards.length) === 0 ? (
+            <p className="dsh-df-sub">
+              {isPage ? '还没有采集到页面（先去「快速采集」）' : '接口库是空的（先跑 dataforge_library_import）'}
+            </p>
+          ) : null}
+          <p className="dsh-df-rf-hint">拖到画布，或点一下追加</p>
+        </div>
+      ) : null}
     </div>
   )
 }

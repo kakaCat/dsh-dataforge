@@ -6098,6 +6098,10 @@ async function handle(deps, req, res) {
 			await handleGraph(deps, url, res);
 			return;
 		}
+		if (suffix === "/palette") {
+			ok(res, await buildPalette(deps));
+			return;
+		}
 		fail(res, 404, `不认识的路径：${suffix}`, "unknown-path");
 	} catch (error) {
 		fail(res, 500, error instanceof Error ? error.message : String(error), "internal");
@@ -6207,6 +6211,32 @@ async function handleGraph(deps, url, res) {
 		cards: resolveCardIdentities(workspaceRoot, loaded.doc),
 		versions: listChainVersions(workspaceRoot, site, flow)
 	});
+}
+const MAX_PALETTE_CARDS = 500;
+const MAX_PALETTE_PAGES = 200;
+async function buildPalette(deps) {
+	const workspaceRoot = await deps.resolveWorkspaceRoot();
+	let cards = [];
+	try {
+		cards = listCards(workspaceRoot);
+	} catch {
+		cards = [];
+	}
+	const pages = /* @__PURE__ */ new Set();
+	for (const card of cards) for (const source of card.sources ?? []) for (const page of source.pages ?? []) if (page.length > 0) pages.add(page);
+	const truncated = cards.length > MAX_PALETTE_CARDS ? `接口库有 ${cards.length} 张卡，调色板只列前 ${MAX_PALETTE_CARDS} 张（用搜索框缩小范围）` : void 0;
+	return {
+		cards: cards.slice(0, MAX_PALETTE_CARDS).map((card) => ({
+			cardId: card.cardId,
+			...card.name === void 0 ? {} : { name: card.name },
+			method: card.identity.method,
+			urlTemplate: card.identity.urlTemplate,
+			inputCount: card.inputs.length,
+			outputCount: card.outputs.length
+		})),
+		pages: [...pages].slice(0, MAX_PALETTE_PAGES),
+		...truncated === void 0 ? {} : { truncated }
+	};
 }
 /** 节点引用的卡身份投影（读不到的卡不出现在表里，画布降级显示 cardId）。 */
 function resolveCardIdentities(workspaceRoot, doc) {

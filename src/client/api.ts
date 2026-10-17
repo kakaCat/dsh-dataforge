@@ -5,7 +5,8 @@
  * @module dsh-dataforge/client/api
  */
 import type {
-  CaptureStartResult, CardRow, ChainDocLike, ChainGraph, ChainSaveResult, OrchestrationOverview, RunDetail, RunRow,
+  CaptureStartResult, CardRow, ChainDocLike, ChainGraph, ChainSaveResult, OrchestrationOverview,
+  OrchestrationPalette, RunDetail, RunRow,
 } from './types.js'
 
 export const PANEL_API_PREFIX = '/dashboard/api/dataforge'
@@ -94,6 +95,10 @@ export function postCapture(taskType: 'single_page', entryUrl: string): Promise<
 
 export async function fetchOrchestrationOverview(): Promise<OrchestrationOverview> {
   return fetchPanelData<OrchestrationOverview>('/orchestration/overview')
+}
+
+export async function fetchPalette(): Promise<OrchestrationPalette> {
+  return fetchPanelData<OrchestrationPalette>('/orchestration/palette')
 }
 
 export async function fetchChainGraph(site: string, flow: string, version?: number): Promise<ChainGraph> {

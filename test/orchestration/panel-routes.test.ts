@@ -321,3 +321,47 @@ describe('同一前缀内的分派（不赌宿主 prefix 匹配语义）', () =>
     expect(json(response).success).toBe(true)
   })
 })
+
+describe('GET /orchestration/palette（画布左栏拖拽源）', () => {
+  it('列出库里的卡与采集到的页面，且不含凭证字段', async () => {
+    const { writeCard } = await import('../../src/library/store.js')
+    writeCard(workspace(), {
+      cardId: 'card_000123',
+      kind: 'interface-card',
+      name: '搜索材料',
+      identity: { mergeKey: 'GET /api/materials:q', method: 'GET', urlTemplate: '/api/materials?q={q}' },
+      inputs: [{ path: 'query.q', type: 'string', required: true, role: 'input' }],
+      outputs: [{ path: 'body.items[*].internalId', type: 'string' }],
+      auth: 'cookie-session',
+      authEvidence: 'header:cookie:JSESSIONID',
+      sources: [{
+        captureId: 'cap_1',
+        pages: ['https://scm.example.com/materials', 'https://scm.example.com/materials/detail'],
+        relationIds: [],
+      }],
+    })
+
+    const response = await serveAsync('GET', '/dashboard/api/dataforge/orchestration/palette')
+    expect(response.status).toBe(200)
+    const data = json(response).data as Record<string, unknown>
+    const cards = data.cards as Array<Record<string, unknown>>
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({ cardId: 'card_000123', name: '搜索材料', method: 'GET', inputCount: 1, outputCount: 1 })
+    // 凭证/鉴权来源名都不出壳
+    expect(Object.keys(cards[0] ?? {})).not.toContain('auth')
+    expect(JSON.stringify(cards[0])).not.toContain('JSESSIONID')
+
+    expect(data.pages).toEqual([
+      'https://scm.example.com/materials',
+      'https://scm.example.com/materials/detail',
+    ])
+  })
+
+  it('库为空时是空调色板，不是错误', async () => {
+    const response = await serveAsync('GET', '/dashboard/api/dataforge/orchestration/palette')
+    expect(response.status).toBe(200)
+    const data = json(response).data as Record<string, unknown>
+    expect(data.cards).toEqual([])
+    expect(data.pages).toEqual([])
+  })
+})
