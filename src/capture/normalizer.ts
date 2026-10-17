@@ -28,6 +28,17 @@ const VOLATILE = new Set([
 
 const SEGMENT_PARAM = /\/(?:\d+|[a-f0-9][a-f0-9-]{19,})(?=\/|$)/gi
 
+/**
+ * `new URL()` 会把路径里的 `{}` 转义成 `%7B…%7D`。
+ *
+ * 模板占位符（`{p}`、`{id}`）必须原样保留：一旦落成 `%7Bp%7D`，入库后再归一化一次就完全
+ * 认不出来了——链上要替换的 `{p}` 没了，执行期只能报「匿名占位符无法给值」。
+ * 这里只还原**花括号**这一种转义，不动路径里别的 `%xx`（那可能是业务语义，比如 `%2F`）。
+ */
+function restorePlaceholderBraces(pathname: string): string {
+  return pathname.replace(/%7B([A-Za-z0-9_]*)%7D/gi, '{$1}')
+}
+
 export function normalizeUrlForTemplate(rawUrl: string): { urlTemplate: string } {
   const u = new URL(rawUrl, 'http://capture.local')
   const seen = new Map<string, string>()
@@ -35,7 +46,7 @@ export function normalizeUrlForTemplate(rawUrl: string): { urlTemplate: string }
     if (VOLATILE.has(k)) continue
     if (!seen.has(k)) seen.set(k, v)
   }
-  const path = u.pathname.replace(SEGMENT_PARAM, '/{p}')
+  const path = restorePlaceholderBraces(u.pathname).replace(SEGMENT_PARAM, '/{p}')
   const pairs = [...seen.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
   const query = sortedParamsToString(pairs)
   return { urlTemplate: query === '' ? path : `${path}?${query}` }

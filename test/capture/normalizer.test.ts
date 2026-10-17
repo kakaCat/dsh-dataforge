@@ -32,6 +32,21 @@ describe('normalizeUrlForTemplate / mergeKeyOf', () => {
     expect(a).toBe(b)
   })
 
+  it('模板占位符的花括号原样保留（回归：new URL 会把 {p} 转义成 %7Bp%7D）', () => {
+    // 入库的模板已经是归一化产物；再归一化一次必须幂等，否则 {p} 变成 %7Bp%7D，
+    // 执行期就再也替换不回来（链上写的 path.p1 找不到落点）。
+    const once = normalizeUrlForTemplate('/api/orders/{p}/items').urlTemplate
+    expect(once).toBe('/api/orders/{p}/items')
+    expect(normalizeUrlForTemplate(once).urlTemplate).toBe(once)
+
+    // 具名占位符同理；且路径里数字段仍会被抽成 {p}。
+    expect(normalizeUrlForTemplate('/api/orders/{orderId}/items/12345').urlTemplate).toBe(
+      '/api/orders/{orderId}/items/{p}',
+    )
+    // 别的百分号转义不许被顺手解码（那可能是业务语义）。
+    expect(normalizeUrlForTemplate('/api/files/a%2Fb').urlTemplate).toBe('/api/files/a%2Fb')
+  })
+
   it('模板是合法 URL：query 用 ? 拼接（回归：曾用 : 拼成不可回放的串）', () => {
     const t = normalizeUrlForTemplate('https://x.test/api/s?wd=a&_t=1792172519230#frag')
     expect(t.urlTemplate).toBe('/api/s?wd=a')
