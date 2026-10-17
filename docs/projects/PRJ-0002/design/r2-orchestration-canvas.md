@@ -15,7 +15,7 @@ updated: 2026-10-17
 
 - **问题**：R-1 的链文件对 agent 友好，业务用户不写 YAML；原型 `docs/prototypes/orchestration.html` 已定型四段动线，但面板里**整个「编排」页签原本没有实现**（采集/接口库/采集网站三个页签是 PRJ-0001，编排是 PRJ-0002）。
 - **方案**：面板加第 5 个页签「编排」——网站选择 → 流程列表（页面/接口编排 × 业务域 → 流程 → 版本，带检索与分页）→ 编排图列表（每版本一张，分页）→ 画布（`@xyflow/react` v12）；链契约补三个可选字段（业务域、版本来源、画布坐标），读写全经 `saveChain` 唯一写入口。
-- **影响面**：新增 3 个 client 模块 + 1 个路由模块；改 `src/chains/{schema,store}.ts`（补字段）、面板路由分派、构建链；不改采集期任何表结构，不改 R-1 校验规则。
+- **影响面**：新增 3 个 client 模块 + 1 个路由模块（四条路由：overview / palette / graph 读 / graph 写）；改 `src/chains/{schema,store}.ts`（补字段）、面板路由分派、构建链；不改采集期任何表结构，不改 R-1 校验规则。
 
 ## 背景与问题  serves: 全文
 
@@ -24,7 +24,7 @@ updated: 2026-10-17
 | 需求编号 | 原始诉求 | 本设计如何回应 |
 |---|---|---|
 | FR-2.1 | 原型：「网站 → 编排类型 → 流程 → 版本 → 编排图三级列表」 | 四视图单页签：`sites → flows → graphs → canvas`，业务域→流程→版本三级 + 检索 + 分页 |
-| FR-2.2 | 「React Flow 画布：拖入节点、拖点连线、点选改属性、Delete 删除」 | `@xyflow/react` v12 画布；连线/改属性/删除已做；「从接口库拖入」未做（见 §开放问题 Q1） |
+| FR-2.2 | 「React Flow 画布：拖入节点、拖点连线、点选改属性、Delete 删除」 | `@xyflow/react` v12 画布 + 左栏调色板（拖卡/页面进画布，也可点击追加）；连线/改属性/Delete 齐全 |
 | FR-2.3 | 「连线即绑定：下游入参字段 ← 上游出参字段（下拉自卡模板）」 | 边属性面板两侧下拉，候选来自卡的 `inputs[].path` / `outputs[].path`，选完拼 `<节点id>.<字段路径>` |
 | FR-2.4 | 「保存 = 写链文件 + 版本快照；校验失败不许保存，错误指到节点/边」 | 写路径只有 `saveChain`；失败回执 `issues[{target,code,reason}]` 逐条回显 |
 | FR-2.5 | 「导入导出 YAML（原型占位按钮转正）」 | 导入：选 `.yaml` → 同一写入口（`source=import`）；导出：下载当前版本原文 |
@@ -65,6 +65,8 @@ R-1 的链契约（schema + 校验 + 版本 + 唯一写入口）已经稳定并�
 ```text
 浏览器（panel client）
   编排页签 ──GET /orchestration/overview──► 链目录扫描（listChains + 逐版本头部）
+     │
+     ├──GET /orchestration/palette────────► 库里的卡 + 采集到的页面（左栏拖拽源）
      │
      ├──GET /orchestration/graph──────────► loadChain + 卡投影（method/url/字段表）→ 可编辑 doc
      │
@@ -117,6 +119,7 @@ R-1 的链契约（schema + 校验 + 版本 + 唯一写入口）已经稳定并�
 | IF-1 | `GET /orchestration/overview` | 无（可选 `?site=` 过滤） | `{sites[], flows[], chainsRootHint}`；versions 逐条含 `created/source/nodeCount/edgeCount/superseded/unreadable` | 500 `internal`（读目录异常） | 新增只读端点，无破坏性变更 |
 | IF-2 | `GET /orchestration/graph?site&flow&version` | `site`、`flow` 必填，`version` 可选（缺省最新） | `{doc, cards, chainYaml, versions[]}` | 400 `missing-param`/`bad-param`；404 `chain-not-found`；422 `invalid-chain`（坏文件） | 同上 |
 | IF-3 | `POST /orchestration/graph` | `{doc}` 或 `{chainYaml}`，可选 `source: canvas\|import` | `{ok:true, version, path, warnings[]}` | 400 `bad-json`/`bad-param`；413 `payload-too-large`；200+`ok:false`+`issues[]`（校验不过） | 同上 |
+| IF-4 | `GET /orchestration/palette` | 无 | `{cards[], pages[], truncated?}`：卡的 cardId/名称/方法/地址/字段计数 + 采集到过的页面 | 500 `internal`；库为空返回空数组（不是错误） | 新增只读端点 |
 
 #### IF-1 网站与流程总览
 
@@ -171,7 +174,22 @@ R-1 的链契约（schema + 校验 + 版本 + 唯一写入口）已经稳定并�
 
 **幂等与重试**：不幂等——每次成功都产生新版本。重复提交同一份内容会得到内容相同的 v(n+1)，不改写历史。
 
-#### 路由分派（无编号，属 IF-1～IF-3 的装配约束）
+#### IF-4 画布调色板
+
+**语义**
+
+「从接口库拖入节点」的数据源：接口编排列出库里可拖的卡，页面编排列出采集到过的页面（去重）。
+只给身份与字段计数——拖进去之后画布按 cardId 再取完整字段表（IF-2 的 `cards`），避免重复下发。
+
+**错误码**
+
+库不存在/读不出来 → **200 + 空数组**（画布仍可开，手填 cardId 的路径仍在）；其余异常 → 500 `internal`。
+
+**兼容性**
+
+新增端点。卡片超过 500 张 / 页面超过 200 条时截断，并在 `truncated` 里如实说明——不静默截断。
+
+#### 路由分派（无编号，属 IF-1～IF-4 的装配约束）
 
 编排路由与采集路由共用前缀 `/dashboard/api/dataforge`。**不各自 register 一次**：宿主 prefix 匹配语义没有契约（首个命中 vs 最长前缀），两个 handler 抢前缀就是赌实现。
 做法：前缀只注册一次，`/orchestration/*` 在我们的代码里分派（`CapturePanelDeps.orchestration`），并对两种 URL 形态（完整路径 / 剥好前缀）各有用例锁住。
@@ -228,14 +246,15 @@ R-1 的链契约（schema + 校验 + 版本 + 唯一写入口）已经稳定并�
 | M1 | 链契约补字段（domain/source/layout）+ `listChains` 元数据 | schema 往返测试绿；老链零迁移 | yunpeng | 已完成（2026-10-17） |
 | M2 | 编排数据路由（overview/graph 读写）+ 前缀内分派 | 14 项路由测试绿；两种 URL 形态都认 | yunpeng | 已完成（2026-10-17） |
 | M3 | 四视图 + 画布 + 绑定下拉 + 槽位编辑 + 导入导出 | typecheck 0；329 passed；`pnpm build` 通过 | yunpeng | 已完成（2026-10-17） |
-| M4 | 拖入节点 / 重命名业务域 / 编译入口 | 用户能全程不碰文本完成 S1 | yunpeng | 未排期 |
+| M4 | 拖入节点（已完成 2026-10-17） | 调色板拖/点都能落节点；空库降级为手动填 cardId | yunpeng | 已完成 |
+| M5 | 重命名业务域/流程、编译入口 | 用户能全程不碰文本完成 S1 | yunpeng | 未排期 |
 
 ## 需求追溯  serves: 全文
 
 | 需求编号 | 设计节 | 测试用例 | 指标 |
 |---|---|---|---|
 | FR-2.1 | 方案总览、接口设计 IF-1 | `test/orchestration/panel-routes.test.ts` overview 三项 | 不适用 |
-| FR-2.2 | 架构与依赖、构建路径 | 构建验证（`lib/client.js` 325 KB）+ 手工冒烟 | 不适用 |
+| FR-2.2 | 架构与依赖、接口设计 IF-4 | 调色板内容与零凭证用例、空库降级用例；构建验证（`lib/client.js` 331 KB） | 不适用 |
 | FR-2.3 | 接口设计 IF-2（卡投影）、备选方案 C | 卡字段投影用例（含「不含 auth」断言） | 不适用 |
 | FR-2.4 | 数据模型、接口设计 IF-3 | doc 形态保存、坏链 422、坏图不落盘 | 不适用 |
 | FR-2.5 | 接口设计 IF-3（source=import） | import 来源标注、非法 source 400 | 不适用 |
@@ -257,7 +276,7 @@ R-1 的链契约（schema + 校验 + 版本 + 唯一写入口）已经稳定并�
 
 | 问题 | 选项 | 负责人 | 截止 |
 |---|---|---|---|
-| Q1 「从接口库拖入节点」要不要做 | 做（画布左栏卡调色板 + HTML5 drag）／保持「+ 节点 + 填 cardId」 | yunpeng | M4 前 |
+| Q1 「从接口库拖入节点」要不要做 | 已决：做（左栏调色板，拖 + 点两种入口都保留） | yunpeng | 已决：2026-10-17 完成 |
 | Q2 业务域/流程重命名语义 | 只改 `meta.domain`（不动目录）／真正移动链文件目录（需要 rename 事务） | yunpeng | M4 前 |
 | Q3 页面编排 → 接口编排的编译入口放哪 | 画布工具栏（「编译为接口链」）／流程列表行内操作 | yunpeng | R-3 联调前 |
 

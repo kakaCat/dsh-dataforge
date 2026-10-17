@@ -1,0 +1,11 @@
+{
+  // 客户端测试的类型口径：继承 client 配置（DOM lib + react-jsx），
+  // 只多给 vitest/node 的全局类型。根 tsconfig 刻意不含 DOM——服务端代码
+  // 一旦误用 document/window 就该在 typecheck 阶段报错，不能为了测试放宽它。
+  "extends": "./tsconfig.client.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["test/client"],
+  "exclude": []
+}
