@@ -31,7 +31,7 @@ import { missingInputs, normalizePath } from './coverage.js'
 import { httpRequest, redactHeaders } from './http.js'
 import type { PlanNode } from './plan.js'
 import { buildRequest } from './request.js'
-import { previewText } from './run.js'
+import { previewText, resolveNodeFiles } from './run.js'
 import { resolveBinding } from './binding.js'
 
 /* ================================================================== 契约 */
@@ -61,6 +61,11 @@ export type ProbeErrorCode =
   | 'param-type-mismatch'
   | 'bad-url-template'
   | 'body-type-unsupported'
+  | 'file-part-invalid'
+  | 'file-not-found'
+  | 'file-field-invalid'
+  | 'file-read-failed'
+  | 'pick-not-found'
   | 'node-timeout'
   | 'node-network-error'
   | 'node-http-error'
@@ -473,12 +478,31 @@ export async function probeNode(input: ProbeInput): Promise<ProbeResult> {
     gaps: [],
   }
   const providedValues = Object.fromEntries([...prepared.provided.values()].map((value) => [value.path, value.value]))
+  const fileParts = resolveNodeFiles(node, input.chainInputs ?? {})
+  if (!fileParts.ok) {
+    appendEvent(input.dataRoot, runId, { event: 'terminal', success: false, cancelled: false, message: fileParts.message })
+    return {
+      ok: false,
+      gate: 'blocked',
+      code: fileParts.code as ProbeErrorCode,
+      message: fileParts.message,
+      runId,
+      runDir,
+      explorationId,
+      nodeId: node.id,
+      cardId: card.cardId,
+      method,
+      cardInputs: prepared.cardInputs,
+      provenance: prepared.provenance,
+    }
+  }
   const built = buildRequest({
     node: planNode,
     card,
     baseUrl: input.baseUrl,
     provided: providedValues,
     inputs: input.chainInputs ?? {},
+    ...(fileParts.parts.length === 0 ? {} : { fileParts: fileParts.parts }),
   })
   if (!built.ok) {
     appendEvent(input.dataRoot, runId, {
@@ -533,7 +557,11 @@ export async function probeNode(input: ProbeInput): Promise<ProbeResult> {
     method: request.method,
     url: request.url,
     headers: redactedHeaders,
-    ...(request.body === undefined ? {} : { bodyPreview: previewText(redactText(request.body, sensitiveValues)) }),
+    ...(request.body === undefined
+      ? {}
+      : { bodyPreview: typeof request.body === 'string'
+          ? previewText(redactText(request.body, sensitiveValues))
+          : `[multipart ${request.body.byteLength} bytes]` }),
   }
 
   appendEvent(input.dataRoot, runId, {

@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChainDoc, InterfaceCardDoc } from '../../src/chains/schema.js'
@@ -47,6 +47,21 @@ beforeAll(async () => {
         body: Buffer.concat(chunks).toString('utf8'),
         headers: req.headers,
       })
+      if (url.startsWith('/api/upload')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ bytes: Buffer.concat(chunks).byteLength, hasFile: Buffer.concat(chunks).toString('utf8').includes('dsh-upload-body') }))
+        return
+      }
+      if (url.startsWith('/api/items')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{"items":[{"name":"other","fs_id":1},{"name":"target","fs_id":42}]}')
+        return
+      }
+      if (url.startsWith('/api/pick')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ body: Buffer.concat(chunks).toString('utf8') }))
+        return
+      }
       if (url.startsWith('/api/number')) {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end('{"id":42}')
@@ -174,6 +189,15 @@ const authOnlyCard: InterfaceCardDoc = { ...cardOf('card_auth_only', 'GET', '/ap
 const protectedCard: InterfaceCardDoc = { ...cardOf('card_protected', 'GET', '/api/protected', []), auth: 'cookie-session' }
 const numberCard = cardOf('card_number', 'GET', '/api/number', [], [{ path: 'body.id', type: 'number' }])
 const transformCard = cardOf('card_transform', 'POST', '/api/transform', [{ path: 'body.id', type: 'string' }])
+const uploadCard = cardOf('card_upload', 'POST', '/api/upload', [
+  { path: 'header.content-type', type: 'string' },
+  { path: 'body.file', type: 'string' },
+])
+const itemsCard = cardOf('card_items', 'GET', '/api/items', [], [
+  { path: 'body.items[*].name', type: 'string' },
+  { path: 'body.items[*].fs_id', type: 'number' },
+])
+const pickCard = cardOf('card_pick', 'POST', '/api/pick', [{ path: 'body.fs_id', type: 'string' }])
 
 /** 测试用 provider：只回一份固定 cookie，摘要里不含值。 */
 function providerOf(cookie: string): CredentialProvider {
@@ -424,6 +448,57 @@ describe('绑定值转换（R-5 真实站点适配）', () => {
     const binding = result.nodes.find((node) => node.nodeId === 'transform-node')?.bindings?.[0]
     expect(binding?.transform).toBe('array-json')
     expect(binding?.valuePreview).toBe('[42]')
+  })
+})
+
+describe('真实站点适配：multipart 上传 + 数组选择', () => {
+  it('node.files → multipart 正文带上文件内容', async () => {
+    seen = []
+    const filePath = join(mkdtempSync(join(tmpdir(), 'probe-file-')), 'dsh-upload-body.txt')
+    writeFileSync(filePath, 'dsh-upload-body-content', 'utf8')
+    const deps = depsOf()
+    const cards = cardsOf(uploadCard)
+    const doc = chainOf([{ id: 'upload', card: 'card_upload', constants: { 'header.content-type': 'multipart/form-data' }, files: { 'body.file': filePath } }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, { doc, cards, plan, baseUrl: base })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('completed')
+    const hit = seen.find((entry) => entry.url.startsWith('/api/upload'))
+    expect(hit?.headers['content-type']).toMatch(/^multipart\/form-data; boundary=/)
+    expect(hit?.body).toContain('dsh-upload-body-content')
+    expect(hit?.body).toContain('filename="dsh-upload-body.txt"')
+  })
+
+  it('edge.pick 按字段从数组里选元素（替代 list[3]）', async () => {
+    seen = []
+    const deps = depsOf()
+    const cards = cardsOf(itemsCard, pickCard)
+    const doc = chainOf(
+      [
+        { id: 'items', card: 'card_items', constants: {} },
+        { id: 'pick', card: 'card_pick', constants: {} },
+      ],
+      [{
+        from: 'items.body.items',
+        to: 'pick.body.fs_id',
+        pick: { match: { field: 'name', equals: 'target' }, field: 'fs_id' },
+        transform: 'string',
+      }],
+    )
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, { doc, cards, plan, baseUrl: base })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('completed')
+    const hit = seen.find((entry) => entry.url.startsWith('/api/pick'))
+    expect(JSON.parse(hit?.body ?? '{}')).toEqual({ fs_id: '42' })
+    const binding = result.nodes.find((node) => node.nodeId === 'pick')?.bindings?.[0]
+    expect(binding?.pick).toEqual({ match: { field: 'name', equals: 'target' }, field: 'fs_id' })
   })
 })
 

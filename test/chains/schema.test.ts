@@ -12,6 +12,7 @@ import {
   fieldSegments,
   inputSlotNameOf,
   inputSlotRef,
+  isDeclaredContainer,
   isFieldDeclared,
   isInputSlotRef,
   issueTargetOf,
@@ -230,5 +231,17 @@ describe('parseCardDoc', () => {
     expect(card?.outputs).toHaveLength(1)
     expect(parseCardDoc({ cardId: 'x' })).toBeUndefined()
     expect(parseCardDoc(null)).toBeUndefined()
+  })
+})
+
+describe('isDeclaredContainer（pick 的 from 容器）', () => {
+  it('数组容器可被 pick 引用；普通前缀不算', () => {
+    const outputs = [
+      { path: 'body.list[*].fs_id', type: 'number' },
+      { path: 'body.list[*].server_filename', type: 'string' },
+    ]
+    expect(isDeclaredContainer('body.list', outputs)).toBe(true)
+    expect(isDeclaredContainer('body.other', outputs)).toBe(false)
+    expect(isDeclaredContainer('body.list[*].fs_id', outputs)).toBe(false)
   })
 })

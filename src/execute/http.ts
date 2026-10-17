@@ -21,8 +21,8 @@ export type HttpRequestSpec = {
   method: string
   url: string
   headers?: Record<string, string>
-  /** 已序列化的正文；GET/HEAD 不传。 */
-  body?: string
+  /** 已序列化的正文（字符串或 multipart 二进制）；GET/HEAD 不传。 */
+  body?: string | Uint8Array
   /** 单次尝试的超时（毫秒）。 */
   timeoutMs?: number
   /** 额外重试次数（0 = 只发一次）。 */

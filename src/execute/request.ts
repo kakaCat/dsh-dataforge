@@ -25,14 +25,27 @@ import { normalizePath } from './coverage.js'
 import type { PlanNode } from './plan.js'
 
 /** 构造失败的分类（都可指到具体字段路径）。 */
-export type RequestFailureCode = 'param-missing' | 'param-type-mismatch' | 'bad-url-template' | 'body-type-unsupported'
+export type RequestFailureCode =
+  | 'param-missing'
+  | 'param-type-mismatch'
+  | 'bad-url-template'
+  | 'body-type-unsupported'
+  | 'file-part-invalid'
+
+export type FilePart = {
+  /** 卡字段路径（如 body.file）；multipart 会去掉 body. 前缀作为 form name。 */
+  field: string
+  filename: string
+  contentType: string
+  data: Uint8Array
+}
 
 export type BuiltRequest = {
   method: string
   url: string
   headers: Record<string, string>
-  /** JSON 序列化后的正文；GET/HEAD 无正文。 */
-  body?: string
+  /** JSON/urlencoded 字符串，或 multipart 二进制；GET/HEAD 无正文。 */
+  body?: string | Uint8Array
 }
 
 export type RequestBuildResult =
@@ -48,6 +61,8 @@ export type BuildRequestInput = {
   provided?: Record<string, unknown>
   /** 链级槽位运行值（常量里的 `$inputs.x` 从这里取）。 */
   inputs?: Record<string, unknown>
+  /** multipart 文件分片（由执行层读取本地文件后传入；buildRequest 保持纯函数）。 */
+  fileParts?: FilePart[]
 }
 
 /** 一个已经拿到值的入参。 */
@@ -65,7 +80,7 @@ function hasOwn(record: Record<string, unknown> | undefined, key: string): boole
  * 没解析出值的字段不在这里报错——`plan.buildPlan` 已经做过静态缺参判定，
  * 走到这里还缺就是运行期漏传，由 {@link buildRequest} 统一报 `param-missing`。
  */
-function resolveFields(input: BuildRequestInput): { fields: ResolvedField[]; missing: ResolvedField[] } {
+function resolveFields(input: BuildRequestInput, filePaths: Set<string>): { fields: ResolvedField[]; missing: ResolvedField[] } {
   const provided = input.provided ?? {}
   const inputs = input.inputs ?? {}
   const constants = input.node.constants ?? {}
@@ -77,6 +92,8 @@ function resolveFields(input: BuildRequestInput): { fields: ResolvedField[]; mis
     // 凭证由 R-4 注入（卡里今天也不会有该角色）：不报缺参、更不发空值。
     if (field.role === 'credential') continue
     const key = normalizePath(field.path)
+    // 文件字段由 fileParts 提供，不算缺参、也不进普通 body 骨架。
+    if (filePaths.has(key)) continue
 
     if (hasOwn(provided, key)) {
       fields.push({ path: field.path, type: field.type, value: provided[key] })
@@ -183,6 +200,37 @@ function serializeQuery(pairs: Array<[string, string]>): string {
   return pairs.map(([name, value]) => (value === '' ? name : `${name}=${encodeURIComponent(value)}`)).join('&')
 }
 
+/** multipart 字段值：标量原样，数组/对象 JSON 字面量。 */
+function multipartValueOf(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value === null) return ''
+  return JSON.stringify(value)
+}
+
+/** 构造 multipart 正文（文本字段 + 文件分片）；filePaths 里的字段不再重复写文本。 */
+function multipartBodyOf(
+  boundary: string,
+  body: Record<string, unknown>,
+  fileParts: FilePart[],
+  filePaths: Set<string>,
+): Uint8Array {
+  const chunks: Buffer[] = []
+  for (const [key, value] of Object.entries(body)) {
+    if (filePaths.has(normalizePath(`body.${key}`))) continue
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${multipartValueOf(value)}\r\n`, 'utf8'))
+  }
+  for (const part of fileParts) {
+    const formName = part.field.startsWith('body.') ? part.field.slice('body.'.length) : part.field
+    const safeName = part.filename.replace(/"/g, '_')
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${formName}"; filename="${safeName}"\r\nContent-Type: ${part.contentType}\r\n\r\n`, 'utf8'))
+    chunks.push(Buffer.from(part.data))
+    chunks.push(Buffer.from('\r\n', 'utf8'))
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'))
+  return Buffer.concat(chunks)
+}
+
 /** 扁平 body → application/x-www-form-urlencoded；数组/对象按 JSON 字面量落值。 */
 function formBodyOf(body: Record<string, unknown>): string {
   const params = new URLSearchParams()
@@ -201,7 +249,9 @@ function formBodyOf(body: Record<string, unknown>): string {
  * 失败一律带 `path`（能指到具体字段就指），让回执能直接告诉 agent 该改链上的哪个位置。
  */
 export function buildRequest(input: BuildRequestInput): RequestBuildResult {
-  const { fields, missing } = resolveFields(input)
+  const fileParts = input.fileParts ?? []
+  const filePaths = new Set(fileParts.map((part) => normalizePath(part.field)))
+  const { fields, missing } = resolveFields(input, filePaths)
   const notices: string[] = []
 
   if (missing.length > 0) {
@@ -248,6 +298,7 @@ export function buildRequest(input: BuildRequestInput): RequestBuildResult {
       continue
     }
     if (location === 'body') {
+      if (filePaths.has(normalizePath(field.path))) continue
       const failure = assignBody(body, rest, field.value)
       if (failure !== undefined) return { ok: false, code: 'param-type-mismatch', message: failure, path: field.path }
       hasBodyField = true
@@ -318,22 +369,27 @@ export function buildRequest(input: BuildRequestInput): RequestBuildResult {
   }
 
   const method = input.node.method.toUpperCase()
-  const sendsBody = method !== 'GET' && method !== 'HEAD' && hasBodyField
-  let bodyText: string | undefined
+  const sendsBody = method !== 'GET' && method !== 'HEAD' && (hasBodyField || fileParts.length > 0)
+  let bodyText: string | Uint8Array | undefined
   if (sendsBody) {
     const contentTypeKey = Object.keys(headers).find((name) => name.toLowerCase() === 'content-type')
     const contentType = contentTypeKey === undefined ? '' : headers[contentTypeKey].toLowerCase()
-    if (contentType === '') {
+    if (contentType.includes('multipart/form-data')) {
+      const boundary = `----dshDataforge${Math.random().toString(16).slice(2)}`
+      const nextKey = Object.keys(headers).find((name) => name.toLowerCase() === 'content-type') ?? 'content-type'
+      headers[nextKey] = `multipart/form-data; boundary=${boundary}`
+      bodyText = multipartBodyOf(boundary, body, fileParts, filePaths)
+    } else if (fileParts.length > 0) {
+      return {
+        ok: false,
+        code: 'file-part-invalid',
+        message: `文件分片要求 content-type 为 multipart/form-data（当前 ${contentType === '' ? '未设置' : contentType}）`,
+      }
+    } else if (contentType === '') {
       headers['content-type'] = JSON_CONTENT_TYPE
       bodyText = JSON.stringify(body)
     } else if (contentType.includes('application/x-www-form-urlencoded')) {
       bodyText = formBodyOf(body)
-    } else if (contentType.includes('multipart/form-data')) {
-      return {
-        ok: false,
-        code: 'body-type-unsupported',
-        message: 'multipart/form-data 请求体暂不支持：需要文件分片/边界，当前执行引擎只支持 JSON 与 urlencoded（R-5 真实站点上传待补）',
-      }
     } else {
       bodyText = JSON.stringify(body)
     }

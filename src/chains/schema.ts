@@ -66,6 +66,11 @@ export type ChainNode = {
   card?: string
   page?: string
   constants: Record<string, string>
+  /**
+   * 文件分片：卡字段路径 → 本地文件路径（或 `$inputs.<slot>`）。
+   * 仅 multipart/form-data 请求使用；值在运行期读取，不会写进链文件。
+   */
+  files?: Record<string, string>
   /** FR-1.2 节点级配置预留位（本期只落盘不执行，R-3 消费）。 */
   retry?: number
   timeoutSeconds?: number
@@ -81,6 +86,13 @@ export type ChainNode = {
 /** 边 = 绑定声明（FR-1.3）；`suggested: true` 只出现在编译草稿里。 */
 export type ChainEdgeTransform = 'string' | 'json' | 'array-json'
 
+export type ChainEdgePick = {
+  /** 数组元素里的匹配字段（点路径，相对元素）。 */
+  match: { field: string; equals: string | number | boolean }
+  /** 命中后取哪个字段（点路径）；缺省取整个元素。 */
+  field?: string
+}
+
 export type ChainEdge = {
   from: string
   to: string
@@ -93,6 +105,8 @@ export type ChainEdge = {
    * 缺省 = 原值（不做隐式转换）。
    */
   transform?: ChainEdgeTransform
+  /** 从数组出参里按字段选一个元素（再走 transform）。 */
+  pick?: ChainEdgePick
 }
 
 export type ChainMeta = {
@@ -252,6 +266,7 @@ const NodeSchema = Schema.object({
   card: Schema.string(),
   page: Schema.string(),
   constants: Schema.dict(ConstantValueSchema).default({}),
+  files: Schema.dict(Schema.string()),
   retry: Schema.number().min(0),
   timeoutSeconds: Schema.number().min(0),
   layout: LayoutSchema,
@@ -266,6 +281,7 @@ const EdgeSchema = Schema.object({
     Schema.const('json' as const),
     Schema.const('array-json' as const),
   ]),
+  pick: Schema.any(),
 })
 
 const InputSchema = Schema.object({
@@ -405,6 +421,19 @@ export function isFieldDeclared(bindingPath: string, fields: CardIoField[]): boo
   return false
 }
 
+/** 绑定路径是否是某个已声明字段的容器前缀（例如 body.list 之于 body.list[*].fs_id）。 */
+export function isDeclaredContainer(bindingPath: string, fields: CardIoField[]): boolean {
+  const target = fieldSegments(bindingPath)
+  if (target.length === 0) return false
+  return fields.some((field) => {
+    const declared = fieldSegments(field.path)
+    return (
+      declared.length > target.length &&
+      target.every((segment, index) => segment.replace(/\[\*\]$/, '') === declared[index].replace(/\[\*\]$/, ''))
+    )
+  })
+}
+
 /** 卡字段表里找同路径的声明（constants 合法性提示用）。 */
 export function findDeclaredField(bindingPath: string, fields: CardIoField[]): CardIoField | undefined {
   const target = fieldSegments(bindingPath)
@@ -427,6 +456,24 @@ function issueOfSchemaFailure(error: unknown): ChainIssue {
 }
 
 /** 把 schema 产物收敛成规范化的 ChainDoc（默认值补齐 + 常量统一成字符串）。 */
+/** 把 YAML 里的 pick 收敛成类型；缺 match/field 视为没写（不静默猜）。 */
+function normalizePick(raw: unknown): ChainEdgePick | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const record = raw as Record<string, unknown>
+  const match = record['match']
+  if (typeof match !== 'object' || match === null || Array.isArray(match)) return undefined
+  const matchRecord = match as Record<string, unknown>
+  const field = matchRecord['field']
+  const equals = matchRecord['equals']
+  if (typeof field !== 'string' || field === '' || equals === undefined) return undefined
+  if (typeof equals !== 'string' && typeof equals !== 'number' && typeof equals !== 'boolean') return undefined
+  const take = record['field']
+  return {
+    match: { field, equals },
+    ...(typeof take === 'string' && take !== '' ? { field: take } : {}),
+  }
+}
+
 function normalizeDoc(raw: unknown): ChainDoc {
   const doc = raw as ChainDoc & {
     inputs?: Array<Omit<ChainInput, 'required'> & { required?: boolean }>
@@ -460,6 +507,7 @@ function normalizeDoc(raw: unknown): ChainDoc {
       // 先剔除，再由下面的 nodeLayoutOf 决定要不要保留坐标。
       const rest = unknownKeysOf(node)
       delete rest.layout
+      delete rest.files
       const layout = nodeLayoutOf(node.layout)
       return {
         ...rest,
@@ -469,6 +517,7 @@ function normalizeDoc(raw: unknown): ChainDoc {
         constants: Object.fromEntries(
           Object.entries(node.constants ?? {}).map(([key, value]) => [key, String(value)]),
         ),
+        ...(node.files === undefined || Object.keys(node.files).length === 0 ? {} : { files: { ...node.files } }),
         ...(node.retry === undefined ? {} : { retry: node.retry }),
         ...(node.timeoutSeconds === undefined ? {} : { timeoutSeconds: node.timeoutSeconds }),
         ...(layout === undefined ? {} : { layout }),
@@ -480,6 +529,7 @@ function normalizeDoc(raw: unknown): ChainDoc {
       to: edge.to,
       ...(edge.suggested === true ? { suggested: true } : {}),
       ...(edge.transform === undefined ? {} : { transform: edge.transform }),
+      ...(normalizePick(edge.pick) === undefined ? {} : { pick: normalizePick(edge.pick) }),
     })),
   }
 }

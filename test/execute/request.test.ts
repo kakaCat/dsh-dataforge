@@ -193,7 +193,10 @@ describe('body 构造', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.request.headers['content-type']).toBe('application/json')
-    expect(JSON.parse(result.request.body ?? '{}')).toEqual({
+    const body = result.request.body
+    expect(typeof body).toBe('string')
+    if (typeof body !== 'string') return
+    expect(JSON.parse(body)).toEqual({
       lines: [{ materialId: 'M-1', quantity: 3 }],
       orgId: '2120',
     })
@@ -208,7 +211,10 @@ describe('body 构造', () => {
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(JSON.parse(result.request.body ?? '{}')).toEqual({ lines: [{ materialId: 'M-9' }] })
+    const body = result.request.body
+    expect(typeof body).toBe('string')
+    if (typeof body !== 'string') return
+    expect(JSON.parse(body)).toEqual({ lines: [{ materialId: 'M-9' }] })
   })
 
   it('给 [*] 字段喂数组 → 明确报错，让人改成显式下标', () => {
@@ -261,22 +267,29 @@ describe('body 构造', () => {
     expect(result.request.body).toBe('fid_list=%5B123%5D&pwd=feav')
   })
 
-  it('multipart/form-data → body-type-unsupported（真实上传待补）', () => {
+  it('multipart/form-data + fileParts → 带边界/文件名/内容的二进制正文', () => {
     const result = buildRequest({
       node: node({ method: 'POST' }),
       card: card({
         urlTemplate: '/rest/2.0/pcs/superfile2',
         inputs: [
           { path: 'header.content-type', type: 'string' },
+          { path: 'body.path', type: 'string' },
           { path: 'body.file', type: 'string' },
         ],
       }),
       baseUrl: BASE,
-      provided: { 'header.content-type': 'multipart/form-data; boundary=x', 'body.file': 'x' },
+      provided: { 'header.content-type': 'multipart/form-data', 'body.path': '/dsh-test.txt' },
+      fileParts: [{ field: 'body.file', filename: 'dsh-test.txt', contentType: 'text/plain', data: new TextEncoder().encode('hello-upload') }],
     })
-    expect(result.ok).toBe(false)
-    if (result.ok) return
-    expect(result.code).toBe('body-type-unsupported')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.request.headers['content-type']).toMatch(/^multipart\/form-data; boundary=/)
+    expect(result.request.body).toBeInstanceOf(Uint8Array)
+    const text = Buffer.from(result.request.body as Uint8Array).toString('utf8')
+    expect(text).toContain('Content-Disposition: form-data; name="path"')
+    expect(text).toContain('Content-Disposition: form-data; name="file"; filename="dsh-test.txt"')
+    expect(text).toContain('hello-upload')
   })
 
   it('卡上显式给了 content-type 就用它，不被覆盖', () => {

@@ -49,6 +49,11 @@ export function coveredPaths(doc: ChainDoc, node: ChainNode): Set<string> {
     const normalized = normalizePath(key)
     if (normalized.length > 0) covered.add(normalized)
   }
+  // 文件分片也是「已覆盖」的入参：值来自本地文件，不走常量/绑定。
+  for (const key of Object.keys(node.files ?? {})) {
+    const normalized = normalizePath(key)
+    if (normalized.length > 0) covered.add(normalized)
+  }
   for (const edge of doc.edges) {
     const to = splitBindingPath(edge.to)
     if (!to || to.nodeId !== node.id) continue

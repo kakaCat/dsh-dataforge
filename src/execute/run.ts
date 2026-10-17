@@ -30,11 +30,11 @@
  *
  * @module dsh-dataforge/execute/run
  */
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { basename, extname, join } from 'node:path'
 import { appendEvent, foldSummary, loadRunEvents, runsRoot, startRunRecord } from '../runs/store.js'
 import type { BridgeEvent, RunSummary } from '../shared/types.js'
-import type { ChainDoc, ChainEdgeTransform, ChainNode, InterfaceCardDoc } from '../chains/schema.js'
+import type { ChainDoc, ChainEdgePick, ChainEdgeTransform, ChainNode, InterfaceCardDoc } from '../chains/schema.js'
 import { isInputSlotRef, splitBindingPath } from '../chains/schema.js'
 import { slugOf } from '../chains/store.js'
 import { dependencyPairs } from '../chains/validate.js'
@@ -91,6 +91,11 @@ export type ChainRunErrorCode =
   | 'param-type-mismatch'
   | 'bad-url-template'
   | 'body-type-unsupported'
+  | 'file-part-invalid'
+  | 'file-not-found'
+  | 'file-field-invalid'
+  | 'file-read-failed'
+  | 'pick-not-found'
   | 'node-timeout'
   | 'node-network-error'
   | 'node-http-error'
@@ -123,6 +128,8 @@ export type BindingRecord = {
   from: string
   /** 绑定值转换（缺省不写）。 */
   transform?: ChainEdgeTransform
+  /** 数组选择器（缺省不写）。 */
+  pick?: ChainEdgePick
   /** 绑定边原文 `to`（`下游节点.入参路径`）。 */
   to: string
   /** 求值成功时的值预览（≤ 512 字符）。 */
@@ -574,7 +581,7 @@ export async function executeChainRun(
       const bound = resolveBinding(
         root,
         from.fieldPath,
-        edge.transform === undefined ? edgeTargetType(card, to.fieldPath) : undefined,
+        edge.transform === undefined && edge.pick === undefined ? edgeTargetType(card, to.fieldPath) : undefined,
       )
       if (!bound.ok) {
         const code = bindingCodeOf(bound.code)
@@ -582,18 +589,46 @@ export async function executeChainRun(
         bindings.push({ from: edge.from, to: edge.to, code, error: bound.message })
         return failPreRequest(bindings, code, message)
       }
-      const transformed = edge.transform === undefined ? bound.value : applyEdgeTransform(bound.value, edge.transform)
+      let value: unknown = bound.value
+      if (edge.pick !== undefined) {
+        const picked = applyPick(value, edge.pick)
+        if (!picked.ok) {
+          bindings.push({ from: edge.from, to: edge.to, code: 'pick-not-found', error: picked.message })
+          return failPreRequest(bindings, 'pick-not-found', picked.message)
+        }
+        value = picked.value
+      }
+      const transformed = edge.transform === undefined ? value : applyEdgeTransform(value, edge.transform)
       provided[normalizePath(to.fieldPath)] = transformed
       bindings.push({
         from: edge.from,
         to: edge.to,
         ...(edge.transform === undefined ? {} : { transform: edge.transform }),
+        ...(edge.pick === undefined ? {} : { pick: edge.pick }),
         valuePreview: previewValue(transformed),
       })
     }
 
     // 2) 构造请求（纯函数）：缺参/类型/模板问题都在这里，且发生在任何网络动作之前。
-    const built = buildRequest({ node: planNode, card, baseUrl: plan.baseUrl, provided, inputs })
+    const fileParts = resolveNodeFiles(node, inputs)
+    if (!fileParts.ok) {
+      emit({
+        event: 'step',
+        id: nodeId,
+        action: `${method} ${planNode.urlTemplate}`,
+        status: 'start',
+        data: { card: planNode.cardId },
+      })
+      return failAfterStart(bindings, fileParts.code, fileParts.message)
+    }
+    const built = buildRequest({
+      node: planNode,
+      card,
+      baseUrl: plan.baseUrl,
+      provided,
+      inputs,
+      ...(fileParts.parts.length === 0 ? {} : { fileParts: fileParts.parts }),
+    })
     if (!built.ok) {
       const message = built.message
       emit({
@@ -642,9 +677,7 @@ export async function executeChainRun(
       method: request.method,
       url: request.url,
       headers: redactHeaders(request.headers),
-      ...(request.body === undefined
-        ? {}
-        : { bodyPreview: sensitive ? '[已脱敏]' : previewText(redactSecrets(request.body, secrets)) }),
+      ...(request.body === undefined ? {} : { bodyPreview: bodyPreviewOf(request.body, secrets, sensitive) }),
     }
     result.requestDigest = requestDigest
     result.url = request.url
@@ -669,7 +702,7 @@ export async function executeChainRun(
       method: string
       url: string
       headers: Record<string, string>
-      body?: string
+      body?: string | Uint8Array
     }) =>
       httpRequest({
         method: target.method,
@@ -748,9 +781,7 @@ export async function executeChainRun(
         method: request.method,
         url: request.url,
         headers: redactHeaders(request.headers),
-        ...(request.body === undefined
-          ? {}
-          : { bodyPreview: sensitive ? '[已脱敏]' : previewText(redactSecrets(request.body, secrets)) }),
+        ...(request.body === undefined ? {} : { bodyPreview: bodyPreviewOf(request.body, secrets, sensitive) }),
       }
       result.url = request.url
       outcome = await sendRequest(request)
@@ -1024,6 +1055,82 @@ function terminalMessage(
 
 /* ================================================================== 小工具 */
 
+/** 从数组出参里按字段值选一个元素，再取字段（缺省取整个元素）。 */
+function applyPick(value: unknown, pick: ChainEdgePick): { ok: true; value: unknown } | { ok: false; message: string } {
+  if (!Array.isArray(value)) {
+    return { ok: false, message: `pick 需要数组出参，实际是 ${Array.isArray(value) ? 'array' : typeof value}` }
+  }
+  const hit = value.find((item) => fieldValueOf(item, pick.match.field) !== undefined && String(fieldValueOf(item, pick.match.field)) === String(pick.match.equals))
+  if (hit === undefined) {
+    return { ok: false, message: `pick 没有匹配项：${pick.match.field} = ${String(pick.match.equals)}` }
+  }
+  if (pick.field === undefined) return { ok: true, value: hit }
+  const picked = fieldValueOf(hit, pick.field)
+  if (picked === undefined) return { ok: false, message: `pick 命中元素里没有字段 ${pick.field}` }
+  return { ok: true, value: picked }
+}
+
+/** 点路径取值（只用于 pick 的 match.field / field，不支持通配）。 */
+function fieldValueOf(value: unknown, path: string): unknown {
+  let cursor: unknown = value
+  for (const segment of path.split('.').filter((part) => part !== '')) {
+    if (Array.isArray(cursor)) {
+      const index = Number(segment)
+      if (!Number.isInteger(index) || index < 0 || index >= cursor.length) return undefined
+      cursor = cursor[index]
+      continue
+    }
+    if (typeof cursor !== 'object' || cursor === null) return undefined
+    cursor = (cursor as Record<string, unknown>)[segment]
+  }
+  return cursor
+}
+
+/** 节点 files → 本地文件分片；文件不存在/读失败在发请求前拒。 */
+export function resolveNodeFiles(
+  node: ChainNode,
+  inputs: Record<string, unknown>,
+): { ok: true; parts: import('./request.js').FilePart[] } | { ok: false; code: ChainRunErrorCode; message: string } {
+  const parts: import('./request.js').FilePart[] = []
+  for (const [field, ref] of Object.entries(node.files ?? {})) {
+    if (typeof ref !== 'string' || ref.trim() === '') {
+      return { ok: false, code: 'file-field-invalid', message: `节点 ${node.id} 的文件字段 ${field} 没有路径` }
+    }
+    const slot = isInputSlotRef(ref) ? ref.slice('$inputs.'.length) : undefined
+    const path = slot === undefined ? ref : inputs[slot]
+    if (typeof path !== 'string' || path.trim() === '') {
+      return { ok: false, code: 'file-not-found', message: `节点 ${node.id} 的文件字段 ${field} 取不到路径（${ref}）` }
+    }
+    if (!existsSync(path) || !statSync(path).isFile()) {
+      return { ok: false, code: 'file-not-found', message: `节点 ${node.id} 的文件不存在或不是普通文件：${path}` }
+    }
+    let data: Buffer
+    try {
+      data = readFileSync(path)
+    } catch (error) {
+      return { ok: false, code: 'file-read-failed', message: `读取文件失败 ${path}：${error instanceof Error ? error.message : String(error)}` }
+    }
+    parts.push({
+      field,
+      filename: basename(path),
+      contentType: contentTypeOfFile(path),
+      data,
+    })
+  }
+  return { ok: true, parts }
+}
+
+function contentTypeOfFile(path: string): string {
+  const ext = extname(path).toLowerCase()
+  if (ext === '.txt') return 'text/plain'
+  if (ext === '.json') return 'application/json'
+  if (ext === '.png') return 'image/png'
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+  if (ext === '.gif') return 'image/gif'
+  if (ext === '.pdf') return 'application/pdf'
+  return 'application/octet-stream'
+}
+
 /** 绑定值转换：显式声明才做，绝不隐式改变类型。 */
 function applyEdgeTransform(value: unknown, transform: ChainEdgeTransform): unknown {
   if (transform === 'string') return typeof value === 'string' ? value : String(value)
@@ -1061,11 +1168,19 @@ function collectEmitted(
     const bound = resolveBinding(
       root,
       from.fieldPath,
-      edge.transform !== undefined || to === undefined || card === undefined
+      edge.transform !== undefined || edge.pick !== undefined || to === undefined || card === undefined
         ? undefined
         : edgeTargetType(card, to.fieldPath),
     )
-    if (bound.ok) emitted[edge.from] = edge.transform === undefined ? bound.value : applyEdgeTransform(bound.value, edge.transform)
+    if (bound.ok) {
+      let value: unknown = bound.value
+      if (edge.pick !== undefined) {
+        const picked = applyPick(value, edge.pick)
+        if (!picked.ok) continue
+        value = picked.value
+      }
+      emitted[edge.from] = edge.transform === undefined ? value : applyEdgeTransform(value, edge.transform)
+    }
   }
   return emitted
 }
@@ -1138,6 +1253,12 @@ function retryOf(node: ChainNode, method: string): number {
 }
 
 /** 正文预览：按字节截前 4 KiB（多字节字符被切断时留替换符，比超限更可接受）。 */
+/** 请求正文预览：字符串脱敏截断；multipart 二进制只报字节数。 */
+function bodyPreviewOf(body: string | Uint8Array, secrets: string[], sensitive: boolean): string {
+  if (typeof body !== 'string') return `[multipart ${body.byteLength} bytes]`
+  return sensitive ? '[已脱敏]' : previewText(redactSecrets(body, secrets))
+}
+
 export function previewText(text: string): string {
   const buffer = Buffer.from(text ?? '', 'utf8')
   if (buffer.byteLength <= DIGEST_PREVIEW_BYTES) return text ?? ''

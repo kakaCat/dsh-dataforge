@@ -22,7 +22,7 @@ import {
   CHAIN_VALUE_TYPES,
   fieldSegments,
   inputSlotNameOf,
-  isFieldDeclared,
+  isDeclaredContainer, isFieldDeclared,
   isInputSlotRef,
   parseChainDoc,
   parseChainYaml,
@@ -254,7 +254,7 @@ function checkInterfaceEdges(
         issues.push({ target, code: 'unknown-node', reason: `边的起点节点不存在：${from.nodeId}` })
       } else {
         const card = cards.get(from.nodeId)
-        if (card && !isFieldDeclared(from.fieldPath, card.outputs)) {
+        if (card && !isFieldDeclared(from.fieldPath, card.outputs) && !(edge.pick !== undefined && isDeclaredContainer(from.fieldPath, card.outputs))) {
           issues.push({
             target,
             code: 'unknown-source-field',
