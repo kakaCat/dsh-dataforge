@@ -1288,7 +1288,7 @@ function foldSummary(runId, events, overrideStatus) {
 	else status = "failed";
 	const firstTs = numOrUndefined(events[0]?.ts);
 	const lastTs = numOrUndefined(events[events.length - 1]?.ts);
-	const bizData = plainRecord(result?.businessData);
+	const bizData = plainRecord$1(result?.businessData);
 	return {
 		runId,
 		flow: typeof meta?.flow === "string" ? meta.flow : "",
@@ -1314,7 +1314,7 @@ function foldSummary(runId, events, overrideStatus) {
 * 没有 `meta.chain` 的旧流程运行返回空对象——只增可选字段，旧 run 不受影响。
 */
 function chainSummaryOf(meta, bizData) {
-	const chainMeta = plainRecord(meta?.chain);
+	const chainMeta = plainRecord$1(meta?.chain);
 	if (chainMeta === void 0) return {};
 	const failedNode = typeof bizData?.["failedNode"] === "string" ? bizData["failedNode"] : void 0;
 	const completedRaw = bizData?.["completed"];
@@ -1331,7 +1331,7 @@ function numOrUndefined(value) {
 	return typeof value === "number" ? value : void 0;
 }
 /** 非 plain object（数组/缺失）一律 undefined。 */
-function plainRecord(value) {
+function plainRecord$1(value) {
 	if (value !== null && typeof value === "object" && !Array.isArray(value)) return value;
 }
 
@@ -2610,7 +2610,7 @@ function optString$1(value) {
 function strArray(value) {
 	return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
-function fieldTypeOf(value) {
+function fieldTypeOf$1(value) {
 	return typeof value === "string" && FIELD_TYPES.has(value) ? value : "string";
 }
 function toInput(raw) {
@@ -2621,7 +2621,7 @@ function toInput(raw) {
 	const role = optString$1(record["role"]);
 	return {
 		path,
-		type: fieldTypeOf(record["type"]),
+		type: fieldTypeOf$1(record["type"]),
 		required: record["required"] === true,
 		role: role === "constant" || role === "input" || role === "chain" ? role : "constant",
 		...record["unverified"] === true ? { unverified: true } : {}
@@ -2634,7 +2634,7 @@ function toOutput(raw) {
 	if (path === void 0) return void 0;
 	return {
 		path,
-		type: fieldTypeOf(record["type"])
+		type: fieldTypeOf$1(record["type"])
 	};
 }
 function toSource(raw) {
@@ -6658,7 +6658,7 @@ function toChainIssues(issues) {
 		reason: issue.reason
 	}));
 }
-function messageOf$2(error) {
+function messageOf$3(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function isLibraryError(error) {
@@ -6676,7 +6676,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `解析工作区根失败：${messageOf$2(error)}`,
+			message: `解析工作区根失败：${messageOf$3(error)}`,
 			hints: []
 		};
 	}
@@ -6707,7 +6707,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `导入接口库失败：${messageOf$2(error)}`,
+			message: `导入接口库失败：${messageOf$3(error)}`,
 			hints: []
 		};
 	}
@@ -6738,7 +6738,7 @@ async function upsertChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `落盘链失败：${messageOf$2(error)}`
+			message: `落盘链失败：${messageOf$3(error)}`
 		};
 	}
 }
@@ -7055,7 +7055,7 @@ async function chainRunForTool(deps, exec, args) {
 			accepted: false,
 			gate: "blocked",
 			code: "invalid-chain",
-			message: `解析工作区根失败：${messageOf$2(error)}`
+			message: `解析工作区根失败：${messageOf$3(error)}`
 		};
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
@@ -7877,7 +7877,7 @@ async function probeNode(input) {
 *
 * @module dsh-dataforge/orchestration/explore
 */
-function messageOf$1(error) {
+function messageOf$2(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function blocked(code, message, extra = {}) {
@@ -7899,7 +7899,7 @@ async function probeForTool(deps, exec, args) {
 	try {
 		workspaceRoot = await deps.resolveWorkspaceRoot(exec) ?? process.cwd();
 	} catch (error) {
-		return blocked("workspace-unavailable", `解析工作区根失败：${messageOf$1(error)}`);
+		return blocked("workspace-unavailable", `解析工作区根失败：${messageOf$2(error)}`);
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
 	if (!loaded.ok) return {
@@ -7942,6 +7942,493 @@ async function probeForTool(deps, exec, args) {
 		},
 		...deps.credentials === void 0 ? {} : { credentials: deps.credentials }
 	});
+}
+
+//#endregion
+//#region src/execute/crystal.ts
+function stringifyValue(value) {
+	try {
+		return JSON.stringify(value) ?? "";
+	} catch {
+		return String(value);
+	}
+}
+function plainRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function sourceOf(value) {
+	return value === "user" || value === "agent-inferred" || value === "upstream" || value === "constant" ? value : void 0;
+}
+function suggestionOf(source) {
+	if (source === "constant") return "constant";
+	if (source === "upstream") return "chain";
+	return "input";
+}
+/** 字段叶子名 → 槽位候选（`body.lines[0].quantity` → `quantity`）。 */
+function slotNameOf(path) {
+	const safe = (path.split(/[.[\]]/).filter((part) => part !== "" && part !== "*").pop() ?? "value").replace(/[^\p{L}\p{N}_]/gu, "_");
+	return /^[0-9]/.test(safe) ? `v_${safe}` : safe === "" ? "value" : safe;
+}
+function probeRunsOf(input) {
+	const runs = [];
+	for (const runId of listRunIds(input.dataRoot, 200)) {
+		const record = readRunRecord(input.dataRoot, runId);
+		if (record === void 0 || record["kind"] !== "probe-run") continue;
+		const probe = plainRecord(record["probe"]);
+		if (probe === void 0) continue;
+		if (probe["site"] !== input.site || probe["flow"] !== input.flow) continue;
+		if (input.version !== void 0 && probe["version"] !== input.version) continue;
+		const explorationId = typeof probe["explorationId"] === "string" ? probe["explorationId"] : "";
+		if (explorationId === "") continue;
+		if (input.explorationId !== void 0 && explorationId !== input.explorationId) continue;
+		const nodeId = typeof probe["nodeId"] === "string" ? probe["nodeId"] : "";
+		const cardId = typeof probe["cardId"] === "string" ? probe["cardId"] : "";
+		if (nodeId === "" || cardId === "") continue;
+		const provenanceRaw = record["provenance"];
+		const provenance = Array.isArray(provenanceRaw) ? provenanceRaw.filter((item) => plainRecord(item) !== void 0) : [];
+		if (provenance.length === 0) continue;
+		const values = plainRecord(record["values"]) ?? {};
+		runs.push({
+			runId,
+			startedAt: typeof record["startedAt"] === "number" ? record["startedAt"] : 0,
+			explorationId,
+			nodeId,
+			cardId,
+			provenance,
+			values
+		});
+	}
+	runs.sort((left, right) => left.startedAt - right.startedAt);
+	return runs;
+}
+function fieldTypeOf(card, path) {
+	if (card === void 0) return {
+		type: "unknown",
+		exists: false
+	};
+	const key = normalizePath(path);
+	const field = (card.inputs ?? []).find((candidate) => normalizePath(candidate.path) === key);
+	return field === void 0 ? {
+		type: "unknown",
+		exists: false
+	} : {
+		type: field.type,
+		exists: true
+	};
+}
+/**
+* 读 probe 留痕 → 三分类草案。
+*
+* 同一 `nodeId + path` 出现多次：值/来源不一致标 `conflict`，保留最新一次的值/来源。
+*/
+function buildCrystalDraft(input) {
+	const all = probeRunsOf(input);
+	if (all.length === 0) return {
+		ok: false,
+		code: "crystal-no-source",
+		message: `没有找到 ${input.site}/${input.flow} 的 probe 留痕${input.explorationId === void 0 ? "" : `（explorationId ${input.explorationId}）`}：先跑 dataforge_chain_probe`
+	};
+	const explorationId = input.explorationId ?? all[all.length - 1].explorationId;
+	const runs = all.filter((run) => run.explorationId === explorationId);
+	const warnings = [];
+	const byKey = /* @__PURE__ */ new Map();
+	for (const run of runs) {
+		const card = input.cards.get(run.cardId);
+		for (const item of run.provenance) {
+			const path = typeof item["path"] === "string" ? item["path"] : "";
+			const source = sourceOf(item["source"]);
+			if (path === "" || source === void 0) continue;
+			const redacted = item["redacted"] === true || run.values[path] === "***";
+			const { type, exists } = fieldTypeOf(card, path);
+			const rawValue = run.values[path];
+			const value = redacted ? "***" : rawValue === void 0 ? null : rawValue;
+			const row = {
+				nodeId: run.nodeId,
+				path,
+				value,
+				source,
+				suggestion: suggestionOf(source),
+				...suggestionOf(source) === "input" ? { slotName: slotNameOf(path) } : {},
+				type,
+				...typeof item["evidence"] === "string" && item["evidence"] !== "" ? { evidence: item["evidence"] } : {},
+				requiresUserConfirmation: source === "agent-inferred",
+				...redacted ? { excluded: "敏感值不参与结晶" } : {},
+				...!exists && !redacted ? { excluded: "卡模板里没有这个入参" } : {}
+			};
+			const key = `${run.nodeId}\u0000${path}`;
+			const existing = byKey.get(key);
+			if (existing === void 0) {
+				byKey.set(key, row);
+				continue;
+			}
+			if (existing.source !== row.source || stringifyValue(existing.value) !== stringifyValue(row.value)) byKey.set(key, {
+				...row,
+				conflict: true
+			});
+		}
+	}
+	const rows = [...byKey.values()];
+	if (rows.length === 0) return {
+		ok: false,
+		code: "crystal-no-source",
+		message: "probe 留痕里没有可结晶的 provenance 行"
+	};
+	const excluded = rows.filter((row) => row.excluded !== void 0);
+	if (excluded.length > 0) warnings.push(`${excluded.length} 行被排除（敏感/卡模板缺失），不写回`);
+	return {
+		ok: true,
+		draft: {
+			site: input.site,
+			flow: input.flow,
+			...input.version === void 0 ? {} : { version: input.version },
+			explorationId,
+			probeRunIds: runs.map((run) => run.runId),
+			rows,
+			warnings
+		}
+	};
+}
+/**
+* 铁律校验：响应值（upstream）不能出现在 decisions 的 `as` 里。
+*
+* 即使调用方硬写 `as:'constant'`，也在写链前拒绝——工具不提供这条路径。
+*/
+function assertNoResponseConstant(draft, decisions = {}) {
+	for (const row of draft.rows) {
+		if (row.source !== "upstream") continue;
+		const decision = decisions[`${row.nodeId}:${row.path}`];
+		if (decision?.as !== void 0) return {
+			ok: false,
+			code: "crystal-iron-rule",
+			message: `${row.nodeId}.${row.path} 是 upstream 响应值：只能走绑定边重新求解，不能冻成 ${decision.as}`,
+			row
+		};
+	}
+	return { ok: true };
+}
+function exampleOf(value) {
+	if (typeof value === "string") return value;
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	if (value === null) return "";
+	try {
+		return JSON.stringify(value);
+	} catch {
+		return "";
+	}
+}
+function hasBindingTo(doc, nodeId, path) {
+	return doc.edges.some((edge) => {
+		const to = splitBindingPath(edge.to);
+		return to !== void 0 && to.nodeId === nodeId && normalizePath(to.fieldPath) === normalizePath(path);
+	});
+}
+/**
+* 草案 + 决策 → 新链 doc。纯函数：不写盘、不改入参。
+*
+* 写回规则：
+*   - constant → `node.constants[path] = value`（只接受 string/number/boolean）；
+*   - input → 链级 inputs 槽位 + `node.constants[path] = "$inputs.<name>"`；
+*   - chain → 不写常量，只校验已有绑定边；
+*   - excluded → 跳过。
+*/
+function applyCrystalDraft(input) {
+	const { doc, draft } = input;
+	const decisions = input.decisions ?? {};
+	const iron = assertNoResponseConstant(draft, decisions);
+	if (!iron.ok) return iron;
+	const warnings = [...draft.warnings];
+	const nodes = doc.nodes.map((node) => ({
+		...node,
+		constants: { ...node.constants ?? {} }
+	}));
+	const nodeById = new Map(nodes.map((node) => [node.id, node]));
+	const inputs = doc.inputs.map((slot) => ({ ...slot }));
+	const inputByName = new Map(inputs.map((slot) => [slot.name, slot]));
+	const usedSlotNames = new Set(inputs.map((slot) => slot.name));
+	for (const row of draft.rows) {
+		if (row.excluded !== void 0) continue;
+		const node = nodeById.get(row.nodeId);
+		if (node === void 0) {
+			warnings.push(`节点 ${row.nodeId} 已不在链上，跳过 ${row.path}`);
+			continue;
+		}
+		const decision = decisions[`${row.nodeId}:${row.path}`];
+		if (decision !== void 0 && decision.as !== void 0 && decision.as !== "constant" && decision.as !== "input") return {
+			ok: false,
+			code: "crystal-invalid-decision",
+			message: `${row.nodeId}.${row.path} 的决策非法：只允许 constant / input`,
+			row
+		};
+		if (row.source === "agent-inferred" && decision?.confirmed !== true) return {
+			ok: false,
+			code: "crystal-confirmation-required",
+			message: `${row.nodeId}.${row.path} 来自 agent-inferred：必须在 decisions 里 confirmed:true（用户确认过）`,
+			row
+		};
+		if (row.conflict === true && decision === void 0) return {
+			ok: false,
+			code: "crystal-conflict",
+			message: `${row.nodeId}.${row.path} 在多条 probe 里值/来源不一致：在 decisions 里明确选一个`,
+			row
+		};
+		const as = row.source === "upstream" ? "chain" : decision?.as ?? row.suggestion;
+		if (as === "chain") {
+			if (!hasBindingTo(doc, row.nodeId, row.path)) return {
+				ok: false,
+				code: "crystal-chain-without-binding",
+				message: `${row.nodeId}.${row.path} 是响应值，但链上没有指向它的绑定边：先用 dataforge_chain_upsert 补边`,
+				row
+			};
+			continue;
+		}
+		if (as === "constant") {
+			const value = row.value;
+			if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return {
+				ok: false,
+				code: "crystal-unsupported-value",
+				message: `${row.nodeId}.${row.path} 的值不是标量，不能冻成常量；请改成入参槽位`,
+				row
+			};
+			node.constants[row.path] = String(value);
+			continue;
+		}
+		if (!CHAIN_VALUE_TYPES.includes(row.type)) return {
+			ok: false,
+			code: "crystal-unsupported-value",
+			message: `${row.nodeId}.${row.path} 的类型 ${row.type} 不在链槽位类型词表里`,
+			row
+		};
+		let slotName = decision?.slotName ?? row.slotName ?? slotNameOf(row.path);
+		const existing = inputByName.get(slotName);
+		if (existing !== void 0 && existing.type !== row.type) return {
+			ok: false,
+			code: "crystal-slot-conflict",
+			message: `槽位 ${slotName} 已存在且类型是 ${existing.type}，与 ${row.type} 冲突：换一个 slotName`,
+			row
+		};
+		if (existing === void 0) {
+			let candidate = slotName;
+			let suffix = 2;
+			while (usedSlotNames.has(candidate)) {
+				candidate = `${slotName}_${suffix}`;
+				suffix += 1;
+			}
+			slotName = candidate;
+			const slot = {
+				name: slotName,
+				type: row.type,
+				required: true,
+				example: exampleOf(row.value)
+			};
+			inputs.push(slot);
+			inputByName.set(slotName, slot);
+			usedSlotNames.add(slotName);
+		}
+		node.constants[row.path] = `$inputs.${slotName}`;
+	}
+	return {
+		ok: true,
+		doc: {
+			...doc,
+			inputs,
+			nodes
+		},
+		inputs,
+		warnings
+	};
+}
+
+//#endregion
+//#region src/orchestration/crystal.ts
+/**
+* 结晶的应用层（R-6 M1）：载链/卡 → 草案 → 决策 → saveChain 新版本 + crystal-run。
+*
+* 写回只走 `saveChain`（R-1 校验 + 版本快照）；本模块不直接写 YAML。
+* 复跑不在这里：结晶后的链直接交给 `dataforge_chain_run` 代入新槽位。
+*
+* @module dsh-dataforge/orchestration/crystal
+*/
+const toJsonObject = (value) => JSON.parse(JSON.stringify(value));
+const toJsonArray = (value) => JSON.parse(JSON.stringify(value));
+/** 把内部回执转成工具出口可校验的 JSON（递归丢 undefined 由 lossless 再做一次）。 */
+function crystalOutputOf(value) {
+	return {
+		ok: value.ok,
+		gate: value.gate,
+		...value.code === void 0 ? {} : { code: value.code },
+		...value.message === void 0 ? {} : { message: value.message },
+		...value.draft === void 0 ? {} : { draft: toJsonObject(value.draft) },
+		...value.rows === void 0 ? {} : { rows: toJsonArray(value.rows) },
+		...value.inputs === void 0 ? {} : { inputs: toJsonArray(value.inputs) },
+		...value.version === void 0 ? {} : { version: value.version },
+		...value.path === void 0 ? {} : { path: value.path },
+		...value.runId === void 0 ? {} : { runId: value.runId },
+		...value.runDir === void 0 ? {} : { runDir: value.runDir },
+		...value.issues === void 0 ? {} : { issues: toJsonArray(value.issues) },
+		...value.warnings === void 0 ? {} : { warnings: value.warnings }
+	};
+}
+function messageOf$1(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+function newCrystalRunId(dataRoot, flow, now) {
+	const base = `crystal-${slugOf(flow) || "flow"}-${now}`;
+	let candidate = base;
+	let suffix = 2;
+	while (existsSync(join(runsRoot(dataRoot), candidate))) {
+		candidate = `${base}-${suffix}`;
+		suffix += 1;
+	}
+	return candidate;
+}
+function auditRow(row) {
+	return row.excluded === void 0 ? row : {
+		...row,
+		value: "***"
+	};
+}
+/** 结晶工具入口：草案 → 确认 → 写回 → crystal-run。所有失败折成回执，不抛。 */
+async function crystalForTool(deps, exec, args) {
+	if (deps.chain.enabled !== true) return {
+		ok: false,
+		gate: "blocked",
+		code: "execution-disabled",
+		message: "执行开关已关闭（config.chainRunEnabled=false）：结晶也拒绝，避免在停执行时改资产"
+	};
+	let workspaceRoot;
+	try {
+		workspaceRoot = await deps.resolveWorkspaceRoot(exec) ?? process.cwd();
+	} catch (error) {
+		return {
+			ok: false,
+			gate: "blocked",
+			code: "crystal-no-source",
+			message: `解析工作区根失败：${messageOf$1(error)}`
+		};
+	}
+	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
+	if (!loaded.ok) return {
+		ok: false,
+		gate: "blocked",
+		code: "invalid-chain",
+		message: loaded.message
+	};
+	const doc = loaded.doc;
+	if (doc.kind !== "interface-chain") return {
+		ok: false,
+		gate: "blocked",
+		code: "invalid-chain",
+		message: `结晶只支持 interface-chain（当前 ${doc.kind}）`
+	};
+	const cards = cardsForChain(workspaceRoot, doc);
+	const built = buildCrystalDraft({
+		dataRoot: deps.dataRoot,
+		site: args.site,
+		flow: args.flow,
+		...args.version === void 0 ? {} : { version: args.version },
+		...args.explorationId === void 0 ? {} : { explorationId: args.explorationId },
+		cards
+	});
+	if (!built.ok) return {
+		ok: false,
+		gate: "blocked",
+		code: built.code,
+		message: built.message,
+		...built.row === void 0 ? {} : { rows: [built.row] }
+	};
+	const draft = built.draft;
+	if (args.confirm !== true) return {
+		ok: true,
+		gate: "draft",
+		code: "crystal-confirmation-required",
+		message: `结晶草案已生成（${draft.rows.length} 行，exploration ${draft.explorationId}）：向用户确认后带 confirm=true 重调；本次没有写链`,
+		draft,
+		inputs: doc.inputs,
+		warnings: draft.warnings
+	};
+	const applied = applyCrystalDraft({
+		doc,
+		cards,
+		draft,
+		...args.decisions === void 0 ? {} : { decisions: args.decisions }
+	});
+	if (!applied.ok) return {
+		ok: false,
+		gate: "blocked",
+		code: applied.code,
+		message: applied.message,
+		...applied.row === void 0 ? {} : { rows: [applied.row] },
+		draft,
+		warnings: draft.warnings
+	};
+	const saved = saveChain(workspaceRoot, applied.doc, { source: "agent" });
+	if (!saved.ok) return {
+		ok: false,
+		gate: "blocked",
+		code: "invalid-chain",
+		message: `结晶后的链未通过 R-1 校验（${saved.issues.length} 条）：没有落盘`,
+		issues: saved.issues.map((issue) => ({
+			target: issue.target,
+			code: issue.code,
+			reason: issue.reason
+		})),
+		draft,
+		warnings: draft.warnings
+	};
+	const now = Date.now();
+	const runId = newCrystalRunId(deps.dataRoot, args.flow, now);
+	const runRecord = {
+		kind: "crystal-run",
+		flow: args.flow,
+		flowName: args.flow,
+		crystal: {
+			site: args.site,
+			flow: args.flow,
+			explorationId: draft.explorationId,
+			decisions: args.decisions ?? {},
+			writtenVersion: saved.version,
+			path: saved.path
+		},
+		draft: draft.rows.map(auditRow),
+		startedAt: now
+	};
+	const runDir = startRunRecord(deps.dataRoot, runId, runRecord);
+	appendEvent(deps.dataRoot, runId, {
+		event: "meta",
+		flow: args.flow,
+		name: args.flow,
+		steps: [],
+		dryRun: false
+	});
+	appendEvent(deps.dataRoot, runId, {
+		event: "terminal",
+		success: true,
+		cancelled: false,
+		message: `结晶写回 ${args.site}/${args.flow} v${saved.version}`
+	});
+	appendEvent(deps.dataRoot, runId, {
+		event: "result",
+		success: true,
+		businessData: {
+			crystal: true,
+			explorationId: draft.explorationId,
+			version: saved.version,
+			path: saved.path,
+			inputs: applied.inputs
+		}
+	});
+	return {
+		ok: true,
+		gate: "written",
+		message: `结晶已写回 ${args.site}/${args.flow} v${saved.version}（${applied.inputs.length} 个槽位）`,
+		draft,
+		inputs: applied.inputs,
+		version: saved.version,
+		path: saved.path,
+		runId,
+		runDir,
+		warnings: applied.warnings
+	};
 }
 
 //#endregion
@@ -9460,6 +9947,149 @@ function defineChainProbeTool(deps) {
 		}
 	});
 }
+function renderChainCrystal(value) {
+	if (value.gate === "blocked") {
+		const issues = (value.issues ?? []).map((issue) => `- ${issue.target}：${issue.reason}`).join("\n");
+		return `❌ 结晶未完成（${value.code ?? "unknown"}）：${value.message ?? ""}${issues === "" ? "" : `\n${issues}`}`;
+	}
+	const rows = value.draft?.rows ?? value.rows ?? [];
+	const lines = rows.slice(0, RECEIPT_MAX_LINES).map((row) => {
+		const flags = [
+			row.requiresUserConfirmation ? "需用户确认" : "",
+			row.conflict ? "冲突" : "",
+			row.excluded === void 0 ? "" : `排除：${row.excluded}`
+		].filter(Boolean).join("；");
+		const valueText = row.excluded === void 0 ? ` = ${row.value === void 0 ? "" : JSON.stringify(row.value)}` : "";
+		return `- ${row.nodeId} · ${row.path} ← ${row.source} → ${row.suggestion}${valueText}${flags === "" ? "" : `（${flags}）`}`;
+	});
+	const more = rows.length > RECEIPT_MAX_LINES ? `\n… 还有 ${rows.length - RECEIPT_MAX_LINES} 行` : "";
+	const inputs = (value.inputs ?? []).map((slot) => `- ${slot.name}: ${slot.type}${slot.required ? "（必填）" : ""}${slot.example === void 0 ? "" : `，例 ${slot.example}`}`).join("\n");
+	return [
+		value.gate === "written" ? `✅ ${value.message ?? "结晶已写回"}\n版本：v${value.version ?? "?"}（${value.path ?? "?"}）` : `📝 结晶草案（未写链）：${rows.length} 行\n${lines.join("\n")}${more}`,
+		value.gate === "written" && lines.length > 0 ? `\n本次分类：\n${lines.join("\n")}${more}` : "",
+		inputs === "" ? "" : `\n链级槽位：\n${inputs}`,
+		value.runId === void 0 ? "" : `\n留痕：${value.runId}`,
+		value.gate === "written" ? "\n下一步：dataforge_chain_run(inputs:{...}, confirm:true) 换入参复跑。" : "\n确认草案后带 confirm=true 重调；agent-inferred 行需在 decisions 里 confirmed:true。",
+		(value.warnings ?? []).length === 0 ? "" : `\n提醒：${(value.warnings ?? []).join("；")}`
+	].filter(Boolean).join("\n");
+}
+function defineChainCrystalTool(deps) {
+	return defineTool({
+		name: "dataforge_chain_crystallize",
+		description: `结晶（R-6）：读同一 explorationId 的 probe 留痕，按来源给出三分类草案；confirm=true 后写回链的新版本。
+
+分类铁律（工具层强制）：
+- source=user → 入参槽位（链级 inputs + 节点 constants: "$inputs.<name>"）；
+- source=constant → 节点 constants；
+- source=upstream → 链生成值，**绝不冻结**，只校验已有绑定边；任何把 upstream 当 constant/input 的决策都会被 crystal-iron-rule 拒绝；
+- source=agent-inferred → 入参候选，必须在 decisions 里 confirmed:true（用户确认过）才写。
+
+用法：
+- 不带 confirm 只返回草案（draft），不写链；
+- decisions 的键是 "<nodeId>:<path>"，值形如 { "as": "input"|"constant", "slotName"?: "...", "confirmed"?: true }；
+- 冲突行（同一 path 多条 probe 值/来源不一致）必须用 decisions 明确选一个，否则 crystal-conflict；
+- 写回只走 saveChain（R-1 校验 + 新版本），失败不落盘。
+
+结晶后复跑：dataforge_chain_run(site, flow, inputs:{...}, confirm:true)；链生成值会由上游响应重新求解。`,
+		parameters: {
+			site: {
+				type: "string",
+				required: true,
+				description: "站点名（链的 meta.site）"
+			},
+			flow: {
+				type: "string",
+				required: true,
+				description: "流程名（链的 meta.flow）"
+			},
+			version: {
+				type: "number",
+				description: "链版本；缺省最新"
+			},
+			explorationId: {
+				type: "string",
+				description: "要结晶的探索组；缺省 = 该 site/flow 最近一组 probe"
+			},
+			confirm: {
+				type: "boolean",
+				description: "确认草案后才允许 true；缺省只返回草案，不写链"
+			},
+			decisions: {
+				type: "object",
+				additionalProperties: true,
+				description: "键 \"<nodeId>:<path>\"，值 { as: \"input\"|\"constant\", slotName?, confirmed? }；agent-inferred 行必须 confirmed:true"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					gate: {
+						type: "string",
+						description: "draft / written / blocked"
+					},
+					code: { type: "string" },
+					message: { type: "string" },
+					draft: {
+						type: "object",
+						additionalProperties: true
+					},
+					rows: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: true
+						}
+					},
+					inputs: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: true
+						}
+					},
+					version: { type: "number" },
+					path: { type: "string" },
+					runId: { type: "string" },
+					runDir: { type: "string" },
+					issues: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								target: { type: "string" },
+								code: { type: "string" },
+								reason: { type: "string" }
+							}
+						}
+					},
+					warnings: {
+						type: "array",
+						items: { type: "string" }
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderChainCrystal(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			const decisions = args.decisions;
+			return lossless(crystalOutputOf(await crystalForTool(deps, exec, {
+				site: args.site,
+				flow: args.flow,
+				...args.version === void 0 ? {} : { version: args.version },
+				...args.explorationId === void 0 ? {} : { explorationId: args.explorationId },
+				...args.confirm === void 0 ? {} : { confirm: args.confirm },
+				...decisions === void 0 ? {} : { decisions }
+			})));
+		}
+	});
+}
 function renderChainRuns(value) {
 	if (value.notice !== void 0 && (value.runs ?? []).length === 0) return `📭 ${value.notice}`;
 	const lines = (value.runs ?? []).map((run) => {
@@ -10943,7 +11573,8 @@ const EXPLORE_POLICY = [
 	"- 首跑用 dataforge_chain_probe 单节点试探；不要把整条不完整的链反复整链重跑。",
 	"- probe 的 values 必须带 source：user / agent-inferred / upstream；agent-inferred 与 upstream 必须写 evidence，禁止把猜测标成 user。",
 	"- 写操作（POST/PUT/PATCH/DELETE）必须经用户确认后带 confirm=true；没有确认只出计划卡。",
-	"- probe 返回的 outputs 用来发现绑定边；回写链只走 dataforge_chain_upsert（R-1 校验）。"
+	"- probe 返回的 outputs 用来发现绑定边；回写链只走 dataforge_chain_upsert（R-1 校验）。",
+	"- 结晶只经 dataforge_chain_crystallize：upstream 值绝不冻常量；agent-inferred 必须用户确认；复跑用 dataforge_chain_run.inputs。"
 ].join("\n");
 /** 装载插件。 */
 function apply(ctx, rawConfig) {
@@ -11031,9 +11662,10 @@ function apply(ctx, rawConfig) {
 			defineChainGetTool(orchestrationDeps),
 			defineChainRunTool(chainRunDeps),
 			defineChainRunsTool(chainRunDeps),
-			defineChainProbeTool(chainRunDeps)
+			defineChainProbeTool(chainRunDeps),
+			defineChainCrystalTool(chainRunDeps)
 		]) tools.register(tool);
-		logger?.info?.(`已注册 17 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_run/chain_runs/chain_probe（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
+		logger?.info?.(`已注册 18 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_run/chain_runs/chain_probe/chain_crystallize（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
 		if (!config.chainRunEnabled) logger?.info?.("执行开关 chainRunEnabled=false：dataforge_chain_run 一律 execution-disabled");
 	});
 	if (config.injectPolicy) try {
