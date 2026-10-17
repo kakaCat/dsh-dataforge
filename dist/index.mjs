@@ -5348,6 +5348,132 @@ async function httpRequest(spec) {
 }
 
 //#endregion
+//#region src/execute/credentials.ts
+/** 空摘要（降级用）。 */
+function emptyCredentialApplication(status, reason, captureIds = []) {
+	return {
+		status,
+		source: "capture",
+		names: [],
+		domains: [],
+		captureIds: [...captureIds],
+		expired: 0,
+		reason
+	};
+}
+/** 去掉前导点并小写：`.Example.com` → `example.com`。 */
+function normalizeDomain(domain) {
+	return domain.replace(/^\./, "").toLowerCase();
+}
+/** 域名匹配：host 等于域，或 host 以 `.域` 结尾（`badexample.com` 不会命中 `example.com`）。 */
+function domainMatches(host, cookieDomain) {
+	const domain = normalizeDomain(cookieDomain);
+	if (domain === "") return false;
+	const target = host.toLowerCase();
+	return target === domain || target.endsWith(`.${domain}`);
+}
+/** 路径匹配：`/api` 命中 `/api/x`，不命中 `/apix`；`/` 恒命中。 */
+function pathMatches(requestPath, cookiePath) {
+	if (cookiePath === "" || cookiePath === "/") return true;
+	if (requestPath === cookiePath) return true;
+	if (!requestPath.startsWith(cookiePath)) return false;
+	return cookiePath.endsWith("/") || requestPath[cookiePath.length] === "/";
+}
+function expiredAt(cookie, now) {
+	return cookie.expiresAt !== void 0 && cookie.expiresAt <= now;
+}
+function domainSpecificity(cookie) {
+	return normalizeDomain(cookie.domain).length;
+}
+/**
+* 按目标 URL 选 cookie：domain/path/secure 匹配 → 过期拆分 → 同名去重 → 排序。
+*
+* 同名去重键是 `name + path`：浏览器可能同时持有父域与子域的同名 cookie，
+* 全发出去会让服务端取到不确定的那一个。这里选**更具体的域**（更长），
+* 同域再取 `obtainedAt` 更新者——可解释、可复现。
+*/
+function selectCookies(entries, url, now) {
+	let target;
+	try {
+		target = new URL(url);
+	} catch {
+		return {
+			selected: [],
+			expired: [],
+			matched: []
+		};
+	}
+	if (target.protocol !== "http:" && target.protocol !== "https:") return {
+		selected: [],
+		expired: [],
+		matched: []
+	};
+	const host = target.hostname;
+	const requestPath = target.pathname === "" ? "/" : target.pathname;
+	const matched = [];
+	for (const cookie of entries) {
+		if (cookie.name === "" || cookie.value === "") continue;
+		if (!domainMatches(host, cookie.domain)) continue;
+		if (!pathMatches(requestPath, cookie.path)) continue;
+		if (cookie.secure && target.protocol !== "https:") continue;
+		matched.push(cookie);
+	}
+	const expired = [];
+	const live = [];
+	for (const cookie of matched) (expiredAt(cookie, now) ? expired : live).push(cookie);
+	const byKey = /* @__PURE__ */ new Map();
+	for (const cookie of live) {
+		const key = `${cookie.name}\u0000${cookie.path}`;
+		const existing = byKey.get(key);
+		if (existing === void 0 || domainSpecificity(cookie) > domainSpecificity(existing) || domainSpecificity(cookie) === domainSpecificity(existing) && cookie.obtainedAt > existing.obtainedAt) byKey.set(key, cookie);
+	}
+	return {
+		selected: [...byKey.values()].sort((left, right) => {
+			if (left.path.length !== right.path.length) return right.path.length - left.path.length;
+			return left.name.localeCompare(right.name);
+		}),
+		expired,
+		matched
+	};
+}
+/** 选中的 cookie → `Cookie` 头值；空集合返回 `undefined`（不造空头）。 */
+function cookieHeaderOf(cookies) {
+	if (cookies.length === 0) return void 0;
+	return cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+}
+/**
+* 合并凭证头：头名大小写不敏感；`cookie` 与已有值拼接，其它同名以注入值为准。
+*
+* 纯函数：不修改入参对象。凭证是权威——卡上若显式写了同名头，注入值覆盖它；
+* 唯一例外是 `cookie`，因为丢弃卡上已有的 cookie 会静默改变请求语义。
+*/
+function mergeCredentialHeaders(existing, injected) {
+	const out = { ...existing };
+	for (const [rawName, value] of Object.entries(injected)) {
+		const key = Object.keys(out).find((candidate) => candidate.toLowerCase() === rawName.toLowerCase());
+		if (key === void 0) {
+			out[rawName] = value;
+			continue;
+		}
+		if (key.toLowerCase() === "cookie" && out[key] !== "") out[key] = `${out[key]}; ${value}`;
+		else out[key] = value;
+	}
+	return out;
+}
+/** 由匹配结果构造 `applied` 摘要（名字/域/来源，不含值）。 */
+function appliedCredentialApplication(selection, captureIds) {
+	return {
+		status: "applied",
+		source: "capture",
+		header: "cookie",
+		names: selection.selected.map((cookie) => cookie.name),
+		domains: [...new Set(selection.selected.map((cookie) => normalizeDomain(cookie.domain)))],
+		captureIds: [...captureIds],
+		expired: selection.expired.length
+	};
+}
+
+//#endregion
 //#region src/execute/run.ts
 /**
 * 执行调度器（IF-3）：一条 interface-chain + 一份执行计划 → 一条 runs 事件流。
@@ -5643,12 +5769,31 @@ async function executeChainRun(deps, prepared, input) {
 			});
 			return failAfterStart(bindings, built.code, message);
 		}
-		const request = built.request;
+		let request = built.request;
+		let credentialApplication;
+		if (input.credentials !== void 0) {
+			const resolution = input.credentials({
+				card,
+				url: request.url,
+				method: request.method,
+				nodeId
+			});
+			credentialApplication = resolution.application;
+			if (Object.keys(resolution.headers).length > 0) request = {
+				...request,
+				headers: mergeCredentialHeaders(request.headers, resolution.headers)
+			};
+			result.credentials = credentialApplication;
+		}
+		const secrets = credentialApplication?.status === "applied" ? secretValuesOf(request.headers) : [];
+		if (secrets.length > 0) {
+			for (const binding of bindings) if (binding.valuePreview !== void 0) binding.valuePreview = redactSecrets(binding.valuePreview, secrets);
+		}
 		const requestDigest = {
 			method: request.method,
 			url: request.url,
 			headers: redactHeaders(request.headers),
-			...request.body === void 0 ? {} : { bodyPreview: previewText(request.body) }
+			...request.body === void 0 ? {} : { bodyPreview: previewText(redactSecrets(request.body, secrets)) }
 		};
 		result.requestDigest = requestDigest;
 		result.url = request.url;
@@ -5660,7 +5805,8 @@ async function executeChainRun(deps, prepared, input) {
 			data: {
 				card: planNode.cardId,
 				attempt: 1,
-				request: requestDigest
+				request: requestDigest,
+				...credentialApplication === void 0 ? {} : { credentials: credentialApplication }
 			}
 		});
 		input.onProgress?.(`▶ ${nodeId}：${request.method} ${request.url}`);
@@ -5722,7 +5868,7 @@ async function executeChainRun(deps, prepared, input) {
 			status: response.status,
 			bytes: response.bytes,
 			truncated: response.truncated,
-			bodyPreview: previewText(response.bodyText)
+			bodyPreview: previewText(redactSecrets(response.bodyText, secrets))
 		};
 		result.httpStatus = response.status;
 		result.responseDigest = responseDigest;
@@ -5730,7 +5876,7 @@ async function executeChainRun(deps, prepared, input) {
 		result.elapsedMs = Date.now() - startedAt;
 		if (response.status < 200 || response.status >= 300) {
 			const code = response.status === 401 || response.status === 403 ? authRequired(card) ? "node-auth-required" : "node-http-error" : "node-http-error";
-			const hint = code === "node-auth-required" ? `HTTP ${response.status}：该卡声明了鉴权（${card.auth}），凭证注入是 R-4 的事；引擎不换票、不重试` : `HTTP ${response.status}`;
+			const hint = code === "node-auth-required" ? authHint(card, response.status, credentialApplication) : `HTTP ${response.status}`;
 			result.errorCode = code;
 			result.error = hint;
 			results.set(nodeId, result);
@@ -5777,7 +5923,7 @@ async function executeChainRun(deps, prepared, input) {
 			status: response.status,
 			headers: response.headers
 		});
-		const emitted = collectEmitted(doc, cards, nodeId, roots.get(nodeId));
+		const emitted = redactRecord(collectEmitted(doc, cards, nodeId, roots.get(nodeId)), secrets);
 		result.status = "done";
 		results.set(nodeId, result);
 		emit({
@@ -5976,6 +6122,17 @@ function needsBody(doc, nodeId) {
 function authRequired(card) {
 	return typeof card.auth === "string" && card.auth.length > 0 && card.auth !== "none";
 }
+/**
+* 401/403 的诊断：必须能回答「到底带没带凭证」。
+*
+* R-3 的旧文案把 401 一律推给 R-4；现在注入了就说明「带了但仍被拒（可能过期）」，
+* 没注入就说明「没带上以及为什么」——两种下一步不同，不能混成一句。
+*/
+function authHint(card, status, application) {
+	if (application?.status === "applied") return `HTTP ${status}：已注入 ${application.names.length} 个 cookie（${application.names.join("、")}）但仍被拒；凭证可能过期。自动重登换票属 R-4 M2，尚未实现——请重新采集/登录后重跑`;
+	const reason = application === void 0 ? "本次运行未配置凭证注入（R-4 注入缝未装配）" : application.status === "expired" ? "匹配到的 cookie 全部过期" : application.status === "unsupported" ? application.reason ?? "token 型凭证未采集" : application.reason ?? "没有可用凭证";
+	return `HTTP ${status}：该卡声明了鉴权（${String(card.auth)}），但没有注入可用凭证（${reason}）；引擎不换票、不重试`;
+}
 /** 节点级超时优先（R-1 预留位），否则用全局缺省。 */
 function timeoutOf(node, fallbackMs) {
 	const seconds = node.timeoutSeconds;
@@ -5993,6 +6150,47 @@ function previewText(text) {
 	const buffer = Buffer.from(text ?? "", "utf8");
 	if (buffer.byteLength <= DIGEST_PREVIEW_BYTES) return text ?? "";
 	return buffer.subarray(0, DIGEST_PREVIEW_BYTES).toString("utf8");
+}
+/**
+* 从已注入的请求头里取「需要从留痕中抹掉的值」。
+*
+* 只认 cookie 头的值；太短（< 4 字符）的值不参与替换，避免把正常业务文本打碎。
+* 这些值只在本次节点的内存里存在，函数返回后不写任何地方。
+*/
+function secretValuesOf(headers) {
+	const cookie = Object.entries(headers).find(([name]) => name.toLowerCase() === "cookie")?.[1];
+	if (cookie === void 0 || cookie === "") return [];
+	const secrets = /* @__PURE__ */ new Set();
+	for (const part of cookie.split(";")) {
+		const trimmed = part.trim();
+		const at = trimmed.indexOf("=");
+		if (at === -1) continue;
+		const value = trimmed.slice(at + 1);
+		if (value.length >= 4) secrets.add(value);
+	}
+	return [...secrets];
+}
+/** 文本脱敏：把已知凭证值替换成 `***`。 */
+function redactSecrets(text, secrets) {
+	if (secrets.length === 0) return text;
+	let out = text;
+	for (const secret of secrets) out = out.split(secret).join("***");
+	return out;
+}
+/** 递归脱敏（只用于事件里的 emitted 值，不改变绑定求值本身）。 */
+function redactRecord(record, secrets) {
+	if (secrets.length === 0) return record;
+	const redactUnknown = (value) => {
+		if (typeof value === "string") return redactSecrets(value, secrets);
+		if (Array.isArray(value)) return value.map(redactUnknown);
+		if (typeof value === "object" && value !== null) {
+			const out = {};
+			for (const [key, child] of Object.entries(value)) out[key] = redactUnknown(child);
+			return out;
+		}
+		return value;
+	};
+	return redactUnknown(record);
 }
 /** 绑定值预览：标量原样，对象/数组序列化后截断（事件流不做数据仓库）。 */
 function previewValue(value) {
@@ -6030,7 +6228,7 @@ function toChainIssues(issues) {
 		reason: issue.reason
 	}));
 }
-function messageOf(error) {
+function messageOf$1(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function isLibraryError(error) {
@@ -6048,7 +6246,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `解析工作区根失败：${messageOf(error)}`,
+			message: `解析工作区根失败：${messageOf$1(error)}`,
 			hints: []
 		};
 	}
@@ -6079,7 +6277,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `导入接口库失败：${messageOf(error)}`,
+			message: `导入接口库失败：${messageOf$1(error)}`,
 			hints: []
 		};
 	}
@@ -6110,7 +6308,7 @@ async function upsertChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `落盘链失败：${messageOf(error)}`
+			message: `落盘链失败：${messageOf$1(error)}`
 		};
 	}
 }
@@ -6229,7 +6427,7 @@ function originOf(page) {
 		return;
 	}
 }
-function hostOf(baseUrl) {
+function hostOf$1(baseUrl) {
 	try {
 		return new URL(baseUrl).host;
 	} catch {
@@ -6241,7 +6439,7 @@ function planValueOf(plan, notices) {
 		order: [...plan.order],
 		totalNodes: plan.totalNodes,
 		baseUrl: plan.baseUrl,
-		host: hostOf(plan.baseUrl),
+		host: hostOf$1(plan.baseUrl),
 		writeNodes: [...plan.writeNodes],
 		nodes: plan.nodes.map((node) => ({
 			nodeId: node.nodeId,
@@ -6263,7 +6461,7 @@ function chainConfirmationCard(doc, plan, notices) {
 	const writes = plan.writeNodes.length === 0 ? "写类节点：无（整链只读）" : `写类节点：${plan.writeNodes.join("、")}（已发出的写请求无法撤销）`;
 	const note = notices.length === 0 ? "" : `\n提醒：${notices.join("；")}`;
 	return [
-		`🧭 执行计划（${doc.meta.site} / ${doc.meta.flow} v${doc.meta.version}）→ ${hostOf(plan.baseUrl)}`,
+		`🧭 执行计划（${doc.meta.site} / ${doc.meta.flow} v${doc.meta.version}）→ ${hostOf$1(plan.baseUrl)}`,
 		...lines,
 		writes,
 		`确认后带 confirm=true 重调即真跑；只想留档用 dry_run=true（永不发请求）。${note}`
@@ -6320,7 +6518,7 @@ async function chainRunForTool(deps, exec, args) {
 			accepted: false,
 			gate: "blocked",
 			code: "invalid-chain",
-			message: `解析工作区根失败：${messageOf(error)}`
+			message: `解析工作区根失败：${messageOf$1(error)}`
 		};
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
@@ -6394,7 +6592,8 @@ async function chainRunForTool(deps, exec, args) {
 		baseUrl: plan.baseUrl,
 		...args.concurrency === void 0 ? {} : { concurrency: args.concurrency },
 		chainPath: chainPathForRecord(workspaceRoot, loaded.path),
-		...args.dryRun === true ? { dryRun: true } : {}
+		...args.dryRun === true ? { dryRun: true } : {},
+		...deps.credentials === void 0 ? {} : { credentials: deps.credentials }
 	};
 	if (args.dryRun === true) {
 		const prepared = prepareChainRun(chainDeps, runInput);
@@ -7568,6 +7767,8 @@ function defineChainRunTool(deps) {
 
 运行期失败（binding-* / node-* / response-too-large / cancelled）不自动重试：链已中止，错误进运行记录，修好后用新 run 重跑（绝不自动重放写请求）。
 
+鉴权：卡声明 cookie-session 时，引擎会按卡的采集来源自动注入 cookie；token 型一期未采集，不猜 Authorization。401 回执区分「未注入可用凭证」与「已注入但仍 401」，后者可能需要重新登录/采集——自动换票尚未实现。
+
 幂等性：**不幂等**。同一参数重复调用就是新 run、新请求。长链走宿主后台 job，用 dataforge_status 轮询、job_kill 取消。`,
 		parameters: {
 			site: {
@@ -8332,6 +8533,146 @@ function parseArray(raw) {
 	} catch {
 		return [];
 	}
+}
+
+//#endregion
+//#region src/capture/credentials.ts
+/**
+* 采集库 → 执行期凭证的只读适配器（R-4 M1）。
+*
+* 为什么单独一层：执行层（`execute/*`）不认识 SQLite、不认识采集表；它只认
+* `CredentialProvider` 这个函数形状。本模块把「一期采集库」翻译成那个形状，
+* 读路径全程 `readonly`——不建表、不迁移、不写事件（与 `library/import.ts` 同一纪律）。
+*
+* 安全边界：
+*   - 只按卡的 `sources[].captureId` 查，**不做全库兜底扫描**（避免把 A 站凭证发给 B 站）；
+*   - 只取 `kind='cookie'`；token/localStorage 一期没采到，M1 明确 `unsupported`，不猜；
+*   - 返回值里的摘要只含名字/域/来源，值只进 `headers.cookie` 这一条出站请求头。
+*
+* @module dsh-dataforge/capture/credentials
+*/
+function messageOf(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+/** 卡来源里的 captureId（去重、保序、去掉空串）。 */
+function captureIdsOf(card) {
+	const ids = /* @__PURE__ */ new Set();
+	for (const source of card.sources ?? []) if (typeof source.captureId === "string" && source.captureId !== "") ids.add(source.captureId);
+	return [...ids];
+}
+function hostOf(url) {
+	try {
+		return new URL(url).host;
+	} catch {
+		return url;
+	}
+}
+/** 只读打开采集库，查这批 captureId 的 cookie 行；读不到就抛给调用方折成降级。 */
+function readCookieRows(dbPath, captureIds) {
+	const db = new Database(dbPath, {
+		readonly: true,
+		fileMustExist: true
+	});
+	try {
+		const placeholders = captureIds.map(() => "?").join(",");
+		return db.prepare(`SELECT capture_id, url, name, value_json, obtained_at
+         FROM credential_events
+         WHERE capture_id IN (${placeholders}) AND kind = 'cookie'
+         ORDER BY obtained_at ASC`).all(...captureIds);
+	} finally {
+		db.close();
+	}
+}
+/** Playwright `expires`（秒）→ 毫秒；`-1`/`0`/缺失 = 会话 cookie。 */
+function expiresAtOf(raw) {
+	if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return void 0;
+	return raw > 0xe8d4a51000 ? raw : raw * 1e3;
+}
+/**
+* 一行 → 0..1 条 cookie。坏 JSON / 缺名缺值一律跳过——一条坏行不该炸整条链。
+*/
+function cookieOfRow(row) {
+	if (row.value_json === null || row.value_json === "") return void 0;
+	let raw;
+	try {
+		raw = JSON.parse(row.value_json);
+	} catch {
+		return;
+	}
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
+	const record = raw;
+	const name = typeof record["name"] === "string" && record["name"] !== "" ? record["name"] : row.name;
+	const value = typeof record["value"] === "string" ? record["value"] : "";
+	if (name === "" || value === "") return void 0;
+	const domain = typeof record["domain"] === "string" && record["domain"] !== "" ? record["domain"] : row.url ?? "";
+	if (domain === "") return void 0;
+	return {
+		name,
+		value,
+		domain,
+		path: typeof record["path"] === "string" && record["path"] !== "" ? record["path"] : "/",
+		secure: record["secure"] === true,
+		expiresAt: expiresAtOf(record["expires"]),
+		captureId: row.capture_id,
+		obtainedAt: row.obtained_at
+	};
+}
+function none(reason, captureIds) {
+	return {
+		headers: {},
+		application: emptyCredentialApplication("none", reason, captureIds)
+	};
+}
+function unsupported(card, captureIds) {
+	const reason = card.auth === "token-header" || card.auth === "token-param" ? `token 型凭证一期未采集（auth=${card.auth}）：需要补采集或改用 cookie 型站点` : `未知鉴权类型「${String(card.auth)}」：不注入`;
+	return {
+		headers: {},
+		application: emptyCredentialApplication("unsupported", reason, captureIds)
+	};
+}
+/**
+* 创建执行期凭证 provider。
+*
+* 每次调用按需只读打开/关闭 SQLite：节点量级几十到几百，打开开销可接受；
+* M1 以「正确、无状态」优先，缓存留到 M3 有实测瓶颈再加。
+*/
+function createCaptureCredentialProvider(options) {
+	const now = options.now ?? (() => Date.now());
+	return (need) => {
+		const card = need.card;
+		const captureIds = captureIdsOf(card);
+		if (card.auth === void 0 || card.auth === "none") return none("该卡无鉴权", captureIds);
+		if (card.auth === "unknown") return none("鉴权标志未判定，不注入", captureIds);
+		if (card.auth !== "cookie-session") return unsupported(card, captureIds);
+		if (captureIds.length === 0) return none("卡没有采集来源（sources[].captureId 为空）", []);
+		let rows;
+		try {
+			rows = readCookieRows(options.dbPath, captureIds);
+		} catch (error) {
+			return none(`采集库不可用：${messageOf(error)}`, captureIds);
+		}
+		const entries = [];
+		for (const row of rows) {
+			const cookie = cookieOfRow(row);
+			if (cookie !== void 0) entries.push(cookie);
+		}
+		const selection = selectCookies(entries, need.url, now());
+		const header = cookieHeaderOf(selection.selected);
+		if (header === void 0) {
+			if (selection.matched.length > 0) return {
+				headers: {},
+				application: {
+					...emptyCredentialApplication("expired", "匹配到的 cookie 全部过期", captureIds),
+					expired: selection.matched.length
+				}
+			};
+			return none(`没有匹配 ${hostOf(need.url)} 的 cookie`, captureIds);
+		}
+		return {
+			headers: { cookie: header },
+			application: appliedCredentialApplication(selection, captureIds)
+		};
+	};
 }
 
 //#endregion
@@ -9111,7 +9452,8 @@ function apply(ctx, rawConfig) {
 			responseLimitBytes: config.chainResponseLimitBytes,
 			foregroundTimeoutSeconds: config.timeoutSeconds
 		},
-		resolveJobs: () => jobsService
+		resolveJobs: () => jobsService,
+		credentials: createCaptureCredentialProvider({ dbPath: orchestrationDeps.captureDbPath })
 	};
 	anyCtx.inject?.(["webServer"], (webSvc) => {
 		const effect = webSvc["effect"];
