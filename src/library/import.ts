@@ -252,15 +252,40 @@ function inputPathOf(field: TemplateField): string {
   return `${prefix}.${normalizeFieldPath(field.field)}`
 }
 
-function projectInputs(template: Template | undefined): LibraryInput[] {
+/**
+ * URL 模板的路径占位符 → 卡上的 `path.*` 入参名。
+ *
+ * 关键区别：采集期的 `pathParams` 记的是**采到的真实段值**（`['12345']`），不是参数名——
+ * 拿它当字段名会产出 `path.12345` 这种垃圾，而且每采到一个新 ID 就多一条，字段表会无限膨胀。
+ * 所以名字只能从**模板的占位符**来：`/orders/{p}/items` 里的 `{p}` 是采集期把「数字/长随机段」
+ * 统一抽掉的匿名记号，按出现次序命名为 `p1`、`p2`…；`{id}` 这种具名占位符直接用名字。
+ */
+function pathParamNamesOf(urlTemplate: string): string[] {
+  const path = urlTemplate.split('?')[0]
+  const names: string[] = []
+  let anonymous = 0
+  for (const segment of path.split('/')) {
+    const match = /^\{([A-Za-z0-9_]+)\}$/.exec(segment.trim())
+    if (match === null) continue
+    const raw = match[1]
+    if (raw === 'p') {
+      anonymous += 1
+      names.push(`p${anonymous}`)
+      continue
+    }
+    names.push(raw)
+  }
+  return names
+}
+
+function projectInputs(template: Template | undefined, urlTemplate: string): LibraryInput[] {
   if (template === undefined) return []
   const out: LibraryInput[] = []
   const seen = new Set<string>()
-  // URL 模板里的 `{id}` 段（采集模板 `pathParams`）先投影：它们天然由调用方/上游提供，
-  // 缺了它详情页接口（`/api/orders/{p}/items`）在卡里就没有 `path.*` 入参、链也绑不上。
-  // 顺序按 pathParams 原序，保证重复导入不抖动。
-  for (const name of template.pathParams ?? []) {
-    const path = `path.${normalizeFieldPath(name)}`
+  // path 参数先投影：它们天然由调用方/上游提供。缺了它们，详情页接口
+  // （`/api/orders/{p}/items`）在卡里就没有任何 `path.*` 入参、链也绑不上。
+  for (const name of pathParamNamesOf(urlTemplate)) {
+    const path = `path.${name}`
     if (seen.has(path)) continue
     seen.add(path)
     out.push({ path, type: 'string', required: true, role: 'input' })
@@ -269,7 +294,7 @@ function projectInputs(template: Template | undefined): LibraryInput[] {
     // 凭证角色字段不入卡：鉴权只以 auth 标志 + 来源名表达（红线）。
     if (field.role === 'credential') continue
     const path = inputPathOf(field)
-    // 与 pathParams 投影按 path 去重（同名 path 字段已有入参，不重复出条目）。
+    // 与 path 参数投影按 path 去重（同名 path 字段已有入参，不重复出条目）。
     if (seen.has(path)) continue
     seen.add(path)
     const role = libraryRoleOf(field)
@@ -319,7 +344,7 @@ function projectCard(card: RawCardRow, relations: RawRelationRow[]): Projection 
       kind: 'interface-card',
       ...(card.name === undefined ? {} : { name: card.name }),
       identity: { mergeKey, method: card.method, urlTemplate },
-      inputs: projectInputs(requestTemplate),
+      inputs: projectInputs(requestTemplate, urlTemplate),
       outputs: projectOutputs(responseTemplate),
       auth: auth.auth,
       ...(auth.authEvidence === undefined ? {} : { authEvidence: auth.authEvidence }),
@@ -411,11 +436,6 @@ export function mergeCard(existing: LibraryCard, draft: LibraryCardDraft): { car
 
 // ── 主流程 ────────────────────────────────────────────────────────────────────
 
-/** 卡是否已经把这次采集记进 sources（决定"未导入的 run"要不要再处理）。 */
-function alreadyLinked(card: LibraryCard, captureId: string): boolean {
-  return card.sources.some((source) => source.captureId === captureId)
-}
-
 /**
  * 导入接口库（IF-1）。
  *
@@ -477,13 +497,9 @@ export function importLibrary(options: ImportLibraryOptions): LibraryImportResul
       captureIds.add(raw.captureId)
       continue
     }
-    if (alreadyLinked(existing, raw.captureId)) {
-      // 这张采集卡早在 sources 里了，但同 run 里可能还有别的 mergeKey 没导——交给下一张判断。
-      unchanged.add(existing.cardId)
-      touched.add(existing.cardId)
-      captureIds.add(raw.captureId)
-      continue
-    }
+    // 同一 captureId 已在 sources 里也照样走一遍归并：重复导入必须**收敛到正确的卡状态**，
+    // 而不是只因为「这个 run 导过」就跳过。历史卡缺 `path.*`（早先版本导入的）、或卡被手改过，
+    // 都靠这一次重导修正；内容真没变时 mergeCard 会报 changed=false，不写文件、不留 git 噪音。
     const result = mergeCard(existing, draft)
     cardsByMergeKey.set(draft.identity.mergeKey, result.card)
     if (!result.changed) {

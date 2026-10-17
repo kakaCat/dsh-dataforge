@@ -122,7 +122,8 @@ sources:                       # 来源溯源（可多次导入累积）
     relationIds: [rel_88, rel_91]
 ```
 
-- **入参投影**：采集模板的 `pathParams`（URL 里的 `{name}` 段）一律投影为 `path.<name>` 入参（`type: string`、`role: input`、`required: true`），排在 fields 投影之前并与同 path 字段去重——详情页接口（`/api/orders/{p}/items`）靠它才能被链绑定。
+- **入参投影**：**URL 模板里的占位符**投影为 `path.<name>` 入参（`type: string`、`role: input`、`required: true`），排在 fields 投影之前并与同 path 字段去重——详情页接口（`/api/orders/{p}/items`）靠它才能被链绑定。名字只能从模板来：采集期把数字/长随机段统一抽成**匿名** `{p}`（按出现次序命名 `p1`、`p2`…），`{id}` 这类具名占位符直接用名字。**不能用采集模板的 `pathParams` 当名字**——它记的是**采到的真实段值**（`['12345']`），拿来当字段名会产出 `path.12345` 这样的垃圾，且每采到一个新 ID 就多一条，字段表会无限膨胀。
+- **归并收敛**：同一 `captureId` 已在 `sources` 里也照样重走一遍归并——重复导入必须收敛到**正确的卡状态**，而不是「这个 run 导过」就跳过；历史卡缺 `path.*`（早先版本导入）或卡被手改过都靠重导修正，内容真没变时 `changed=false`、不写文件、不留 git 噪音。
 - **`required` 语义**：表示「采集期观察到该值会变」（多形态下值变化过），**不是业务必填**；单样本卡的入参几乎全是 `role: constant, required: false`。执行引擎不得拿它当「必须提供」的判据（`path.*` 是唯一例外：URL 拼不出来就没法发请求）。
 - **归并规则**：同 `mergeKey` 即同卡；再导入同卡 = 合并 `sources`、以新样本刷新字段模板（字段并集，冲突记 `notice`）；`legacy` 关系行照常溯源。
 - **不变量**：cardId 分配后不复用；卡文件不含任何凭证值（只投影 `auth` 标志与来源名）。

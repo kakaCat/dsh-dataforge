@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CaptureStore } from '../../src/capture/store.js'
 import { importLibrary, mergeCard, type LibraryError } from '../../src/library/import.js'
-import { cardsDir, libraryRoot, readCard, readIndex } from '../../src/library/store.js'
+import { cardsDir, libraryRoot, readCard, readIndex, writeCard } from '../../src/library/store.js'
 import type { LibraryCard } from '../../src/library/types.js'
 
 const PAGE = 'https://scm.example.com/purchase/new'
@@ -175,34 +175,51 @@ it('第二次采集同接口：不新建卡，sources 累积两条，字段做�
 })
 
 const PATH_REQUEST_TEMPLATE = {
-  pathParams: ['id', 'orderId'],
+  // 采集期把路径里的数字/长随机段抽成匿名 {p}，并把**采到的段值**记进 pathParams。
+  // 这些是值不是名字——绝不能拿来当字段名（否则会产出 `path.42` 这种垃圾，且每采到一个新 ID 就多一条）。
+  pathParams: ['42', 'SO-1'],
   fields: [
     { field: 'q', type: 'string', sample: '2120', role: 'input', unverified: false, location: 'query' },
     { field: 'page', type: 'number', sample: '1', role: 'constant', unverified: false, location: 'query' },
   ],
 } as const
 
-it('URL path 参数投影为 path.* 入参：排在 fields 之前、required=true、role=input、顺序稳定', () => {
+it('URL 模板占位符投影为 path.* 入参：具名用名字、匿名按出现次序命名', () => {
   const fx = fixture()
   run(fx.store, 'cap_1')
   addCard(fx.store, {
     captureId: 'cap_1',
-    mergeKey: 'GET /api/orders/{id}/items',
-    urlTemplate: '/api/orders/{id}/items',
+    mergeKey: 'GET /api/orders/{orderId}/items/{p}',
+    urlTemplate: '/api/orders/{orderId}/items/{p}',
     requestTemplate: PATH_REQUEST_TEMPLATE,
   })
   expect(closeAndImport(fx).imported).toBe(1)
 
   const card = readCard(fx.dir, 'card_000001')
   expect(card?.inputs).toEqual([
-    { path: 'path.id', type: 'string', required: true, role: 'input' },
     { path: 'path.orderId', type: 'string', required: true, role: 'input' },
+    { path: 'path.p1', type: 'string', required: true, role: 'input' },
     { path: 'query.q', type: 'string', required: true, role: 'input' },
     { path: 'query.page', type: 'number', required: false, role: 'constant' },
   ])
 })
 
-it('pathParams 与 fields 投影按 path 去重：同名 path 字段不重复出条目', () => {
+it('多个匿名 {p} 按出现次序命名 p1/p2，采集到的段值不许当字段名', () => {
+  const fx = fixture()
+  run(fx.store, 'cap_1')
+  addCard(fx.store, {
+    captureId: 'cap_1',
+    mergeKey: 'GET /api/materials/{p}/items/{p}',
+    urlTemplate: '/api/materials/{p}/items/{p}',
+    requestTemplate: { pathParams: ['A-1', 'B-2'], fields: [] },
+  })
+  expect(closeAndImport(fx).imported).toBe(1)
+  const paths = (readCard(fx.dir, 'card_000001')?.inputs ?? []).map((field) => field.path)
+  expect(paths).toEqual(['path.p1', 'path.p2'])
+  expect(paths.some((path) => path.includes('A-1') || path.includes('B-2'))).toBe(false)
+})
+
+it('path 参数与 fields 投影按 path 去重：同名 path 字段不重复出条目', () => {
   const fx = fixture()
   run(fx.store, 'cap_1')
   addCard(fx.store, {
@@ -210,7 +227,7 @@ it('pathParams 与 fields 投影按 path 去重：同名 path 字段不重复出
     mergeKey: 'GET /api/orders/{id}/items',
     urlTemplate: '/api/orders/{id}/items',
     requestTemplate: {
-      pathParams: ['id'],
+      pathParams: ['42'],
       fields: [{ field: 'id', type: 'string', sample: '42', role: 'constant', unverified: false, location: 'path' }],
     },
   })
@@ -220,13 +237,13 @@ it('pathParams 与 fields 投影按 path 去重：同名 path 字段不重复出
   expect(inputs).toEqual([{ path: 'path.id', type: 'string', required: true, role: 'input' }])
 })
 
-it('带 pathParams 的卡重复导入同一 run：unchanged，不因 path.* 抖动', () => {
+it('带 path 参数的卡重复导入同一 run：unchanged，不因 path.* 抖动', () => {
   const fx = fixture()
   run(fx.store, 'cap_1')
   addCard(fx.store, {
     captureId: 'cap_1',
-    mergeKey: 'GET /api/orders/{id}/items',
-    urlTemplate: '/api/orders/{id}/items',
+    mergeKey: 'GET /api/orders/{orderId}/items',
+    urlTemplate: '/api/orders/{orderId}/items',
     requestTemplate: PATH_REQUEST_TEMPLATE,
   })
   expect(closeAndImport(fx).imported).toBe(1)
@@ -239,53 +256,37 @@ it('带 pathParams 的卡重复导入同一 run：unchanged，不因 path.* 抖�
   expect(readFileSync(join(cardsDir(fx.dir), 'card_000001.yaml'), 'utf8')).toBe(before)
 
   const card = readCard(fx.dir, 'card_000001')
-  expect(card?.inputs.map((field) => field.path)).toEqual(['path.id', 'path.orderId', 'query.q', 'query.page'])
+  expect(card?.inputs.map((field) => field.path)).toEqual(['path.orderId', 'query.q', 'query.page'])
 })
 
-it('旧卡（无 path.*）再导入新采集：回执计 merged，卡上补出 path.*', () => {
+it('旧卡（早先版本导入的、没有 path.*）再导入同一 run：计 merged 并补出 path.*', () => {
   const fx = fixture()
   run(fx.store, 'cap_1')
   addCard(fx.store, {
     captureId: 'cap_1',
-    mergeKey: 'GET /api/orders/{id}/items',
-    urlTemplate: '/api/orders/{id}/items',
+    mergeKey: 'GET /api/orders/{orderId}/items',
+    urlTemplate: '/api/orders/{orderId}/items',
+    requestTemplate: PATH_REQUEST_TEMPLATE,
   })
   expect(closeAndImport(fx).imported).toBe(1)
-  const before = readCard(fx.dir, 'card_000001')
-  expect(before?.inputs.some((field) => field.path.startsWith('path.'))).toBe(false)
 
-  // 第二次采集：同接口，这次采集模板带了 pathParams（老库里的卡就是这样长出来的）。
-  const store = new CaptureStore(fx.dbPath, join(fx.dir, 'samples'), join(fx.dir, 'events.ndjson'))
-  store.upsertRun({
-    id: 'cap_2',
-    taskType: 'single_page',
-    entryUrl: PAGE,
-    status: 'done',
-    startedAt: 2,
-    stats: { pages: 1, requests: 2, cards: 1, credentials: 0 },
-  })
-  store.upsertCard('cap_2', {
-    mergeKey: 'GET /api/orders/{id}/items',
-    method: 'GET',
-    urlTemplate: '/api/orders/{id}/items',
-    relatedPageUrls: [PAGE],
-    requestTemplate: PATH_REQUEST_TEMPLATE as never,
-    responseTemplate: RESPONSE_TEMPLATE as never,
-    authType: 'cookie-session' as never,
-  })
-  store.close()
+  // 模拟历史卡：把 path.* 抹掉后重写（cardId 不变，等于「早先版本导入的产物」）。
+  const legacy = readCard(fx.dir, 'card_000001')
+  expect(legacy).toBeDefined()
+  if (legacy === undefined) return
+  writeCard(fx.dir, { ...legacy, inputs: legacy.inputs.filter((field) => !field.path.startsWith('path.')) })
+  expect(readCard(fx.dir, 'card_000001')?.inputs.some((field) => field.path.startsWith('path.'))).toBe(false)
 
-  const result = importLibrary({ workspaceRoot: fx.dir, captureDbPath: fx.dbPath, captureId: 'cap_2' })
+  const result = importLibrary({ workspaceRoot: fx.dir, captureDbPath: fx.dbPath, captureId: 'cap_1' })
   expect(result.imported).toBe(0)
   expect(result.merged).toBe(1)
   expect(result.unchanged).toBe(0)
-
-  const card = readCard(fx.dir, 'card_000001')
-  expect(card?.inputs).toContainEqual({ path: 'path.id', type: 'string', required: true, role: 'input' })
-  expect(card?.inputs.map((field) => field.path)).toEqual(
-    expect.arrayContaining(['path.id', 'path.orderId']),
-  )
-  expect(card?.sources.map((source) => source.captureId).sort()).toEqual(['cap_1', 'cap_2'])
+  // 归并是并集，新补的字段追加在既有顺序之后——这里只断言「补齐了」，不断言位置。
+  expect((readCard(fx.dir, 'card_000001')?.inputs ?? []).map((field) => field.path).sort()).toEqual([
+    'path.orderId',
+    'query.page',
+    'query.q',
+  ])
 })
 
 it('坏卡跳过不炸批：坏模板那张计入 skipped，好卡照常导入', () => {
