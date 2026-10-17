@@ -22,9 +22,18 @@ export interface PanelInfoLike {
 /** usePanelInfo 选择器 hook 的最小契约（由 main 插槽运行时注入）。 */
 export type UsePanelInfo = <S>(selector: (info: PanelInfoLike) => S) => S
 
-/** main 插槽占用者收到的 props（本宿主只消费 usePanelInfo）。 */
+/** 工作区注册表快照的最小投影（本插件只用到路径）。 */
+export interface WorkspaceSnapshotLike {
+  readonly items?: ReadonlyArray<{ readonly path?: string; readonly updatedAt?: string }>
+}
+
+/** useWorkspaces 选择器 hook 的最小契约（由 main 插槽运行时注入）。 */
+export type UseWorkspaces = <S>(selector: (snapshot: WorkspaceSnapshotLike) => S) => S
+
+/** main 插槽占用者收到的 props（本宿主只消费 usePanelInfo / useWorkspaces）。 */
 export interface PanelHostProps {
   usePanelInfo?: UsePanelInfo
+  useWorkspaces?: UseWorkspaces
 }
 
 /** 装配一个面板宿主组件（每页一个实例；panelId 与插槽 key 同源）。 */

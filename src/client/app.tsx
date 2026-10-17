@@ -21,9 +21,10 @@ import {
   RUNS_TAB_ID, RUNS_TAB_LABEL,
   SITES_TAB_ID, SITES_TAB_LABEL,
 } from './dom.js'
-import { PanelHostProps, UsePanelInfo, createPanelHost } from './host.js'
+import { PanelHostProps, UsePanelInfo, UseWorkspaces, WorkspaceSnapshotLike, createPanelHost } from './host.js'
 import { injectStyles } from './styles.js'
 import { SitesBoardPage } from './sites-board.js'
+import { setPanelWorkspace } from './api.js'
 import type { RecaptureSeed } from './types.js'
 
 export interface DataforgePanelAppProps extends PanelHostProps {}
@@ -41,6 +42,10 @@ const TABS: readonly TabEntry[] = [
   { id: ORCH_TAB_ID, label: ORCH_TAB_LABEL },
 ]
 
+/** 兜底 hook：槽位未注入 useWorkspaces 时返回空工作区（不写 ?workspace=，交服务端回落）。 */
+const NO_WORKSPACE: UseWorkspaces = <S,>(selector: (snapshot: WorkspaceSnapshotLike) => S): S =>
+  selector({ items: [] })
+
 /** 兜底 hook：槽位未注入 usePanelInfo 时恒判「本面板在看」（host.ts 同款）。 */
 const ALWAYS_ACTIVE: UsePanelInfo = <S,>(selector: (info: { activePanelId: string | null }) => S): S =>
   selector({ activePanelId: PANEL_ID })
@@ -52,6 +57,12 @@ const RunsHost = createPanelHost(attachRunsBoard, PANEL_ID)
 type LibSeed = { host: string; nonce: number }
 
 export function DataforgePanelApp(props: DataforgePanelAppProps): ReactNode {
+  // 面板属于某个工作区：把当前工作区根交给 api 层（所有请求带 ?workspace=）。
+  // 渲染期写入而不是 effect 里写：子组件的取数 effect 在同一轮之后才跑，晚一步就先打了
+  // 一次「以宿主 cwd 为工作区」的空请求（面板会闪一下空态）。
+  const useWorkspaces: UseWorkspaces = typeof props.useWorkspaces === 'function' ? props.useWorkspaces : NO_WORKSPACE
+  const workspacePath = useWorkspaces((snapshot) => snapshot.items?.[0]?.path)
+  setPanelWorkspace(typeof workspacePath === 'string' ? workspacePath : undefined)
   const usePanelInfo: UsePanelInfo = typeof props.usePanelInfo === 'function' ? props.usePanelInfo : ALWAYS_ACTIVE
   const activePanelId = usePanelInfo((info) => info.activePanelId)
   const visible = activePanelId === PANEL_ID

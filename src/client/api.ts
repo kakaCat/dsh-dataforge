@@ -17,6 +17,28 @@ export class PanelApiError extends Error {
   }
 }
 
+/**
+ * 面板所属工作区（绝对路径）。
+ *
+ * 为什么必须由面板显式告诉服务端：宿主进程的 cwd 是 **profile 目录**
+ * （`~/.dsh/profiles/desktop`），服务端拿它当工作区会把 `.dsh/dataforge/chains`
+ * 指到空目录——面板就会永远显示「还没有任何编排流程」。面板从插槽的
+ * `useWorkspaces` 拿到当前工作区路径，写在这里，所有请求带上 `?workspace=`。
+ */
+let panelWorkspace: string | undefined
+
+/** 设置本面板的工作区根（`app.tsx` 在渲染期写入；缺省 = 服务端自己回落）。 */
+export function setPanelWorkspace(path: string | undefined): void {
+  panelWorkspace = path !== undefined && path.length > 0 ? path : undefined
+}
+
+/** 把工作区拼进 URL（保留已有 query）。 */
+function withWorkspace(url: string): string {
+  if (panelWorkspace === undefined) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}workspace=${encodeURIComponent(panelWorkspace)}`
+}
+
 interface Envelope<T> {
   success: boolean
   data?: T
@@ -24,7 +46,7 @@ interface Envelope<T> {
 }
 
 export async function fetchPanelData<T>(suffix: string): Promise<T> {
-  const url = `${PANEL_API_PREFIX}${suffix}`
+  const url = withWorkspace(`${PANEL_API_PREFIX}${suffix}`)
   let resp: Response
   try {
     resp = await fetch(url, { headers: { accept: 'application/json' } })
@@ -64,7 +86,7 @@ export async function fetchCards(limit = 200, offset = 0): Promise<{ cards: Card
  * 不能像 GET 那样在 HTTP 非 200 时直接丢掉 error 文案。
  */
 export async function postPanelData<T>(suffix: string, body: unknown): Promise<T> {
-  const url = `${PANEL_API_PREFIX}${suffix}`
+  const url = withWorkspace(`${PANEL_API_PREFIX}${suffix}`)
   let resp: Response
   try {
     resp = await fetch(url, {

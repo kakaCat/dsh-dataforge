@@ -17,6 +17,8 @@
  * @module dsh-dataforge/orchestration/panel-routes
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { statSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 import { listChainVersionInfos, listChainVersions, listChains, loadChain, readCard, readChainText, saveChain } from '../chains/store.js'
 import { listCards } from '../library/store.js'
 import type { ChainDoc, ChainIssue, ChainKind, ChainSource } from '../chains/schema.js'
@@ -141,7 +143,7 @@ async function handle(deps: OrchestrationPanelDeps, req: IncomingMessage, res: S
 
     if (method === 'POST') {
       if (suffix === '/graph') {
-        await handleSave(deps, req, res)
+        await handleSave(deps, req, res, url)
         return
       }
       fail(res, 405, `编排路由不支持 POST ${suffix}（写入口仅 POST /orchestration/graph）`, 'method-not-allowed')
@@ -163,7 +165,7 @@ async function handle(deps: OrchestrationPanelDeps, req: IncomingMessage, res: S
     }
 
     if (suffix === '/palette') {
-      ok(res, await buildPalette(deps))
+      ok(res, await buildPalette(deps, url))
       return
     }
 
@@ -181,8 +183,28 @@ function stripPrefix(pathname: string): string {
   return pathname
 }
 
+/**
+ * 本次请求要读哪个工作区。
+ *
+ * 面板属于某个工作区，而宿主进程的 cwd 往往是 **profile 目录**（
+ * `~/.dsh/profiles/desktop`），拿它当工作区会把 `.dsh/dataforge/chains` 指到空目录
+ * （现象：面板永远显示「还没有任何编排流程」）。所以面板显式带 `?workspace=<绝对路径>`；
+ * 只接受「绝对路径 + 真实存在的目录」，其余一律回落宿主解析器，不做路径注入的入口。
+ */
+async function resolveRoot(deps: OrchestrationPanelDeps, url: URL): Promise<string> {
+  const raw = url.searchParams.get('workspace')?.trim()
+  if (raw !== undefined && raw.length > 0 && isAbsolute(raw)) {
+    try {
+      if (statSync(raw).isDirectory()) return raw
+    } catch {
+      // 不存在的路径：当没给，回落
+    }
+  }
+  return deps.resolveWorkspaceRoot()
+}
+
 async function buildOverview(deps: OrchestrationPanelDeps, url: URL): Promise<OverviewValue> {
-  const workspaceRoot = await deps.resolveWorkspaceRoot()
+  const workspaceRoot = await resolveRoot(deps, url)
   const siteFilter = url.searchParams.get('site')
   const chains = listChains(workspaceRoot)
 
@@ -254,7 +276,7 @@ async function handleGraph(deps: OrchestrationPanelDeps, url: URL, res: ServerRe
     return
   }
 
-  const workspaceRoot = await deps.resolveWorkspaceRoot()
+  const workspaceRoot = await resolveRoot(deps, url)
   const loaded = loadChain(workspaceRoot, site, flow, version === undefined ? {} : { version })
   if (!loaded.ok) {
     fail(res, loaded.code === 'chain-not-found' ? 404 : 422, loaded.message, loaded.code)
@@ -303,8 +325,8 @@ export type PaletteValue = {
 const MAX_PALETTE_CARDS = 500
 const MAX_PALETTE_PAGES = 200
 
-async function buildPalette(deps: OrchestrationPanelDeps): Promise<PaletteValue> {
-  const workspaceRoot = await deps.resolveWorkspaceRoot()
+async function buildPalette(deps: OrchestrationPanelDeps, url: URL): Promise<PaletteValue> {
+  const workspaceRoot = await resolveRoot(deps, url)
   let cards: ReturnType<typeof listCards> = []
   try {
     cards = listCards(workspaceRoot)
@@ -367,7 +389,7 @@ function resolveCardIdentities(workspaceRoot: string, doc: ChainDoc): Record<str
 }
 
 /** 画布保存：只接受链 YAML 文本，交给 saveChain（唯一写入口），来源标 canvas。 */
-async function handleSave(deps: OrchestrationPanelDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleSave(deps: OrchestrationPanelDeps, req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const body = await readBody(req)
   if (body === undefined) {
     fail(res, 413, `请求体超过 ${MAX_SAVE_BODY_BYTES} 字节上限`, 'payload-too-large')
@@ -397,7 +419,7 @@ async function handleSave(deps: OrchestrationPanelDeps, req: IncomingMessage, re
     return
   }
 
-  const workspaceRoot = await deps.resolveWorkspaceRoot()
+  const workspaceRoot = await resolveRoot(deps, url)
   const saved = saveChain(workspaceRoot, input, { source })
   if (!saved.ok) {
     ok(res, {

@@ -48,7 +48,7 @@ interface FakeResponse {
   body: string
 }
 
-function serve(method: string, url: string, body?: string): FakeResponse {
+function serve(method: string, url: string, body?: string, root?: string): FakeResponse {
   const captured: FakeResponse = { status: 0, body: '' }
   const res = {
     writeHead: (status: number) => { captured.status = status },
@@ -62,7 +62,7 @@ function serve(method: string, url: string, body?: string): FakeResponse {
       if (event === 'end') cb()
     },
   }
-  createOrchestrationPanelHandler({ resolveWorkspaceRoot: async () => workspace() })(
+  createOrchestrationPanelHandler({ resolveWorkspaceRoot: async () => root ?? workspace() })(
     req as unknown as IncomingMessage,
     res as unknown as ServerResponse,
   )
@@ -74,8 +74,8 @@ function json(response: FakeResponse): { success: boolean; data?: Record<string,
 }
 
 /** 路由是异步处理体，等一轮微任务再读结果。 */
-async function serveAsync(method: string, url: string, body?: string): Promise<FakeResponse> {
-  const captured = serve(method, url, body)
+async function serveAsync(method: string, url: string, body?: string, root?: string): Promise<FakeResponse> {
+  const captured = serve(method, url, body, root)
   await new Promise((resolve) => setTimeout(resolve, 0))
   // handle() 是 async：第一次调用返回后 res 可能还没写，轮询到有 body 为止。
   for (let i = 0; i < 50 && captured.status === 0; i += 1) {
@@ -363,5 +363,33 @@ describe('GET /orchestration/palette（画布左栏拖拽源）', () => {
     const data = json(response).data as Record<string, unknown>
     expect(data.cards).toEqual([])
     expect(data.pages).toEqual([])
+  })
+})
+
+describe('?workspace=：面板显式指定工作区根', () => {
+  it('带 workspace 时读那个目录（宿主 cwd 是 profile 目录，不能靠它）', async () => {
+    seedChain()
+    // 服务端回落值指向一个**空**目录：如果它赢，就会显示 0 条流程。
+    const emptyDir = mkdtempSync(join(tmpdir(), 'df-empty-'))
+    const response = await serveAsync(
+      'GET',
+      `${OVERVIEW}?workspace=${encodeURIComponent(workspace())}`,
+      undefined,
+      emptyDir,
+    )
+    expect(response.status).toBe(200)
+    const payload = json(response)
+    expect(payload.success).toBe(true)
+    expect((payload.data?.flows as unknown[]).length).toBeGreaterThan(0)
+    rmSync(emptyDir, { recursive: true, force: true })
+  })
+
+  it('workspace 不是绝对路径 / 不存在 → 忽略并回落，不报错也不读脏路径', async () => {
+    seedChain()
+    for (const bogus of ['relative/path', '/definitely/not/here-9f2c']) {
+      const response = await serveAsync('GET', `${OVERVIEW}?workspace=${encodeURIComponent(bogus)}`)
+      expect(response.status).toBe(200)
+      expect((json(response).data?.flows as unknown[]).length).toBeGreaterThan(0)
+    }
   })
 })
