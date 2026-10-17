@@ -1,5 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { spawn } from "node:child_process";
@@ -921,7 +921,8 @@ const Config = Schema.object({
 	chainRunEnabled: Schema.boolean().default(true),
 	chainNodeTimeoutSeconds: Schema.number().default(30),
 	chainConcurrency: Schema.number().default(4),
-	chainResponseLimitBytes: Schema.number().default(2097152)
+	chainResponseLimitBytes: Schema.number().default(2097152),
+	chainCredentialPersistence: Schema.boolean().default(true)
 });
 /** 归一化（相对路径 → 绝对；~ 展开）。 */
 function normalizeConfig(raw) {
@@ -940,7 +941,8 @@ function normalizeConfig(raw) {
 		chainRunEnabled: raw.chainRunEnabled,
 		chainNodeTimeoutSeconds: raw.chainNodeTimeoutSeconds,
 		chainConcurrency: raw.chainConcurrency,
-		chainResponseLimitBytes: raw.chainResponseLimitBytes
+		chainResponseLimitBytes: raw.chainResponseLimitBytes,
+		chainCredentialPersistence: raw.chainCredentialPersistence ?? true
 	};
 }
 
@@ -5968,7 +5970,8 @@ async function executeChainRun(deps, prepared, input) {
 				attempted: true,
 				success: true,
 				...relogin.runId === void 0 ? {} : { runId: relogin.runId },
-				cookieNames: relogin.cookieNames
+				cookieNames: relogin.cookieNames,
+				...relogin.persisted === void 0 ? {} : { persisted: relogin.persisted }
 			} : {
 				attempted: true,
 				success: false,
@@ -6437,6 +6440,202 @@ function previewValue(value) {
 }
 
 //#endregion
+//#region src/capture/credential-store.ts
+/**
+* 换票 cookie 的本地持久化（R-4 M3）。
+*
+* 为什么要落盘：M2 的换票结果只活一次运行，R-6 的「隔天复跑」会重新 401、重新登录。
+* 这里把登录链下发的 cookie 存到 `dataRoot/credentials/cookies.json`，下一次运行
+* 由 provider 按 origin 读回，直接带上去。
+*
+* 安全纪律（红线，改代码前先读）：
+*   - 只存本地 `dataRoot`，目录 0700、文件 0600；不做任何上传/日志/回执输出；
+*   - 按 **origin** 隔离：`https://a.example.com` 的 cookie 不会发给 `b.example.com`；
+*   - 只由登录链（换票）写入；普通主链响应里的 `set-cookie` 不落盘；
+*   - 文件损坏/超大 → 当作空库，不抛、不阻塞执行；
+*   - 凭证值只出现在这个文件和出站 `cookie` 头里，事件/摘要/回执一律不落值。
+*
+* @module dsh-dataforge/capture/credential-store
+*/
+/** 读文件上限：超过就当作空库（防止有人把大文件塞进数据根）。 */
+const MAX_STORE_BYTES = 524288;
+function emptyStore() {
+	return {
+		version: 1,
+		origins: Object.create(null)
+	};
+}
+/** 读库：不存在/坏 JSON/超大 → 空库。绝不抛。 */
+function readStore(storePath) {
+	try {
+		if (!existsSync(storePath)) return emptyStore();
+		const text = readFileSync(storePath, "utf8");
+		if (text.length === 0 || Buffer.byteLength(text, "utf8") > MAX_STORE_BYTES) return emptyStore();
+		const raw = JSON.parse(text);
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return emptyStore();
+		const record = raw;
+		if (record["version"] !== 1) return emptyStore();
+		const originsRaw = record["origins"];
+		if (typeof originsRaw !== "object" || originsRaw === null || Array.isArray(originsRaw)) return emptyStore();
+		const origins = Object.create(null);
+		for (const [origin, value] of Object.entries(originsRaw)) {
+			if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+			const entry = value;
+			const cookiesRaw = entry["cookies"];
+			if (!Array.isArray(cookiesRaw)) continue;
+			const cookies = [];
+			for (const item of cookiesRaw) {
+				if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+				const cookie = item;
+				const name = typeof cookie["name"] === "string" ? cookie["name"] : "";
+				const cookieValue = typeof cookie["value"] === "string" ? cookie["value"] : "";
+				if (name === "" || cookieValue === "") continue;
+				const expiresAt = typeof cookie["expiresAt"] === "number" && Number.isFinite(cookie["expiresAt"]) ? cookie["expiresAt"] : void 0;
+				cookies.push({
+					name,
+					value: cookieValue,
+					...expiresAt === void 0 ? {} : { expiresAt }
+				});
+			}
+			if (cookies.length === 0) continue;
+			origins[origin] = {
+				updatedAt: typeof entry["updatedAt"] === "number" ? entry["updatedAt"] : 0,
+				cookies
+			};
+		}
+		return {
+			version: 1,
+			origins
+		};
+	} catch {
+		return emptyStore();
+	}
+}
+/** 原子写：临时文件 0600 → rename；目录 0700。失败不抛（换票成功不应因落盘失败而失败）。 */
+function writeStore(storePath, store) {
+	const tempPath = `${storePath}.${process.pid}.${Date.now()}.tmp`;
+	try {
+		mkdirSync(dirname(storePath), {
+			recursive: true,
+			mode: 448
+		});
+		try {
+			chmodSync(dirname(storePath), 448);
+		} catch {}
+		writeFileSync(tempPath, `${JSON.stringify(store, null, 2)}\n`, {
+			encoding: "utf8",
+			mode: 384
+		});
+		renameSync(tempPath, storePath);
+		try {
+			chmodSync(storePath, 384);
+		} catch {}
+		return true;
+	} catch {
+		try {
+			if (existsSync(tempPath)) unlinkSync(tempPath);
+		} catch {}
+		return false;
+	}
+}
+/** `https://a.example.com/x` → `https://a.example.com`；非法 URL 返回 undefined。 */
+function originOfUrl(url) {
+	try {
+		const parsed = new URL(url);
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return void 0;
+		return parsed.origin;
+	} catch {
+		return;
+	}
+}
+/**
+* 解析一条 `Set-Cookie` 的 name/value/expiresAt。
+*
+* `Max-Age` 优先于 `Expires`（RFC 6265）；`Max-Age=0` 视为立即过期。
+* 属性名大小写不敏感；值里允许出现 `=`。
+*/
+function parseSetCookie(raw, now) {
+	const parts = raw.split(";");
+	const first = parts[0]?.trim() ?? "";
+	const at = first.indexOf("=");
+	if (at <= 0) return void 0;
+	const name = first.slice(0, at).trim();
+	const value = first.slice(at + 1).trim();
+	if (name === "" || value === "") return void 0;
+	let expiresAt;
+	for (const part of parts.slice(1)) {
+		const trimmed = part.trim();
+		const eq = trimmed.indexOf("=");
+		if (eq <= 0) continue;
+		const attr = trimmed.slice(0, eq).trim().toLowerCase();
+		const attrValue = trimmed.slice(eq + 1).trim();
+		if (attr === "max-age") {
+			const seconds = Number(attrValue);
+			if (Number.isFinite(seconds)) expiresAt = seconds <= 0 ? now - 1 : now + Math.floor(seconds) * 1e3;
+		} else if (attr === "expires" && expiresAt === void 0) {
+			const parsed = Date.parse(attrValue);
+			if (Number.isFinite(parsed)) expiresAt = parsed;
+		}
+	}
+	return {
+		name,
+		value,
+		...expiresAt === void 0 ? {} : { expiresAt }
+	};
+}
+/** 读某个 origin 的可用 cookie（已过期的不返回）。 */
+function readPersistedCookies(storePath, origin, now) {
+	const entry = readStore(storePath).origins[origin];
+	if (entry === void 0) return [];
+	let host;
+	let secure;
+	try {
+		const parsed = new URL(origin);
+		host = parsed.hostname;
+		secure = parsed.protocol === "https:";
+	} catch {
+		return [];
+	}
+	return entry.cookies.filter((cookie) => cookie.expiresAt === void 0 || cookie.expiresAt > now).map((cookie) => ({
+		name: cookie.name,
+		value: cookie.value,
+		domain: host,
+		path: "/",
+		secure,
+		...cookie.expiresAt === void 0 ? {} : { expiresAt: cookie.expiresAt },
+		captureId: "persisted",
+		obtainedAt: entry.updatedAt
+	}));
+}
+/**
+* 把登录链下发的 `set-cookie` 合并进某个 origin（同名覆盖），并原子落盘。
+*
+* 返回写入的 cookie 数（0 = 没有可用 cookie / 落盘失败）。失败不抛：
+* 换票本身已经成功，持久化是「下一次更省事」，不能反过来把当前链打断。
+*/
+function persistCookies(storePath, origin, setCookies, now) {
+	const parsed = setCookies.map((raw) => parseSetCookie(raw, now)).filter((cookie) => cookie !== void 0).filter((cookie) => cookie.expiresAt === void 0 || cookie.expiresAt > now);
+	if (parsed.length === 0) return 0;
+	const store = readStore(storePath);
+	const existing = store.origins[origin]?.cookies ?? [];
+	const byName = /* @__PURE__ */ new Map();
+	for (const cookie of existing) byName.set(cookie.name, cookie);
+	for (const cookie of parsed) byName.set(cookie.name, cookie);
+	let cookies = [...byName.values()].slice(-100);
+	cookies = cookies.filter((cookie) => cookie.expiresAt === void 0 || cookie.expiresAt > now);
+	if (cookies.length === 0) {
+		delete store.origins[origin];
+		writeStore(storePath, store);
+		return 0;
+	}
+	store.origins[origin] = {
+		updatedAt: now,
+		cookies
+	};
+	return writeStore(storePath, store) ? parsed.length : 0;
+}
+
+//#endregion
 //#region src/orchestration/application.ts
 /**
 * 编排域的应用层：把 IF-1/2/3 的判定与错误折叠收在一处，工具壳（`src/tools.ts`）
@@ -6821,11 +7020,13 @@ function createReloginRunner(deps, workspaceRoot, expectedBaseUrl) {
 			message: "登录链执行完成但没有下发可用的 set-cookie（登录接口可能不是 cookie 型）",
 			runId: prepared.runId
 		};
+		const persisted = deps.credentialStorePath !== void 0 && expectedOrigin !== void 0 ? persistCookies(deps.credentialStorePath, expectedOrigin, cookies, Date.now()) : 0;
 		return {
 			ok: true,
 			cookieHeader,
 			cookieNames: cookieNamesOf(cookieHeader),
-			runId: prepared.runId
+			runId: prepared.runId,
+			...persisted > 0 ? { persisted } : {}
 		};
 	};
 }
@@ -8088,7 +8289,7 @@ function renderChainRun(value) {
 	const lines = (value.nodes ?? []).map((node) => {
 		const http = node.httpStatus === void 0 ? "" : ` HTTP ${node.httpStatus}`;
 		const error = node.errorCode === void 0 ? "" : ` ${node.errorCode}：${node.error ?? ""}`;
-		const relogin = node.relogin === void 0 ? "" : node.relogin.success ? `（已换票重放${node.relogin.runId === void 0 ? "" : `，登录链 ${node.relogin.runId}`}）` : `（换票失败 ${node.relogin.code ?? "relogin-failed"}）`;
+		const relogin = node.relogin === void 0 ? "" : node.relogin.success ? `（已换票重放${node.relogin.runId === void 0 ? "" : `，登录链 ${node.relogin.runId}`}${node.relogin.persisted === void 0 ? "" : `，已持久化 ${node.relogin.persisted} 个 cookie`}）` : `（换票失败 ${node.relogin.code ?? "relogin-failed"}）`;
 		return `- ${node.nodeId}：${node.status}${http}（${node.elapsedMs}ms）${error}${relogin}`;
 	});
 	const degraded = value.degradedNotice === void 0 ? "" : `\n⚠ ${value.degradedNotice}`;
@@ -8318,7 +8519,8 @@ function defineChainRunTool(deps) {
 										cookieNames: {
 											type: "array",
 											items: { type: "string" }
-										}
+										},
+										persisted: { type: "number" }
 									}
 								}
 							}
@@ -9048,17 +9250,24 @@ function createCaptureCredentialProvider(options) {
 		if (card.auth === void 0 || card.auth === "none") return none("该卡无鉴权", captureIds);
 		if (card.auth === "unknown") return none("鉴权标志未判定，不注入", captureIds);
 		if (card.auth !== "cookie-session") return unsupported(card, captureIds);
-		if (captureIds.length === 0) return none("卡没有采集来源（sources[].captureId 为空）", []);
-		let rows;
-		try {
-			rows = readCookieRows(options.dbPath, captureIds);
-		} catch (error) {
-			return none(`采集库不可用：${messageOf(error)}`, captureIds);
-		}
 		const entries = [];
-		for (const row of rows) {
-			const cookie = cookieOfRow(row);
-			if (cookie !== void 0) entries.push(cookie);
+		let databaseError;
+		if (captureIds.length > 0) try {
+			const rows = readCookieRows(options.dbPath, captureIds);
+			for (const row of rows) {
+				const cookie = cookieOfRow(row);
+				if (cookie !== void 0) entries.push(cookie);
+			}
+		} catch (error) {
+			databaseError = messageOf(error);
+		}
+		if (options.storePath !== void 0) {
+			const origin = originOfUrl(need.url);
+			if (origin !== void 0) entries.push(...readPersistedCookies(options.storePath, origin, now()));
+		}
+		if (entries.length === 0) {
+			if (captureIds.length === 0) return none(databaseError === void 0 ? "卡没有采集来源（sources[].captureId 为空）" : `采集库不可用：${databaseError}`, []);
+			return databaseError === void 0 ? none(`没有匹配 ${hostOf(need.url)} 的 cookie`, captureIds) : none(`采集库不可用：${databaseError}`, captureIds);
 		}
 		const selection = selectCookies(entries, need.url, now());
 		const header = cookieHeaderOf(selection.selected);
@@ -9072,9 +9281,13 @@ function createCaptureCredentialProvider(options) {
 			};
 			return none(`没有匹配 ${hostOf(need.url)} 的 cookie`, captureIds);
 		}
+		const application = appliedCredentialApplication(selection, captureIds);
+		const persistedUsed = selection.selected.filter((cookie) => cookie.captureId === "persisted").length;
+		if (persistedUsed > 0) application.persisted = persistedUsed;
+		if (databaseError !== void 0) application.reason = `采集库不可用（已用持久化凭证兜底）：${databaseError}`;
 		return {
 			headers: { cookie: header },
-			application: appliedCredentialApplication(selection, captureIds)
+			application
 		};
 	};
 }
@@ -9846,6 +10059,7 @@ function apply(ctx, rawConfig) {
 		captureDbPath: join(config.dataRoot, "capture", "capture.sqlite"),
 		resolveWorkspaceRoot
 	};
+	const credentialStorePath = config.chainCredentialPersistence ? join(config.dataRoot, "credentials", "cookies.json") : void 0;
 	const chainRunDeps = {
 		...orchestrationDeps,
 		dataRoot: config.dataRoot,
@@ -9857,7 +10071,11 @@ function apply(ctx, rawConfig) {
 			foregroundTimeoutSeconds: config.timeoutSeconds
 		},
 		resolveJobs: () => jobsService,
-		credentials: createCaptureCredentialProvider({ dbPath: orchestrationDeps.captureDbPath })
+		credentials: createCaptureCredentialProvider({
+			dbPath: orchestrationDeps.captureDbPath,
+			...credentialStorePath === void 0 ? {} : { storePath: credentialStorePath }
+		}),
+		...credentialStorePath === void 0 ? {} : { credentialStorePath }
 	};
 	anyCtx.inject?.(["webServer"], (webSvc) => {
 		const effect = webSvc["effect"];
