@@ -23,6 +23,8 @@ import { coveredPaths, missingInputs, normalizePath } from './coverage.js'
 export type PlanNode = {
   nodeId: string
   cardId: string
+  /** 节点级目标源；缺省用 ExecutionPlan.baseUrl。 */
+  baseUrl?: string
   method: string
   urlTemplate: string
   dependsOn: string[]
@@ -117,8 +119,13 @@ export function buildPlan(
 
     // 槽位引用：常量值里的 `$inputs.x` 与边 from 的 `$inputs.x` 都需要运行值。
     const seenSlots = new Set<string>()
-    for (const value of Object.values(node.constants ?? {})) {
-      const slot = inputSlotNameOf(String(value))
+    const slotValues = [
+      ...Object.values(node.constants ?? {}).map((value) => String(value)),
+      ...Object.values(node.files ?? {}),
+      ...Object.values(node.hashes ?? {}).map((value) => value.replace(/^(md5|md5-array|sha1):/, '')),
+    ]
+    for (const value of slotValues) {
+      const slot = inputSlotNameOf(value)
       if (slot === undefined || seenSlots.has(slot)) continue
       seenSlots.add(slot)
       const gap = slotGapOf(nodeId, slot, declaredSlots, runtimeInputs)
@@ -145,9 +152,11 @@ export function buildPlan(
   // 5) baseUrl：只判定，不解析来源（来源推断是 chain_run 的入参优先级问题）。
   //    放在缺参之后：缺参是链定义要改的事，先报更有用（调用方不该重试同一份链）。
   const resolvedBase = resolveBaseUrl(baseUrl)
-  if (!resolvedBase.ok) {
+  const nodesWithoutBase = doc.nodes.filter((node) => node.baseUrl === undefined)
+  if (!resolvedBase.ok && nodesWithoutBase.length > 0) {
     return failure('base-url-unresolved', resolvedBase.message)
   }
+  const planBaseUrl = resolvedBase.ok ? resolvedBase.baseUrl : ''
 
   if (authGapNodes.length > 0) {
     notices.push(
@@ -172,6 +181,7 @@ export function buildPlan(
       cardId: card.cardId,
       method: card.identity.method,
       urlTemplate: card.identity.urlTemplate,
+      ...(node.baseUrl === undefined ? {} : { baseUrl: resolveBaseUrl(node.baseUrl).ok ? node.baseUrl : node.baseUrl }),
       dependsOn: dependsOn.get(nodeId) ?? [],
       constants: { ...(node.constants ?? {}) },
       gaps: gapsByNode.get(nodeId) ?? [],
@@ -182,7 +192,7 @@ export function buildPlan(
     order: [...topo.order],
     nodes,
     gaps: [],
-    baseUrl: resolvedBase.baseUrl,
+    baseUrl: planBaseUrl,
     writeNodes: nodes.filter((node) => isWriteMethod(node.method)).map((node) => node.nodeId),
     totalNodes: topo.order.length,
   }

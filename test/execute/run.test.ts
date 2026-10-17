@@ -9,6 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -47,6 +48,16 @@ beforeAll(async () => {
         body: Buffer.concat(chunks).toString('utf8'),
         headers: req.headers,
       })
+      if (url.startsWith('/api/business')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{"errno":404}')
+        return
+      }
+      if (url.startsWith('/api/hash')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ body: Buffer.concat(chunks).toString('utf8') }))
+        return
+      }
       if (url.startsWith('/api/upload')) {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ bytes: Buffer.concat(chunks).byteLength, hasFile: Buffer.concat(chunks).toString('utf8').includes('dsh-upload-body') }))
@@ -198,6 +209,12 @@ const itemsCard = cardOf('card_items', 'GET', '/api/items', [], [
   { path: 'body.items[*].fs_id', type: 'number' },
 ])
 const pickCard = cardOf('card_pick', 'POST', '/api/pick', [{ path: 'body.fs_id', type: 'string' }])
+const hashCard = cardOf('card_hash', 'POST', '/api/hash', [{ path: 'body.md5', type: 'string' }])
+const businessCard = cardOf('card_business', 'POST', '/api/business', [], [{ path: 'body.errno', type: 'number' }])
+const pairCard = cardOf('card_pair', 'POST', '/api/transform', [
+  { path: 'body.a', type: 'string' },
+  { path: 'body.b', type: 'string' },
+])
 
 /** 测试用 provider：只回一份固定 cookie，摘要里不含值。 */
 function providerOf(cookie: string): CredentialProvider {
@@ -501,6 +518,83 @@ describe('真实站点适配：multipart 上传 + 数组选择', () => {
     expect(binding?.pick).toEqual({ match: { field: 'name', equals: 'target' }, field: 'fs_id' })
   })
 })
+
+  it('同一对节点多条绑定边：依赖只算一次，不会卡住调度', async () => {
+    seen = []
+    const deps = depsOf()
+    const cards = cardsOf(numberCard, pairCard)
+    const doc = chainOf(
+      [
+        { id: 'number-node', card: 'card_number', constants: {} },
+        { id: 'pair-node', card: 'card_pair', constants: {} },
+      ],
+      [
+        { from: 'number-node.body.id', to: 'pair-node.body.a', transform: 'string' },
+        { from: 'number-node.body.id', to: 'pair-node.body.b', transform: 'string' },
+      ],
+    )
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, { doc, cards, plan, baseUrl: base })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('completed')
+    const hit = seen.find((entry) => entry.url.startsWith('/api/transform'))
+    expect(JSON.parse(hit?.body ?? '{}')).toEqual({ a: '42', b: '42' })
+  })
+
+  it('node.expect：HTTP 200 但 errno 不等于期望值 → node-business-error', async () => {
+    seen = []
+    const deps = depsOf()
+    const cards = cardsOf(businessCard)
+    const doc = chainOf([{ id: 'business', card: 'card_business', constants: {}, expect: { path: 'body.errno', equals: 0 } }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, { doc, cards, plan, baseUrl: base })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('failed')
+    expect(result.nodes.find((node) => node.nodeId === 'business')?.errorCode).toBe('node-business-error')
+    expect(result.summary.message).toContain('node-business-error')
+    expect(result.nodes.find((node) => node.nodeId === 'business')?.error).toContain('期望 0，实际 404')
+  })
+
+  it('node.baseUrl 覆盖链级源（跨域节点，如 c5.pcs.baidu.com）', async () => {
+    seen = []
+    const deps = depsOf()
+    const cards = cardsOf(numberCard)
+    const doc = chainOf([{ id: 'number-node', card: 'card_number', constants: {}, baseUrl: base.replace('127.0.0.1', 'localhost') }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, { doc, cards, plan, baseUrl: base })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('completed')
+    expect(result.nodes[0]?.url.startsWith(base.replace('127.0.0.1', 'localhost'))).toBe(true)
+  })
+
+  it('node.hashes → 运行期计算 md5-array（上传 block_list）', async () => {
+    seen = []
+    const content = 'hash-me'
+    const filePath = join(mkdtempSync(join(tmpdir(), 'hash-file-')), 'hash-me.txt')
+    writeFileSync(filePath, content, 'utf8')
+    const deps = depsOf()
+    const cards = cardsOf(hashCard)
+    const doc = chainOf([{ id: 'hash', card: 'card_hash', constants: {}, hashes: { 'body.md5': `md5-array:${filePath}` } }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, { doc, cards, plan, baseUrl: base })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('completed')
+    const expected = createHash('md5').update(content).digest('hex')
+    const hit = seen.find((entry) => entry.url.startsWith('/api/hash'))
+    expect(JSON.parse(hit?.body ?? '{}')).toEqual({ md5: [expected] })
+  })
 
 /* ================================================================== 凭证注入（R-4 M1） */
 

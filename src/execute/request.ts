@@ -196,8 +196,13 @@ function parseTemplateQuery(query: string): Array<[string, string]> {
     })
 }
 
+/** query 值编码：冒号/等号按采集原文保留（百度 uploadid 这类值按字面校验）。 */
+function encodeQueryValue(value: string): string {
+  return encodeURIComponent(value).replace(/%3A/g, ':').replace(/%3D/g, '=')
+}
+
 function serializeQuery(pairs: Array<[string, string]>): string {
-  return pairs.map(([name, value]) => (value === '' ? name : `${name}=${encodeURIComponent(value)}`)).join('&')
+  return pairs.map(([name, value]) => (value === '' ? name : `${name}=${encodeQueryValue(value)}`)).join('&')
 }
 
 /** multipart 字段值：标量原样，数组/对象 JSON 字面量。 */
@@ -233,14 +238,20 @@ function multipartBodyOf(
 
 /** 扁平 body → application/x-www-form-urlencoded；数组/对象按 JSON 字面量落值。 */
 function formBodyOf(body: Record<string, unknown>): string {
-  const params = new URLSearchParams()
+  // 百度等站点按字面值校验 uploadid：采集到的原始表单里冒号不转义（其余仍转义）。
+  // 用 encodeURIComponent 为主，只把 %3A 还原成冒号，保持与浏览器原始请求一致。
+  const encode = (value: string): string => encodeURIComponent(value).replace(/%3A/g, ':')
+  const pairs: string[] = []
   for (const [key, value] of Object.entries(body)) {
     if (value === undefined) continue
-    if (typeof value === 'string') params.append(key, value)
-    else if (typeof value === 'object' && value !== null) params.append(key, JSON.stringify(value))
-    else params.append(key, String(value))
+    const text = typeof value === 'string'
+      ? value
+      : typeof value === 'object' && value !== null
+        ? JSON.stringify(value)
+        : String(value)
+    pairs.push(`${encodeURIComponent(key)}=${encode(text)}`)
   }
-  return params.toString()
+  return pairs.join('&')
 }
 
 /**

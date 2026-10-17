@@ -66,11 +66,20 @@ export type ChainNode = {
   card?: string
   page?: string
   constants: Record<string, string>
+  /** 节点级目标源（跨域节点用，如百度上传的 c5.pcs.baidu.com）；缺省用链级 baseUrl。 */
+  baseUrl?: string
   /**
    * 文件分片：卡字段路径 → 本地文件路径（或 `$inputs.<slot>`）。
    * 仅 multipart/form-data 请求使用；值在运行期读取，不会写进链文件。
    */
   files?: Record<string, string>
+  /**
+   * 文件派生值：卡字段路径 → `md5:<file path>` / `md5-array:<file path>` / `sha1:<file path>`。
+   * 用于上传协议的 block_list 等；运行期计算，不进链文件。
+   */
+  hashes?: Record<string, string>
+  /** 业务成功判据；HTTP 200 但字段不等于期望值时节点失败（如 errno:0）。 */
+  expect?: ChainExpect
   /** FR-1.2 节点级配置预留位（本期只落盘不执行，R-3 消费）。 */
   retry?: number
   timeoutSeconds?: number
@@ -85,6 +94,13 @@ export type ChainNode = {
 
 /** 边 = 绑定声明（FR-1.3）；`suggested: true` 只出现在编译草稿里。 */
 export type ChainEdgeTransform = 'string' | 'json' | 'array-json'
+
+export type ChainExpect = {
+  /** 响应 JSON 里的字段路径（如 body.errno）。 */
+  path: string
+  /** 期望值；与实际值按字符串比较（兼容 number/string）。 */
+  equals: string | number | boolean
+}
 
 export type ChainEdgePick = {
   /** 数组元素里的匹配字段（点路径，相对元素）。 */
@@ -267,6 +283,9 @@ const NodeSchema = Schema.object({
   page: Schema.string(),
   constants: Schema.dict(ConstantValueSchema).default({}),
   files: Schema.dict(Schema.string()),
+  baseUrl: Schema.string(),
+  hashes: Schema.dict(Schema.string()),
+  expect: Schema.any(),
   retry: Schema.number().min(0),
   timeoutSeconds: Schema.number().min(0),
   layout: LayoutSchema,
@@ -456,6 +475,17 @@ function issueOfSchemaFailure(error: unknown): ChainIssue {
 }
 
 /** 把 schema 产物收敛成规范化的 ChainDoc（默认值补齐 + 常量统一成字符串）。 */
+/** 把 YAML 里的 expect 收敛成类型；缺 path/equals 视为没写。 */
+function normalizeExpect(raw: unknown): ChainExpect | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const record = raw as Record<string, unknown>
+  const path = record['path']
+  const equals = record['equals']
+  if (typeof path !== 'string' || path === '' || equals === undefined) return undefined
+  if (typeof equals !== 'string' && typeof equals !== 'number' && typeof equals !== 'boolean') return undefined
+  return { path, equals }
+}
+
 /** 把 YAML 里的 pick 收敛成类型；缺 match/field 视为没写（不静默猜）。 */
 function normalizePick(raw: unknown): ChainEdgePick | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
@@ -508,6 +538,9 @@ function normalizeDoc(raw: unknown): ChainDoc {
       const rest = unknownKeysOf(node)
       delete rest.layout
       delete rest.files
+      delete rest.baseUrl
+      delete rest.hashes
+      delete rest.expect
       const layout = nodeLayoutOf(node.layout)
       return {
         ...rest,
@@ -517,7 +550,10 @@ function normalizeDoc(raw: unknown): ChainDoc {
         constants: Object.fromEntries(
           Object.entries(node.constants ?? {}).map(([key, value]) => [key, String(value)]),
         ),
+        ...(node.baseUrl === undefined || node.baseUrl === '' ? {} : { baseUrl: node.baseUrl }),
         ...(node.files === undefined || Object.keys(node.files).length === 0 ? {} : { files: { ...node.files } }),
+        ...(node.hashes === undefined || Object.keys(node.hashes).length === 0 ? {} : { hashes: { ...node.hashes } }),
+        ...(normalizeExpect(node.expect) === undefined ? {} : { expect: normalizeExpect(node.expect) }),
         ...(node.retry === undefined ? {} : { retry: node.retry }),
         ...(node.timeoutSeconds === undefined ? {} : { timeoutSeconds: node.timeoutSeconds }),
         ...(layout === undefined ? {} : { layout }),

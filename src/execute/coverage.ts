@@ -54,6 +54,11 @@ export function coveredPaths(doc: ChainDoc, node: ChainNode): Set<string> {
     const normalized = normalizePath(key)
     if (normalized.length > 0) covered.add(normalized)
   }
+  // 文件派生值（md5/block_list）同样算已覆盖。
+  for (const key of Object.keys(node.hashes ?? {})) {
+    const normalized = normalizePath(key)
+    if (normalized.length > 0) covered.add(normalized)
+  }
   for (const edge of doc.edges) {
     const to = splitBindingPath(edge.to)
     if (!to || to.nodeId !== node.id) continue

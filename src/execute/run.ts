@@ -30,6 +30,7 @@
  *
  * @module dsh-dataforge/execute/run
  */
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { appendEvent, foldSummary, loadRunEvents, runsRoot, startRunRecord } from '../runs/store.js'
@@ -95,6 +96,10 @@ export type ChainRunErrorCode =
   | 'file-not-found'
   | 'file-field-invalid'
   | 'file-read-failed'
+  | 'hash-file-not-found'
+  | 'hash-failed'
+  | 'hash-spec-invalid'
+  | 'node-business-error'
   | 'pick-not-found'
   | 'node-timeout'
   | 'node-network-error'
@@ -456,8 +461,13 @@ export async function executeChainRun(
   const indegree = new Map<string, number>()
   for (const id of plan.order) indegree.set(id, 0)
   const downstream = new Map<string, string[]>()
+  // 同一对节点可能有多条绑定边（如 path + uploadid）：依赖只算一次，否则入度与下游表不一致。
+  const seenDependencies = new Set<string>()
   for (const pair of dependencyPairs(doc)) {
     if (!idSet.has(pair.from) || !idSet.has(pair.to)) continue
+    const dependencyKey = `${pair.from}\u0000${pair.to}`
+    if (seenDependencies.has(dependencyKey)) continue
+    seenDependencies.add(dependencyKey)
     indegree.set(pair.to, (indegree.get(pair.to) ?? 0) + 1)
     const list = downstream.get(pair.from) ?? []
     if (!list.includes(pair.to)) list.push(pair.to)
@@ -621,10 +631,24 @@ export async function executeChainRun(
       })
       return failAfterStart(bindings, fileParts.code, fileParts.message)
     }
+    const hashes = resolveNodeHashes(node, inputs)
+    if (!hashes.ok) {
+      emit({
+        event: 'step',
+        id: nodeId,
+        action: `${method} ${planNode.urlTemplate}`,
+        status: 'start',
+        data: { card: planNode.cardId },
+      })
+      return failAfterStart(bindings, hashes.code, hashes.message)
+    }
+    for (const [field, value] of Object.entries(hashes.values)) {
+      provided[normalizePath(field)] = value
+    }
     const built = buildRequest({
       node: planNode,
       card,
-      baseUrl: plan.baseUrl,
+      baseUrl: planNode.baseUrl ?? plan.baseUrl,
       provided,
       inputs,
       ...(fileParts.parts.length === 0 ? {} : { fileParts: fileParts.parts }),
@@ -881,6 +905,23 @@ export async function executeChainRun(
       return { kind: 'failed', code: 'response-too-large', message: `节点 ${nodeId}：${result.error}` }
     }
 
+    // 5.5) 业务码校验：HTTP 200 不等于业务成功（如网盘 create 返回 errno:404）。
+    const expectation = checkNodeExpect(node, response.json === undefined ? undefined : { body: response.json })
+    if (!expectation.ok) {
+      result.errorCode = 'node-business-error'
+      result.error = expectation.message
+      results.set(nodeId, result)
+      emit({
+        event: 'step',
+        id: nodeId,
+        status: 'error',
+        elapsed: result.elapsedMs,
+        error: expectation.message,
+        data: { code: 'node-business-error', response: responseDigest },
+      })
+      return { kind: 'failed', code: 'node-business-error', message: `节点 ${nodeId}：${expectation.message}` }
+    }
+
     // 6) 成功：存响应根（供下游绑定求值）→ 报出参 → step(done)。
     roots.set(nodeId, { body: response.json ?? response.bodyText, status: response.status, headers: response.headers })
     // 敏感运行（登录链）不落出参：登录响应里可能有 access_token。
@@ -1055,6 +1096,22 @@ function terminalMessage(
 
 /* ================================================================== 小工具 */
 
+/** 业务码校验：expect 缺省 = 不检查。 */
+function checkNodeExpect(node: ChainNode, json: unknown): { ok: true } | { ok: false; message: string } {
+  if (node.expect === undefined) return { ok: true }
+  if (json === undefined) {
+    return { ok: false, message: `业务码校验失败：响应不是 JSON，取不到 ${node.expect.path}` }
+  }
+  const actual = fieldValueOf(json, node.expect.path)
+  if (actual === undefined) {
+    return { ok: false, message: `业务码校验失败：响应里没有 ${node.expect.path}` }
+  }
+  if (String(actual) !== String(node.expect.equals)) {
+    return { ok: false, message: `业务码不符：${node.expect.path} 期望 ${String(node.expect.equals)}，实际 ${String(actual)}` }
+  }
+  return { ok: true }
+}
+
 /** 从数组出参里按字段值选一个元素，再取字段（缺省取整个元素）。 */
 function applyPick(value: unknown, pick: ChainEdgePick): { ok: true; value: unknown } | { ok: false; message: string } {
   if (!Array.isArray(value)) {
@@ -1084,6 +1141,38 @@ function fieldValueOf(value: unknown, path: string): unknown {
     cursor = (cursor as Record<string, unknown>)[segment]
   }
   return cursor
+}
+
+/** 节点 hashes → 文件派生值（md5 / md5-array / sha1）。 */
+function resolveNodeHashes(
+  node: ChainNode,
+  inputs: Record<string, unknown>,
+): { ok: true; values: Record<string, unknown> } | { ok: false; code: ChainRunErrorCode; message: string } {
+  const values: Record<string, unknown> = {}
+  for (const [field, spec] of Object.entries(node.hashes ?? {})) {
+    const match = /^(md5|md5-array|sha1):(.+)$/.exec(spec)
+    if (match === null) {
+      return { ok: false, code: 'hash-spec-invalid', message: `节点 ${node.id} 的 hash 字段 ${field} 规格非法：${spec}` }
+    }
+    const algorithm = match[1] === 'sha1' ? 'sha1' : 'md5'
+    const rawRef = (match[2] as string).trim()
+    const slot = isInputSlotRef(rawRef) ? rawRef.slice('$inputs.'.length) : undefined
+    const path = slot === undefined ? rawRef : inputs[slot]
+    if (typeof path !== 'string' || path.trim() === '') {
+      return { ok: false, code: 'hash-file-not-found', message: `节点 ${node.id} 的 hash 字段 ${field} 取不到文件路径（${spec}）` }
+    }
+    if (!existsSync(path) || !statSync(path).isFile()) {
+      return { ok: false, code: 'hash-file-not-found', message: `节点 ${node.id} 的 hash 文件不存在：${path}` }
+    }
+    let digest: string
+    try {
+      digest = createHash(algorithm).update(readFileSync(path)).digest('hex')
+    } catch (error) {
+      return { ok: false, code: 'hash-failed', message: `计算 ${algorithm} 失败 ${path}：${error instanceof Error ? error.message : String(error)}` }
+    }
+    values[field] = match[1] === 'md5-array' ? [digest] : digest
+  }
+  return { ok: true, values }
 }
 
 /** 节点 files → 本地文件分片；文件不存在/读失败在发请求前拒。 */

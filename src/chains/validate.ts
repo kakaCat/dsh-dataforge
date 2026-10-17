@@ -135,6 +135,25 @@ export function checkChain(doc: ChainDoc, resolveCard: CardResolver): ChainIssue
     })
   }
 
+  // --- 节点级 baseUrl / hash 规格
+  doc.nodes.forEach((node, index) => {
+    if (node.baseUrl !== undefined) {
+      try {
+        const url = new URL(node.baseUrl)
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+          issues.push({ target: `nodes[${index}]`, code: 'invalid-chain', reason: `节点 ${node.id} 的 baseUrl 必须是 http(s)：${node.baseUrl}` })
+        }
+      } catch {
+        issues.push({ target: `nodes[${index}]`, code: 'invalid-chain', reason: `节点 ${node.id} 的 baseUrl 不是合法 URL：${node.baseUrl}` })
+      }
+    }
+    for (const [field, spec] of Object.entries(node.hashes ?? {})) {
+      if (!/^(md5|md5-array|sha1):.+/.test(spec)) {
+        issues.push({ target: `nodes[${index}]`, code: 'invalid-chain', reason: `节点 ${node.id} 的 hash 字段 ${field} 规格非法：${spec}（只支持 md5:/md5-array:/sha1: + 文件路径）` })
+      }
+    }
+  })
+
   // --- 链级入参槽位：名字唯一、类型在词表内
   const declaredSlots = new Set<string>()
   doc.inputs.forEach((input, index) => {
@@ -168,6 +187,18 @@ export function checkChain(doc: ChainDoc, resolveCard: CardResolver): ChainIssue
           target,
           code: 'unknown-input-slot',
           reason: `节点 ${node.id} 的常量 ${key} 引用了未声明的槽位 $inputs.${slot}`,
+        })
+      }
+    }
+    for (const [key, value] of [...Object.entries(node.files ?? {}), ...Object.entries(node.hashes ?? {})]) {
+      const slot = inputSlotNameOf(value.replace(/^(md5|md5-array|sha1):/, ''))
+      if (slot === undefined) continue
+      referencedSlots.add(slot)
+      if (!declaredSlots.has(slot)) {
+        issues.push({
+          target,
+          code: 'unknown-input-slot',
+          reason: `节点 ${node.id} 的文件/hash 字段 ${key} 引用了未声明的槽位 $inputs.${slot}`,
         })
       }
     }

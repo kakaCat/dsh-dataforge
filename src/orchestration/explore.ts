@@ -110,13 +110,11 @@ export async function probeForTool(
   }
 
   const base = resolveChainBaseUrl(doc, cards, args.baseUrl)
-  if (!base.ok) {
-    return blocked('base-url-unresolved', base.message)
-  }
-  if (base.baseUrl === undefined) {
+  const baseUrl = node.baseUrl ?? (base.ok ? base.baseUrl : undefined)
+  if (baseUrl === undefined) {
     return blocked(
       'base-url-unresolved',
-      '推不出目标站点源：显式传 baseUrl（卡的来源页面跨多个 origin 时只能人来定）',
+      base.ok ? '推不出目标站点源：显式传 baseUrl（卡的来源页面跨多个 origin 时只能人来定）' : base.message,
     )
   }
 
@@ -127,7 +125,7 @@ export async function probeForTool(
     card,
     ...(args.values === undefined ? {} : { values: args.values }),
     ...(args.inputs === undefined ? {} : { chainInputs: args.inputs }),
-    baseUrl: base.baseUrl,
+    baseUrl,
     ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
     ...(args.retry === undefined ? {} : { retry: args.retry }),
     ...(args.explorationId === undefined ? {} : { explorationId: args.explorationId }),
