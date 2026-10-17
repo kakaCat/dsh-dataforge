@@ -905,7 +905,13 @@ function renderChainRun(value: ChainRunToolValue): string {
   const lines = nodes.map((node) => {
     const http = node.httpStatus === undefined ? '' : ` HTTP ${node.httpStatus}`
     const error = node.errorCode === undefined ? '' : ` ${node.errorCode}：${node.error ?? ''}`
-    return `- ${node.nodeId}：${node.status}${http}（${node.elapsedMs}ms）${error}`
+    const relogin =
+      node.relogin === undefined
+        ? ''
+        : node.relogin.success
+          ? `（已换票重放${node.relogin.runId === undefined ? '' : `，登录链 ${node.relogin.runId}`}）`
+          : `（换票失败 ${node.relogin.code ?? 'relogin-failed'}）`
+    return `- ${node.nodeId}：${node.status}${http}（${node.elapsedMs}ms）${error}${relogin}`
   })
   const degraded = value.degradedNotice === undefined ? '' : `\n⚠ ${value.degradedNotice}`
   return [
@@ -940,7 +946,9 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
 
 运行期失败（binding-* / node-* / response-too-large / cancelled）不自动重试：链已中止，错误进运行记录，修好后用新 run 重跑（绝不自动重放写请求）。
 
-鉴权：卡声明 cookie-session 时，引擎会按卡的采集来源自动注入 cookie；token 型一期未采集，不猜 Authorization。401 回执区分「未注入可用凭证」与「已注入但仍 401」，后者可能需要重新登录/采集——自动换票尚未实现。
+鉴权：卡声明 cookie-session 时，引擎会按卡的采集来源自动注入 cookie；token 型一期未采集，不猜 Authorization。401 回执区分「未注入可用凭证」与「已注入但仍 401」。
+
+自动换票：传 relogin（一条普通 interface-chain）后，401 会执行登录链、收割 set-cookie、单飞换票并重放当前节点一次；重放仍 401 就中止并报「换票后仍 401」。登录链的 inputs 只进内存，不写运行记录。
 
 幂等性：**不幂等**。同一参数重复调用就是新 run、新请求。长链走宿主后台 job，用 dataforge_status 轮询、job_kill 取消。`,
     parameters: {
@@ -956,6 +964,23 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
       concurrency: { type: 'number', description: '运行期并发上限（缺省 4，硬上限 16）' },
       dry_run: { type: 'boolean', description: '只编译计划并落留痕，永不发请求' },
       confirm: { type: 'boolean', description: '闸2：用户确认后才允许 true；缺省 = 只出计划卡' },
+      relogin: {
+        type: 'object',
+        additionalProperties: false,
+        description:
+          '可选：401 时自动执行的登录链（普通 interface-chain）。inputs 是登录链槽位值（账号/密码等），只在内存里过手，不写运行记录；不传 = 不换票。',
+        properties: {
+          site: { type: 'string', required: true, description: '登录链的 meta.site' },
+          flow: { type: 'string', required: true, description: '登录链的 meta.flow' },
+          version: { type: 'number', description: '登录链版本；缺省最新' },
+          inputs: {
+            type: 'object',
+            additionalProperties: true,
+            description: '登录链槽位运行值（不落盘、不写事件）',
+          },
+          baseUrl: { type: 'string', description: '登录链目标源；缺省按登录链卡的来源 origin 推断' },
+        },
+      },
     },
     output: {
       schema: {
@@ -965,7 +990,7 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
           ok: { type: 'boolean' },
           accepted: { type: 'boolean' },
           gate: { type: 'string', description: 'started / confirm-required / blocked' },
-          code: { type: 'string', description: 'missing-params / chain-not-found / invalid-chain / base-url-unresolved / inputs-invalid / not-executable / cycle / execution-disabled / execution-unavailable' },
+          code: { type: 'string', description: 'missing-params / chain-not-found / invalid-chain / base-url-unresolved / inputs-invalid / not-executable / cycle / execution-disabled / execution-unavailable / relogin-unavailable / relogin-failed / relogin-cycle' },
           message: { type: 'string' },
           kind: { type: 'string', description: 'background / foreground / dry-run' },
           jobId: { type: 'string' },
@@ -1037,6 +1062,18 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
                 elapsedMs: { type: 'number' },
                 errorCode: { type: 'string' },
                 error: { type: 'string' },
+                relogin: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    attempted: { type: 'boolean' },
+                    success: { type: 'boolean' },
+                    code: { type: 'string' },
+                    message: { type: 'string' },
+                    runId: { type: 'string' },
+                    cookieNames: { type: 'array', items: { type: 'string' } },
+                  },
+                },
               },
             },
           },
@@ -1056,6 +1093,7 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
         ...(args.concurrency === undefined ? {} : { concurrency: args.concurrency }),
         ...(args.dry_run === undefined ? {} : { dryRun: args.dry_run }),
         ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
+        ...(args.relogin === undefined ? {} : { relogin: args.relogin }),
       }))
     },
   })

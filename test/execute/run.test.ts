@@ -25,6 +25,7 @@ import {
 } from '../../src/execute/run.js'
 import { foldSummary, loadRunEvents, readRunRecord } from '../../src/runs/store.js'
 import type { CredentialProvider } from '../../src/execute/credentials.js'
+import type { ReloginRunner, ReloginSpec } from '../../src/execute/run.js'
 
 /* ================================================================== 假服务端 */
 
@@ -54,6 +55,17 @@ beforeAll(async () => {
       if (url.startsWith('/api/auth-only')) {
         res.writeHead(401, { 'content-type': 'application/json' })
         res.end('{"error":"login required"}')
+        return
+      }
+      if (url.startsWith('/api/protected')) {
+        const cookie = req.headers.cookie ?? ''
+        if (cookie.includes('sid=fresh')) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end('{"ok":true}')
+        } else {
+          res.writeHead(401, { 'content-type': 'application/json' })
+          res.end('{"error":"login required"}')
+        }
         return
       }
       if (url.startsWith('/api/materials/detail')) {
@@ -149,6 +161,7 @@ const bigCard = cardOf('card_big', 'GET', '/api/big', [], [{ path: 'body.items[*
 /** R-4 M1：声明了 cookie-session 的卡（卡文件本身仍零凭证）。 */
 const cookieCard: InterfaceCardDoc = { ...cardOf('card_cookie', 'GET', '/api/cookie', []), auth: 'cookie-session' }
 const authOnlyCard: InterfaceCardDoc = { ...cardOf('card_auth_only', 'GET', '/api/auth-only', []), auth: 'cookie-session' }
+const protectedCard: InterfaceCardDoc = { ...cardOf('card_protected', 'GET', '/api/protected', []), auth: 'cookie-session' }
 
 /** 测试用 provider：只回一份固定 cookie，摘要里不含值。 */
 function providerOf(cookie: string): CredentialProvider {
@@ -454,7 +467,7 @@ describe('凭证注入：cookie 只进出站请求，不进入任何留痕', () 
     const node = result.nodes.find((candidate) => candidate.nodeId === 'auth-node')
     expect(node?.errorCode).toBe('node-auth-required')
     expect(node?.error).toContain('已注入 1 个 cookie')
-    expect(node?.error).toContain('R-4 M2')
+    expect(node?.error).toContain('relogin 登录链自动换票')
     expect(node?.credentials?.status).toBe('applied')
   })
 
@@ -479,6 +492,178 @@ describe('凭证注入：cookie 只进出站请求，不进入任何留痕', () 
     expect(node?.errorCode).toBe('node-auth-required')
     expect(node?.error).toContain('没有注入可用凭证')
     expect(node?.error).toContain('没有匹配')
+  })
+})
+
+/* ================================================================== 自动换票（R-4 M2） */
+
+describe('自动换票：401 → 登录链 → 新 cookie → 重放一次', () => {
+  const specOf = (overrides: Partial<ReloginSpec> = {}): ReloginSpec => ({
+    site: '登录站点',
+    flow: '登录',
+    inputs: { user: 'u', pass: 'p' },
+    ...overrides,
+  })
+
+  it('换票成功后重放当前节点：服务端先见旧 cookie、再见新 cookie', async () => {
+    seen = []
+    const calls: ReloginSpec[] = []
+    const runner: ReloginRunner = async (spec) => {
+      calls.push(spec)
+      return { ok: true, cookieHeader: 'sid=fresh', cookieNames: ['sid'], runId: 'chain-login-1' }
+    }
+    const deps = depsOf()
+    const cards = cardsOf(protectedCard)
+    const doc = chainOf([{ id: 'protected-node', card: 'card_protected', constants: {} }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, {
+      doc,
+      cards,
+      plan,
+      baseUrl: base,
+      credentials: providerOf('sid=stale'),
+      relogin: { spec: specOf(), run: runner },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('completed')
+    expect(calls).toHaveLength(1)
+    expect(seen.map((entry) => entry.headers.cookie)).toEqual(['sid=stale', 'sid=fresh'])
+    const node = result.nodes[0]
+    expect(node?.attempts).toBe(2)
+    expect(node?.relogin).toMatchObject({ attempted: true, success: true, runId: 'chain-login-1', cookieNames: ['sid'] })
+
+    const events = loadRunEvents(deps.dataRoot, result.runId) ?? []
+    const text = JSON.stringify(events)
+    expect(text).not.toContain('sid=fresh')
+    expect(text).not.toContain('sid=stale')
+  })
+
+  it('并发节点同时 401：登录链只执行一次，两个节点都重放', async () => {
+    seen = []
+    let calls = 0
+    const runner: ReloginRunner = async () => {
+      calls += 1
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      return { ok: true, cookieHeader: 'sid=fresh', cookieNames: ['sid'] }
+    }
+    const deps = depsOf()
+    const cards = cardsOf(protectedCard)
+    const doc = chainOf([
+      { id: 'a-node', card: 'card_protected', constants: {} },
+      { id: 'b-node', card: 'card_protected', constants: {} },
+    ])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, {
+      doc,
+      cards,
+      plan,
+      baseUrl: base,
+      concurrency: 2,
+      credentials: providerOf('sid=stale'),
+      relogin: { spec: specOf(), run: runner },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('completed')
+    expect(calls).toBe(1)
+    expect(result.nodes.every((node) => node.status === 'done')).toBe(true)
+    // 至少有一次重放带上了新 cookie；另一个节点可能直接吃到换票后的 runtime cookie。
+    expect(seen.some((entry) => entry.headers.cookie === 'sid=fresh')).toBe(true)
+  })
+
+  it('登录链失败 → 中止主链，错误码 relogin-failed 且明确「需人工重新登录」', async () => {
+    seen = []
+    const runner: ReloginRunner = async () => ({
+      ok: false,
+      code: 'relogin-failed',
+      message: '账号被锁',
+      runId: 'chain-login-failed',
+    })
+    const deps = depsOf()
+    const cards = cardsOf(protectedCard)
+    const doc = chainOf([{ id: 'protected-node', card: 'card_protected', constants: {} }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, {
+      doc,
+      cards,
+      plan,
+      baseUrl: base,
+      credentials: providerOf('sid=stale'),
+      relogin: { spec: specOf(), run: runner },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.summary.status).toBe('failed')
+    expect(result.failedNode).toBe('protected-node')
+    const node = result.nodes[0]
+    expect(node?.errorCode).toBe('relogin-failed')
+    expect(node?.error).toContain('需人工重新登录')
+    expect(node?.relogin).toMatchObject({ attempted: true, success: false, code: 'relogin-failed', runId: 'chain-login-failed' })
+    expect(seen).toHaveLength(1)
+  })
+
+  it('换票成功但重放仍 401 → node-auth-required，消息说清「已换票并重放」', async () => {
+    seen = []
+    const runner: ReloginRunner = async () => ({ ok: true, cookieHeader: 'sid=fresh', cookieNames: ['sid'] })
+    const deps = depsOf()
+    const cards = cardsOf(authOnlyCard)
+    const doc = chainOf([{ id: 'auth-node', card: 'card_auth_only', constants: {} }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, {
+      doc,
+      cards,
+      plan,
+      baseUrl: base,
+      credentials: providerOf('sid=stale'),
+      relogin: { spec: specOf(), run: runner },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const node = result.nodes[0]
+    expect(node?.errorCode).toBe('node-auth-required')
+    expect(node?.error).toContain('已自动换票')
+    expect(node?.error).toContain('重放')
+    expect(node?.relogin?.success).toBe(true)
+    expect(seen).toHaveLength(2)
+  })
+
+  it('登录链 = 主链自身 → relogin-cycle，登录链一次都不执行', async () => {
+    seen = []
+    let calls = 0
+    const runner: ReloginRunner = async () => {
+      calls += 1
+      return { ok: true, cookieHeader: 'sid=fresh', cookieNames: ['sid'] }
+    }
+    const deps = depsOf()
+    const cards = cardsOf(authOnlyCard)
+    const doc = chainOf([{ id: 'auth-node', card: 'card_auth_only', constants: {} }])
+    const plan = planOf(doc, cards)
+
+    const result = await runChain(deps, {
+      doc,
+      cards,
+      plan,
+      baseUrl: base,
+      credentials: providerOf('sid=stale'),
+      relogin: { spec: specOf({ site: '测试站点', flow: '采购下单' }), run: runner },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const node = result.nodes[0]
+    expect(node?.errorCode).toBe('relogin-cycle')
+    expect(node?.error).toContain('不能是当前链自身')
+    expect(calls).toBe(0)
+    expect(seen).toHaveLength(1)
   })
 })
 

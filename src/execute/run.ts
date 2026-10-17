@@ -46,7 +46,12 @@ import type { StaticGap } from './coverage.js'
 import { normalizePath } from './coverage.js'
 import { httpRequest, redactHeaders } from './http.js'
 import type { CredentialApplication, CredentialProvider } from './credentials.js'
-import { mergeCredentialHeaders } from './credentials.js'
+import {
+  cookieHeaderIn,
+  mergeCookieValues,
+  mergeCredentialHeaders,
+  withCookieHeader,
+} from './credentials.js'
 
 /* ================================================================== 常量 */
 
@@ -91,6 +96,10 @@ export type ChainRunErrorCode =
   | 'node-auth-required'
   | 'response-too-large'
   | 'cancelled'
+  // ── R-4 M2 换票 ──
+  | 'relogin-unavailable'
+  | 'relogin-failed'
+  | 'relogin-cycle'
 
 /** 请求摘要：进运行记录时头名命中脱敏集合即打码，正文只留前 4 KiB。 */
 export type RequestDigest = {
@@ -138,6 +147,46 @@ export type NodeResult = {
   truncated?: boolean
   /** R-4 M1：这一发请求的凭证摘要（只含名字/域/来源，不含值）。 */
   credentials?: CredentialApplication
+  /** R-4 M2：这一节点是否触发了换票、结果如何（不含值）。 */
+  relogin?: ReloginRecord
+}
+
+/** 换票运行参数：登录链 + 它自己的槽位值（账号/密码不落盘）。 */
+export type ReloginSpec = {
+  site: string
+  flow: string
+  version?: number
+  /** 登录链槽位运行值；只进内存，不写 `run.json.params`。 */
+  inputs?: Record<string, unknown>
+  /** 登录链目标源；缺省按登录链卡的来源 origin 推断。 */
+  baseUrl?: string
+}
+
+export type ReloginOutcome =
+  | { ok: true; cookieHeader: string; cookieNames: string[]; runId?: string }
+  | {
+      ok: false
+      code: 'relogin-failed' | 'relogin-unavailable' | 'relogin-cycle'
+      message: string
+      runId?: string
+    }
+
+/**
+ * 换票执行器：由 application 层注入（execute 不认识 chain store / workspace）。
+ *
+ * 传进来的 `signal` 是主运行取消信号；登录链必须跟着取消，不能留一个后台登录
+ * 在用户按下 job_kill 之后继续跑。
+ */
+export type ReloginRunner = (spec: ReloginSpec, signal: AbortSignal) => Promise<ReloginOutcome>
+
+/** 一次换票的可审计摘要：只留结果/runId/cookie 名，不含值。 */
+export type ReloginRecord = {
+  attempted: true
+  success: boolean
+  code?: ChainRunErrorCode
+  message?: string
+  runId?: string
+  cookieNames?: string[]
 }
 
 /** `run.json` 的内容（写入一次，先于第一个请求；崩溃时至少留下计划与目标）。 */
@@ -228,6 +277,23 @@ export type RunChainInput = {
    * 提供者自身不抛异常，降级通过 `application.status` 表达。
    */
   credentials?: CredentialProvider
+  /**
+   * R-4 M2：401 时执行的登录链。缺席 = 不换票（M1 行为）。
+   * 自环（site/flow 与主链相同）由执行器直接拒成 `relogin-cycle`。
+   */
+  relogin?: { spec: ReloginSpec; run: ReloginRunner }
+  /**
+   * 敏感运行（登录链专用）：请求/响应正文摘要写 `[已脱敏]`，emitted/绑定预览不落值。
+   * 只影响留痕，不影响真实请求。
+   */
+  sensitive?: boolean
+  /** 敏感运行：`run.json.params` 的键保留、值写成 `***`。 */
+  redactParams?: boolean
+  /**
+   * 逐响应回调原始 `Set-Cookie`（R-4 M2 登录链专用）。
+   * 这些值只进内存 jar，**不得**写进事件或 NodeResult。
+   */
+  onSetCookies?: (setCookies: string[], nodeId: string) => void
 }
 
 /* ================================================================== 能力探测 */
@@ -292,7 +358,11 @@ export function prepareChainRun(deps: ChainRunDeps, input: RunChainInput): Prepa
     flow: input.doc.meta.flow,
     flowName: input.doc.meta.flow,
     chain,
-    params: { ...(input.inputs ?? {}) },
+    // 敏感运行（登录链）只留槽位名、不留值：账号/密码不能进 run.json。
+    params:
+      input.redactParams === true
+        ? Object.fromEntries(Object.keys(input.inputs ?? {}).map((key) => [key, '***']))
+        : { ...(input.inputs ?? {}) },
     baseUrl: input.plan.baseUrl,
     dryRun: input.dryRun === true,
     planned: [...input.plan.order],
@@ -394,6 +464,46 @@ export async function executeChainRun(
   if (input.signal?.aborted === true) controller.abort()
   else input.signal?.addEventListener('abort', onAbort, { once: true })
 
+  /* ── R-4 M2：换票单飞 + 运行内 cookie jar ── */
+  let runtimeCookieHeader: string | undefined
+  let reloginTask: Promise<ReloginOutcome> | undefined
+
+  const ensureRelogin = (): Promise<ReloginOutcome> => {
+    if (reloginTask !== undefined) return reloginTask
+    const spec = input.relogin?.spec
+    if (spec === undefined) {
+      reloginTask = Promise.resolve({
+        ok: false,
+        code: 'relogin-unavailable',
+        message: '未配置登录链（relogin 运行参数缺席）',
+      })
+      return reloginTask
+    }
+    // 自环保护：登录链 = 主链会把「401 → 再跑同一条链 → 再 401」变成递归。
+    if (spec.site === doc.meta.site && spec.flow === doc.meta.flow) {
+      reloginTask = Promise.resolve({
+        ok: false,
+        code: 'relogin-cycle',
+        message: '登录链不能是当前链自身（会无限递归）；请指定一条真正的登录链路',
+      })
+      return reloginTask
+    }
+    reloginTask = (async (): Promise<ReloginOutcome> => {
+      try {
+        const outcome = await (input.relogin as { run: ReloginRunner }).run(spec, controller.signal)
+        if (outcome.ok) runtimeCookieHeader = mergeCookieValues(runtimeCookieHeader, outcome.cookieHeader)
+        return outcome
+      } catch (error) {
+        return {
+          ok: false,
+          code: 'relogin-failed',
+          message: `登录链执行抛异常：${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+    })()
+    return reloginTask
+  }
+
   const roots = new Map<string, BindingRoot>()
   const results = new Map<string, NodeResult>()
   let failure: { nodeId: string; code: ChainRunErrorCode; message: string } | undefined
@@ -494,18 +604,32 @@ export async function executeChainRun(
       result.credentials = credentialApplication
     }
 
+    // 换票成功后的新 cookie 覆盖旧值（同一运行内后续节点也吃这一份）。
+    if (runtimeCookieHeader !== undefined) {
+      const merged = mergeCookieValues(cookieHeaderIn(request.headers), runtimeCookieHeader)
+      request = { ...request, headers: withCookieHeader(request.headers, merged) }
+    }
+
     // 凭证值只用于两件事：发请求、给留痕做脱敏。绝不写进事件/摘要/回执。
-    const secrets = credentialApplication?.status === 'applied' ? secretValuesOf(request.headers) : []
+    let secrets = credentialApplication?.status === 'applied' ? secretValuesOf(request.headers) : []
+    const sensitive = input.sensitive === true
     if (secrets.length > 0) {
       for (const binding of bindings) {
         if (binding.valuePreview !== undefined) binding.valuePreview = redactSecrets(binding.valuePreview, secrets)
+      }
+    }
+    if (sensitive) {
+      for (const binding of bindings) {
+        if (binding.valuePreview !== undefined) binding.valuePreview = '[已脱敏]'
       }
     }
     const requestDigest: RequestDigest = {
       method: request.method,
       url: request.url,
       headers: redactHeaders(request.headers),
-      ...(request.body === undefined ? {} : { bodyPreview: previewText(redactSecrets(request.body, secrets)) }),
+      ...(request.body === undefined
+        ? {}
+        : { bodyPreview: sensitive ? '[已脱敏]' : previewText(redactSecrets(request.body, secrets)) }),
     }
     result.requestDigest = requestDigest
     result.url = request.url
@@ -526,17 +650,96 @@ export async function executeChainRun(
     })
     input.onProgress?.(`▶ ${nodeId}：${request.method} ${request.url}`)
 
-    const outcome = await httpRequest({
-      method: request.method,
-      url: request.url,
-      headers: request.headers,
-      ...(request.body === undefined ? {} : { body: request.body }),
-      timeoutMs: timeoutOf(node, fallbackTimeoutMs),
-      retry: retryOf(node, method),
-      limitBytes,
-      signal: controller.signal,
-    })
+    const sendRequest = async (target: {
+      method: string
+      url: string
+      headers: Record<string, string>
+      body?: string
+    }) =>
+      httpRequest({
+        method: target.method,
+        url: target.url,
+        headers: target.headers,
+        ...(target.body === undefined ? {} : { body: target.body }),
+        timeoutMs: timeoutOf(node, fallbackTimeoutMs),
+        retry: retryOf(node, method),
+        limitBytes,
+        signal: controller.signal,
+      })
+
+    let outcome = await sendRequest(request)
     result.attempts = outcome.ok ? outcome.response.attempts : outcome.attempts
+
+    // R-4 M2：401 → 换票（单飞）→ 用新 cookie 重放当前节点一次。
+    if (outcome.ok && outcome.response.status === 401 && input.relogin !== undefined) {
+      const firstResponse = outcome.response
+      const relogin = await ensureRelogin()
+      result.relogin = relogin.ok
+        ? {
+            attempted: true,
+            success: true,
+            ...(relogin.runId === undefined ? {} : { runId: relogin.runId }),
+            cookieNames: relogin.cookieNames,
+          }
+        : {
+            attempted: true,
+            success: false,
+            code: relogin.code,
+            message: relogin.message,
+            ...(relogin.runId === undefined ? {} : { runId: relogin.runId }),
+          }
+
+      if (!relogin.ok) {
+        // 取消优先：登录链被 job_kill 打断时，不能报成「登录失败」。
+        if (controller.signal.aborted) {
+          result.status = 'cancelled'
+          result.errorCode = 'cancelled'
+          result.error = '已取消：换票过程中被中止'
+          result.elapsedMs = Date.now() - startedAt
+          results.set(nodeId, result)
+          emit({ event: 'step', id: nodeId, status: 'error', elapsed: result.elapsedMs, error: result.error, data: { code: 'cancelled', relogin: result.relogin } })
+          return { kind: 'cancelled', message: result.error }
+        }
+        const firstDigest: ResponseDigest = {
+          status: firstResponse.status,
+          bytes: firstResponse.bytes,
+          truncated: firstResponse.truncated,
+          bodyPreview: sensitive ? '[已脱敏]' : previewText(redactSecrets(firstResponse.bodyText, secrets)),
+        }
+        result.status = 'error'
+        result.httpStatus = firstResponse.status
+        result.responseDigest = firstDigest
+        result.errorCode = relogin.code
+        result.error = `HTTP 401 后自动换票失败（${relogin.code}）：${relogin.message}；需人工重新登录并更新凭证`
+        result.elapsedMs = Date.now() - startedAt
+        results.set(nodeId, result)
+        emit({
+          event: 'step',
+          id: nodeId,
+          status: 'error',
+          elapsed: result.elapsedMs,
+          error: result.error,
+          data: { code: relogin.code, response: firstDigest, relogin: result.relogin },
+        })
+        return { kind: 'failed', code: relogin.code, message: `节点 ${nodeId}：${result.error}` }
+      }
+
+      // 新 cookie 覆盖旧值，重放一次（只一次；重放仍 401 走普通鉴权诊断）。
+      const freshCookie = mergeCookieValues(cookieHeaderIn(request.headers), runtimeCookieHeader ?? relogin.cookieHeader)
+      request = { ...request, headers: withCookieHeader(request.headers, freshCookie) }
+      secrets = secretValuesOf(request.headers)
+      result.requestDigest = {
+        method: request.method,
+        url: request.url,
+        headers: redactHeaders(request.headers),
+        ...(request.body === undefined
+          ? {}
+          : { bodyPreview: sensitive ? '[已脱敏]' : previewText(redactSecrets(request.body, secrets)) }),
+      }
+      result.url = request.url
+      outcome = await sendRequest(request)
+      result.attempts += outcome.ok ? outcome.response.attempts : outcome.attempts
+    }
 
     if (!outcome.ok) {
       // 取消优先于其它分类：用户按下取消后，超时/网络错的叙述都不再重要。
@@ -571,12 +774,14 @@ export async function executeChainRun(
     }
 
     const response = outcome.response
+    // 登录链（敏感运行）专用：原始 Set-Cookie 只进内存 jar，不进摘要/事件。
+    input.onSetCookies?.(response.setCookies ?? [], nodeId)
     const responseDigest: ResponseDigest = {
       status: response.status,
       bytes: response.bytes,
       truncated: response.truncated,
       // 服务端可能把 cookie/token 回显在错误体里：留痕前按已知凭证值再脱敏一次。
-      bodyPreview: previewText(redactSecrets(response.bodyText, secrets)),
+      bodyPreview: sensitive ? '[已脱敏]' : previewText(redactSecrets(response.bodyText, secrets)),
     }
     result.httpStatus = response.status
     result.responseDigest = responseDigest
@@ -592,12 +797,23 @@ export async function executeChainRun(
             : 'node-http-error'
           : 'node-http-error'
       const hint = code === 'node-auth-required'
-        ? authHint(card, response.status, credentialApplication)
+        ? authHint(card, response.status, credentialApplication, result.relogin)
         : `HTTP ${response.status}`
       result.errorCode = code
       result.error = hint
       results.set(nodeId, result)
-      emit({ event: 'step', id: nodeId, status: 'error', elapsed: result.elapsedMs, error: hint, data: { code, response: responseDigest } })
+      emit({
+        event: 'step',
+        id: nodeId,
+        status: 'error',
+        elapsed: result.elapsedMs,
+        error: hint,
+        data: {
+          code,
+          response: responseDigest,
+          ...(result.relogin === undefined ? {} : { relogin: result.relogin }),
+        },
+      })
       return { kind: 'failed', code, message: `节点 ${nodeId}：${hint}` }
     }
 
@@ -620,10 +836,10 @@ export async function executeChainRun(
 
     // 6) 成功：存响应根（供下游绑定求值）→ 报出参 → step(done)。
     roots.set(nodeId, { body: response.json ?? response.bodyText, status: response.status, headers: response.headers })
-    const emitted = redactRecord(
-      collectEmitted(doc, cards, nodeId, roots.get(nodeId) as BindingRoot),
-      secrets,
-    )
+    // 敏感运行（登录链）不落出参：登录响应里可能有 access_token。
+    const emitted = sensitive
+      ? {}
+      : redactRecord(collectEmitted(doc, cards, nodeId, roots.get(nodeId) as BindingRoot), secrets)
     result.status = 'done'
     results.set(nodeId, result)
     emit({
@@ -631,7 +847,11 @@ export async function executeChainRun(
       id: nodeId,
       status: 'done',
       elapsed: result.elapsedMs,
-      data: { response: responseDigest, emitted },
+      data: {
+        response: responseDigest,
+        emitted,
+        ...(result.relogin === undefined ? {} : { relogin: result.relogin }),
+      },
     })
     input.onProgress?.(`✔ ${nodeId}：HTTP ${response.status}，${result.elapsedMs}ms`)
     return { kind: 'done' }
@@ -761,6 +981,7 @@ function businessDataOf(
       elapsedMs: node.elapsedMs,
       ...(node.httpStatus === undefined ? {} : { httpStatus: node.httpStatus }),
       ...(node.errorCode === undefined ? {} : { errorCode: node.errorCode }),
+      ...(node.relogin === undefined ? {} : { relogin: node.relogin }),
     })),
   }
 }
@@ -855,9 +1076,16 @@ function authHint(
   card: InterfaceCardDoc,
   status: number,
   application: CredentialApplication | undefined,
+  relogin: ReloginRecord | undefined,
 ): string {
+  if (relogin?.success === true) {
+    return `HTTP ${status}：已自动换票（登录链 ${relogin.runId ?? '本次运行'}）并重放一次，仍被拒；登录态或账号权限仍有问题。请检查登录链/账号权限后重跑，不要原样重试`
+  }
+  if (relogin?.attempted === true && relogin.success === false) {
+    return `HTTP ${status}：自动换票失败（${relogin.code ?? 'relogin-failed'}）：${relogin.message ?? '未知原因'}；需人工重新登录并更新凭证`
+  }
   if (application?.status === 'applied') {
-    return `HTTP ${status}：已注入 ${application.names.length} 个 cookie（${application.names.join('、')}）但仍被拒；凭证可能过期。自动重登换票属 R-4 M2，尚未实现——请重新采集/登录后重跑`
+    return `HTTP ${status}：已注入 ${application.names.length} 个 cookie（${application.names.join('、')}）但仍被拒；凭证可能过期。可传 relogin 登录链自动换票，或重新采集/登录后重跑`
   }
   const reason =
     application === undefined
@@ -867,7 +1095,7 @@ function authHint(
         : application.status === 'unsupported'
           ? (application.reason ?? 'token 型凭证未采集')
           : (application.reason ?? '没有可用凭证')
-  return `HTTP ${status}：该卡声明了鉴权（${String(card.auth)}），但没有注入可用凭证（${reason}）；引擎不换票、不重试`
+  return `HTTP ${status}：该卡声明了鉴权（${String(card.auth)}），但没有注入可用凭证（${reason}）；本次未执行自动换票`
 }
 
 /** 节点级超时优先（R-1 预留位），否则用全局缺省。 */

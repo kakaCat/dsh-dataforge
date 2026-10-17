@@ -40,6 +40,12 @@ export type HttpResult = {
   status: number
   /** 响应头（名已小写，便于查 `content-type`）。 */
   headers: Record<string, string>
+  /**
+   * 原始 `Set-Cookie` 行（多条各一行，没有被 `, ` 合并）。
+   *
+   * 只给换票链路消费（R-4 M2）；**不进运行记录**——响应摘要只投影状态/长度/正文预览。
+   */
+  setCookies?: string[]
   bodyText: string
   /** `bodyText` 能解析成 JSON 时给解析值；否则缺省。 */
   json?: unknown
@@ -92,6 +98,23 @@ export function redactHeaders(headers: Record<string, string> | undefined): Reco
     out[name] = SECRET_HEADERS.has(name.toLowerCase()) ? '***' : value
   }
   return out
+}
+
+/**
+ * 原始 `Set-Cookie` 行：优先用 `getSetCookie()`（Node 22 / undici），
+ * 老实现退回单条 `get('set-cookie')`。绝不把多条用 `, ` 拼起来再解析。
+ */
+function setCookiesOf(headers: Headers): string[] {
+  const getter = (headers as unknown as { getSetCookie?: () => string[] }).getSetCookie
+  if (typeof getter === 'function') {
+    try {
+      return getter.call(headers)
+    } catch {
+      return []
+    }
+  }
+  const merged = headers.get('set-cookie')
+  return merged === null ? [] : [merged]
 }
 
 /** 小写化响应头（同名多值按 `, ` 合并）。 */
@@ -290,11 +313,13 @@ export async function httpRequest(spec: HttpRequestSpec): Promise<HttpOutcome> {
       if (!isRetryableStatus(response.status) || attempt === retry) {
         const read = await readBodyLimited(response, limitBytes)
         const json = parseJson(read.text)
+        const setCookies = setCookiesOf(response.headers)
         return {
           ok: true,
           response: {
             status: response.status,
             headers: normalizeHeaders(response.headers),
+            ...(setCookies.length === 0 ? {} : { setCookies }),
             bodyText: read.text,
             ...(json === undefined ? {} : { json }),
             bytes: read.bytes,

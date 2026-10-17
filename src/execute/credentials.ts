@@ -211,3 +211,90 @@ export function appliedCredentialApplication(
     expired: selection.expired.length,
   }
 }
+
+/* ------------------------------------------------------------------ M2 换票 */
+
+/** 一条 `Set-Cookie` 解析出的名字/值（属性丢弃）。 */
+export type SetCookiePair = { name: string; value: string }
+
+/**
+ * 解析 `Set-Cookie`：只取 `name=value`，属性（Path/Domain/HttpOnly…）不进内存 jar。
+ *
+ * M2 的 jar 只服务「同一个主链目标站点」的重放，不需要跨域/跨路径选择；
+ * 真正的域/路径匹配仍由采集期 provider 负责。属性丢掉是刻意的简化，写在设计里。
+ */
+export function setCookiePairsOf(setCookies: string[]): SetCookiePair[] {
+  const pairs: SetCookiePair[] = []
+  for (const raw of setCookies) {
+    const first = raw.split(';')[0]?.trim() ?? ''
+    const at = first.indexOf('=')
+    if (at <= 0) continue
+    const name = first.slice(0, at).trim()
+    const value = first.slice(at + 1).trim()
+    if (name === '' || value === '') continue
+    pairs.push({ name, value })
+  }
+  return pairs
+}
+
+/** `Set-Cookie[]` → 一个可发的 `cookie` 头值；没有可用 cookie 返回 `undefined`。 */
+export function cookieHeaderFromSetCookies(setCookies: string[]): string | undefined {
+  const pairs = setCookiePairsOf(setCookies)
+  if (pairs.length === 0) return undefined
+  return pairs.map((pair) => `${pair.name}=${pair.value}`).join('; ')
+}
+
+/** cookie 头值里的名字（去重、保序）；用于事件摘要，不含值。 */
+export function cookieNamesOf(header: string | undefined): string[] {
+  if (header === undefined || header === '') return []
+  const names: string[] = []
+  for (const part of header.split(';')) {
+    const name = part.trim().split('=')[0]?.trim() ?? ''
+    if (name !== '' && !names.includes(name)) names.push(name)
+  }
+  return names
+}
+
+/**
+ * 合并两份 cookie 头：按 name 覆盖，fresh 永远赢。
+ *
+ * 换票后的新会话 cookie 必须覆盖旧值；保留其它 cookie（locale/AB 等）能减少
+ * 「登录成功但页面参数丢了」的次生失败。返回 `undefined` 表示两边都没有。
+ */
+export function mergeCookieValues(base: string | undefined, fresh: string | undefined): string | undefined {
+  const pairs = new Map<string, string>()
+  const ingest = (header: string | undefined): void => {
+    if (header === undefined || header === '') return
+    for (const part of header.split(';')) {
+      const trimmed = part.trim()
+      const at = trimmed.indexOf('=')
+      if (at <= 0) continue
+      const name = trimmed.slice(0, at).trim()
+      const value = trimmed.slice(at + 1).trim()
+      if (name !== '') pairs.set(name, value)
+    }
+  }
+  ingest(base)
+  ingest(fresh)
+  if (pairs.size === 0) return undefined
+  return [...pairs].map(([name, value]) => `${name}=${value}`).join('; ')
+}
+
+/** 把 `cookie` 头写进请求头（大小写不敏感替换）；不修改入参。 */
+export function withCookieHeader(
+  headers: Record<string, string>,
+  cookieHeader: string | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = { ...headers }
+  if (cookieHeader === undefined || cookieHeader === '') return out
+  const key = Object.keys(out).find((name) => name.toLowerCase() === 'cookie')
+  if (key === undefined) out['cookie'] = cookieHeader
+  else out[key] = cookieHeader
+  return out
+}
+
+/** 读取请求头里的 cookie 值（大小写不敏感）；没有返回 `undefined`。 */
+export function cookieHeaderIn(headers: Record<string, string>): string | undefined {
+  const key = Object.keys(headers).find((name) => name.toLowerCase() === 'cookie')
+  return key === undefined ? undefined : headers[key]
+}

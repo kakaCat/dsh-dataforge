@@ -23,10 +23,14 @@ import {
   type ChainRunConfig,
   type ChainRunResult,
   type NodeResult,
+  type ReloginOutcome,
+  type ReloginRunner,
+  type ReloginSpec,
 } from '../execute/run.js'
 import { foldSummary, listRunIds, loadRunEvents, readRunRecord } from '../runs/store.js'
 import type { RunSummary } from '../shared/types.js'
 import type { CredentialProvider } from '../execute/credentials.js'
+import { cookieHeaderFromSetCookies, cookieNamesOf } from '../execute/credentials.js'
 import { extractJobId, ownerOf } from '../application.js'
 
 export type OrchestrationDeps = {
@@ -280,6 +284,15 @@ export type ChainRunNodeValue = {
   elapsedMs: number
   errorCode?: string
   error?: string
+  /** R-4 M2：这一节点是否换过票、结果如何（不含值）。 */
+  relogin?: {
+    attempted: boolean
+    success: boolean
+    code?: string
+    message?: string
+    runId?: string
+    cookieNames?: string[]
+  }
 }
 
 export type ChainRunToolValue = {
@@ -317,6 +330,11 @@ export type ChainRunToolArgs = {
   concurrency?: number
   dryRun?: boolean
   confirm?: boolean
+  /**
+   * R-4 M2：401 时自动执行的登录链。
+   * `inputs` 是登录链自己的槽位值（账号/密码），只在内存里过手，不写运行记录。
+   */
+  relogin?: ReloginSpec
 }
 
 /** 链执行节点的卡：逐 cardId 解析（默认解析器直读接口库，单次调用内缓存）。 */
@@ -467,6 +485,7 @@ function compactNodes(nodes: NodeResult[]): ChainRunNodeValue[] {
     elapsedMs: node.elapsedMs,
     ...(node.errorCode === undefined ? {} : { errorCode: node.errorCode }),
     ...(node.error === undefined ? {} : { error: node.error }),
+    ...(node.relogin === undefined ? {} : { relogin: node.relogin }),
   }))
 }
 
@@ -503,6 +522,99 @@ interface ChainJobsJobHandle {
 interface ChainJobsHooks {
   cancel: (reason?: string) => void
   done: Promise<{ status: 'completed' | 'killed' | 'failed'; detail?: string; result?: string }>
+}
+
+/**
+ * R-4 M2：构造「执行登录链」的函数，交给执行器在 401 时调用。
+ *
+ * 登录链走与主链完全相同的加载/校验/执行路径；差异只有三点：
+ *   1. 敏感模式（参数/正文/出参都不落值）；
+ *   2. 不注入旧凭证、不再递归换票（避免 401 套 401）；
+ *   3. 只把响应里的原始 `set-cookie` 收集成内存 jar 交回主链。
+ */
+function createReloginRunner(
+  deps: ChainRunToolDeps,
+  workspaceRoot: string,
+  expectedBaseUrl: string,
+): ReloginRunner {
+  return async (spec: ReloginSpec, signal: AbortSignal): Promise<ReloginOutcome> => {
+    if (spec.site.trim() === '' || spec.flow.trim() === '') {
+      return { ok: false, code: 'relogin-unavailable', message: '登录链的 site / flow 不能为空' }
+    }
+    const loaded = loadChain(workspaceRoot, spec.site, spec.flow, {
+      ...(spec.version === undefined ? {} : { version: spec.version }),
+    })
+    if (!loaded.ok) {
+      return { ok: false, code: 'relogin-unavailable', message: `登录链不可用：${loaded.message}` }
+    }
+    const doc = loaded.doc
+    if (doc.kind !== 'interface-chain') {
+      return { ok: false, code: 'relogin-unavailable', message: `登录链必须是 interface-chain（当前 ${doc.kind}）` }
+    }
+    const cards = cardsForChain(workspaceRoot, doc)
+    const inputCheck = validateChainInputs(doc, spec.inputs)
+    if (!inputCheck.ok) {
+      return { ok: false, code: 'relogin-unavailable', message: `登录链入参不合法：${inputCheck.message}` }
+    }
+    const base = resolveChainBaseUrl(doc, cards, spec.baseUrl)
+    if (!base.ok) {
+      return { ok: false, code: 'relogin-unavailable', message: `登录链 baseUrl 无法确定：${base.message}` }
+    }
+    const planned = buildPlan(doc, cards, spec.inputs ?? {}, base.baseUrl)
+    if (!planned.ok) {
+      return { ok: false, code: 'relogin-unavailable', message: `登录链不可执行：${planned.message}` }
+    }
+
+    // 安全边界：登录链与主链必须同源，否则登录链下发的 cookie 会被带去另一个站点。
+    const expectedOrigin = originOf(expectedBaseUrl)
+    const loginOrigin = originOf(planned.plan.baseUrl)
+    if (expectedOrigin !== undefined && loginOrigin !== undefined && expectedOrigin !== loginOrigin) {
+      return {
+        ok: false,
+        code: 'relogin-unavailable',
+        message: `登录链与主链不同源（登录 ${loginOrigin} / 主链 ${expectedOrigin}）：拒绝跨站复用凭证`,
+      }
+    }
+
+    const cookies: string[] = []
+    const chainDeps = { dataRoot: deps.dataRoot, config: deps.chain }
+    const runInput = {
+      doc,
+      cards,
+      plan: planned.plan,
+      inputs: spec.inputs ?? {},
+      baseUrl: planned.plan.baseUrl,
+      chainPath: chainPathForRecord(workspaceRoot, loaded.path),
+      sensitive: true,
+      redactParams: true,
+      onSetCookies: (values: string[]) => {
+        for (const value of values) cookies.push(value)
+      },
+    }
+    const prepared = prepareChainRun(chainDeps, runInput)
+    const result = await executeChainRun(chainDeps, prepared, { ...runInput, signal })
+    if (!result.ok) {
+      return { ok: false, code: 'relogin-failed', message: result.message, runId: prepared.runId }
+    }
+    if (result.summary.status !== 'completed') {
+      return {
+        ok: false,
+        code: 'relogin-failed',
+        message: result.summary.message ?? `登录链未完成（${result.summary.status}）`,
+        runId: prepared.runId,
+      }
+    }
+    const cookieHeader = cookieHeaderFromSetCookies(cookies)
+    if (cookieHeader === undefined) {
+      return {
+        ok: false,
+        code: 'relogin-failed',
+        message: '登录链执行完成但没有下发可用的 set-cookie（登录接口可能不是 cookie 型）',
+        runId: prepared.runId,
+      }
+    }
+    return { ok: true, cookieHeader, cookieNames: cookieNamesOf(cookieHeader), runId: prepared.runId }
+  }
 }
 
 /**
@@ -557,6 +669,22 @@ export async function chainRunForTool(
     }
   }
   const doc = loaded.doc
+
+  // R-4 M2：登录链的预检（不发请求、不建 run）。自环必须在主链开跑前拒掉。
+  if (args.relogin !== undefined) {
+    if (args.relogin.site.trim() === '' || args.relogin.flow.trim() === '') {
+      return { ok: false, accepted: false, gate: 'blocked', code: 'relogin-unavailable', message: 'relogin.site / relogin.flow 不能为空' }
+    }
+    if (args.relogin.site === doc.meta.site && args.relogin.flow === doc.meta.flow) {
+      return {
+        ok: false,
+        accepted: false,
+        gate: 'blocked',
+        code: 'relogin-cycle',
+        message: `登录链不能是当前链自身（${doc.meta.site} / ${doc.meta.flow}）：会无限递归；请指定一条真正的登录链路`,
+      }
+    }
+  }
 
   const cards = cardsForChain(workspaceRoot, doc)
 
@@ -614,6 +742,9 @@ export async function chainRunForTool(
     chainPath: chainPathForRecord(workspaceRoot, loaded.path),
     ...(args.dryRun === true ? { dryRun: true } : {}),
     ...(deps.credentials === undefined ? {} : { credentials: deps.credentials }),
+    ...(args.relogin === undefined
+      ? {}
+      : { relogin: { spec: args.relogin, run: createReloginRunner(deps, workspaceRoot, plan.baseUrl) } }),
   }
 
   // dry-run：同一份计划、永不发请求，但落一条 `dryRun: true` 留痕（计划本身要能被复查）。

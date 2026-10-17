@@ -26,6 +26,14 @@ beforeAll(async () => {
       res.end(JSON.stringify({ cookie: req.headers['cookie'] ?? null, accept: req.headers['accept'] ?? null }))
       return
     }
+    if (url.startsWith('/set-cookie')) {
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'set-cookie': ['sid=fresh; Path=/; HttpOnly', 'locale=zh; Path=/'],
+      })
+      res.end('{"ok":true}')
+      return
+    }
     if (url.startsWith('/fail500')) {
       res.writeHead(500, { 'content-type': 'text/plain' })
       res.end('boom')
@@ -72,6 +80,13 @@ describe('正常路径', () => {
     expect(outcome.response.bytes).toBeGreaterThan(0)
     expect(outcome.response.truncated).toBe(false)
     expect(outcome.response.attempts).toBe(1)
+  })
+
+  it('保留原始 Set-Cookie 多行（换票要用），不被合并成一个头', async () => {
+    const outcome = await httpRequest({ method: 'GET', url: `${base}/set-cookie` })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.response.setCookies).toEqual(['sid=fresh; Path=/; HttpOnly', 'locale=zh; Path=/'])
   })
 
   it('不继承 cookie：没有 cookie jar，credentials: omit 生效', async () => {

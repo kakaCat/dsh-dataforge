@@ -10,11 +10,17 @@ import { describe, expect, it } from 'vitest'
 import type { CredentialCookie } from '../../src/execute/credentials.js'
 import {
   appliedCredentialApplication,
+  cookieHeaderFromSetCookies,
+  cookieHeaderIn,
   cookieHeaderOf,
+  cookieNamesOf,
   domainMatches,
+  mergeCookieValues,
   mergeCredentialHeaders,
   pathMatches,
   selectCookies,
+  setCookiePairsOf,
+  withCookieHeader,
 } from '../../src/execute/credentials.js'
 
 const NOW = 1_700_000_000_000
@@ -134,6 +140,47 @@ describe('cookieHeaderOf / mergeCredentialHeaders', () => {
     // 大小写不敏感地看，只有一个 cookie 头。
     expect(Object.keys(merged).filter((name) => name.toLowerCase() === 'cookie')).toHaveLength(1)
     expect(existing).toEqual({ Accept: 'application/json', cookie: 'manual=1' })
+  })
+})
+
+describe('M2 换票：Set-Cookie 解析与 cookie 头合并', () => {
+  it('解析 name=value，丢属性；无等号/空值跳过', () => {
+    expect(
+      setCookiePairsOf([
+        'sid=fresh; Path=/; HttpOnly',
+        'locale=zh; Path=/; SameSite=Lax',
+        'bad; Path=/',
+        'empty=; Path=/',
+      ]),
+    ).toEqual([
+      { name: 'sid', value: 'fresh' },
+      { name: 'locale', value: 'zh' },
+    ])
+    expect(cookieHeaderFromSetCookies(['sid=fresh; Path=/', 'locale=zh'])).toBe('sid=fresh; locale=zh')
+    expect(cookieHeaderFromSetCookies([])).toBeUndefined()
+  })
+
+  it('mergeCookieValues：fresh 覆盖同名，保留其它 cookie', () => {
+    expect(mergeCookieValues('sid=old; locale=zh; theme=dark', 'sid=new; csrf=abc')).toBe(
+      'sid=new; locale=zh; theme=dark; csrf=abc',
+    )
+    expect(mergeCookieValues(undefined, 'sid=new')).toBe('sid=new')
+    expect(mergeCookieValues('sid=old', undefined)).toBe('sid=old')
+    expect(mergeCookieValues(undefined, undefined)).toBeUndefined()
+  })
+
+  it('withCookieHeader：大小写不敏感替换，不修改入参', () => {
+    const headers = { Cookie: 'sid=old', accept: 'application/json' }
+    const next = withCookieHeader(headers, 'sid=new')
+    expect(next['Cookie']).toBe('sid=new')
+    expect(headers['Cookie']).toBe('sid=old')
+    expect(withCookieHeader({}, 'sid=new')).toEqual({ cookie: 'sid=new' })
+    expect(cookieHeaderIn({ Cookie: 'sid=new' })).toBe('sid=new')
+  })
+
+  it('cookieNamesOf：只给名字、去重保序', () => {
+    expect(cookieNamesOf('sid=a; locale=zh; sid=b')).toEqual(['sid', 'locale'])
+    expect(cookieNamesOf(undefined)).toEqual([])
   })
 })
 
