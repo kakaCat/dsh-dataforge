@@ -17,7 +17,7 @@
  * @module dsh-dataforge/client/page-orchestration
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { fetchChainGraph, fetchOrchestrationOverview, importChainYaml, saveChainGraph } from './api.js'
+import { fetchChainGraph, fetchOrchestrationOverview, importChainYaml, renameChainEntry, saveChainGraph } from './api.js'
 import { formatTime } from './format.js'
 import { OrchestrationCanvas } from './orchestration-canvas.js'
 import type {
@@ -59,6 +59,9 @@ function siteLabel(overview: OrchestrationOverview, site: string): string {
   return flow === undefined ? site : site
 }
 
+/** 正在内联改名的目标（业务域或流程）。 */
+type RenameTarget = { kind: 'domain' | 'flow'; key: string; value: string }
+
 export interface OrchestrationPageProps {
   visible: boolean
 }
@@ -86,6 +89,11 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
   // 默认全部折叠：集合里记录的是「被用户手动展开过」的域 / 流程。
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set())
   const [expandedFlows, setExpandedFlows] = useState<Set<string>>(new Set())
+  // 业务域 / 流程内联改名（R-2 M5）：
+  const [renaming, setRenaming] = useState<RenameTarget | undefined>()
+  const [renameBusy, setRenameBusy] = useState(false)
+  const renameBusyRef = useRef(false)
+  const skipBlurCommitRef = useRef(false)
 
   const reload = useCallback(async (): Promise<void> => {
     setLoading(true)
@@ -256,6 +264,51 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
     }
   }
 
+  /** 开始改名：把卡片标题换成内联输入框。 */
+  const startRename = (kind: 'domain' | 'flow', key: string): void => {
+    setError(undefined)
+    setRenaming({ kind, key, value: key })
+  }
+
+  const cancelRename = (): void => {
+    // Escape 或点「取消」：这次失焦不再触发提交。
+    skipBlurCommitRef.current = true
+    setRenaming(undefined)
+  }
+
+  /** 提交改名：Enter / 失焦。空名或没改 → 直接收起，不发请求。 */
+  const commitRename = async (): Promise<void> => {
+    if (skipBlurCommitRef.current) {
+      skipBlurCommitRef.current = false
+      return
+    }
+    if (renaming === undefined || site === undefined || renameBusyRef.current) return
+    const value = renaming.value.trim()
+    if (value === '' || value === renaming.key) {
+      setRenaming(undefined)
+      return
+    }
+    renameBusyRef.current = true
+    setRenameBusy(true)
+    try {
+      if (renaming.kind === 'domain') {
+        const result = await renameChainEntry({ kind: 'domain', site, domain: renaming.key, newName: value })
+        setNotice(`业务域已重命名为「${value}」：${result.updatedFlows ?? 0} 条流程 / ${result.updatedVersions ?? 0} 个版本已同步`)
+      } else {
+        const result = await renameChainEntry({ kind: 'flow', site, flow: renaming.key, newName: value })
+        setNotice(`流程已重命名为「${value}」：${result.updatedVersions ?? 0} 个版本已同步`)
+      }
+      setRenaming(undefined)
+      await reload()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setRenaming(undefined)
+    } finally {
+      renameBusyRef.current = false
+      setRenameBusy(false)
+    }
+  }
+
   /** 新建流程：内存草稿 + 直接进画布（不落盘空白链）。 */
   const createDraft = (draft: { flow: string; kind: KindTab; domain: string; note: string }): void => {
     if (site === undefined) return
@@ -347,6 +400,12 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
           onPageSize={(size) => { setFlowsPageSize(size); setFlowsPage(1) }}
           expandedDomains={expandedDomains}
           expandedFlows={expandedFlows}
+          renaming={renaming}
+          renameBusy={renameBusy}
+          onStartRename={startRename}
+          onRenameChange={(value) => { setRenaming((current) => (current === undefined ? current : { ...current, value })) }}
+          onCommitRename={() => { void commitRename() }}
+          onCancelRename={cancelRename}
           onKind={(next) => {
             setKind(next)
             setFlowsPage(1)
@@ -487,6 +546,37 @@ function SitesView(props: {
 
 /* ───────────────────────── ② 流程列表 ───────────────────────── */
 
+/** 内联改名输入框：Enter 提交、Esc 取消、失焦提交（与原型 renameEl 同款交互）。 */
+function RenameInput(props: {
+  value: string
+  busy: boolean
+  onChange: (value: string) => void
+  onCommit: () => void
+  onCancel: () => void
+}): ReactNode {
+  return (
+    <input
+      className="dsh-df-rename-input"
+      autoFocus
+      value={props.value}
+      disabled={props.busy}
+      onClick={(event) => { event.stopPropagation() }}
+      onChange={(event) => { props.onChange(event.target.value) }}
+      onBlur={() => { props.onCommit() }}
+      onKeyDown={(event) => {
+        event.stopPropagation()
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          props.onCommit()
+        } else if (event.key === 'Escape') {
+          event.preventDefault()
+          props.onCancel()
+        }
+      }}
+    />
+  )
+}
+
 function FlowsView(props: {
   site: string
   siteName: string
@@ -501,6 +591,12 @@ function FlowsView(props: {
   /** 被用户手动展开的业务域 / 流程（缺省全部折叠）。 */
   expandedDomains: Set<string>
   expandedFlows: Set<string>
+  renaming?: RenameTarget
+  renameBusy: boolean
+  onStartRename: (kind: 'domain' | 'flow', key: string) => void
+  onRenameChange: (value: string) => void
+  onCommitRename: () => void
+  onCancelRename: () => void
   onKind: (kind: KindTab) => void
   onSearch: (value: string) => void
   onToggleDomain: (domain: string) => void
@@ -517,7 +613,8 @@ function FlowsView(props: {
   onImported: (notice: string) => void
 }): ReactNode {
   const {
-    siteName, kind, search, domains, domainTotals, total, page, pageSize, sizeOptions, expandedDomains, expandedFlows, otherKindCount,
+    siteName, kind, search, domains, domainTotals, total, page, pageSize, sizeOptions, expandedDomains, expandedFlows,
+    renaming, renameBusy, onStartRename, onRenameChange, onCommitRename, onCancelRename, otherKindCount,
     onKind, onSearch, onToggleDomain, onToggleFlow, onPage, onPageSize, onBack, onOpenGraphs, onOpenCanvas,
     onCreated, onImported,
   } = props
@@ -617,12 +714,46 @@ function FlowsView(props: {
         const collapsed = !searching && !expandedDomains.has(domain)
         return (
           <div key={domain} className={`dsh-df-domain${collapsed ? ' dsh-df-collapsed' : ''}`}>
-            <button type="button" className="dsh-df-domain-head" onClick={() => { onToggleDomain(domain) }}>
-              <span className="dsh-df-lv dsh-df-lv-1">业务域</span>
-              <span className="dsh-df-dname">{domain}</span>
-              <span className="dsh-df-meta">{domainTotals.get(domain) ?? list.length} 条流程</span>
-              <span className="dsh-df-caret">▼</span>
-            </button>
+            <div className="dsh-df-domain-header">
+              <div
+                className="dsh-df-domain-head"
+                role="button"
+                tabIndex={0}
+                onClick={() => { onToggleDomain(domain) }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    onToggleDomain(domain)
+                  }
+                }}
+              >
+                <span className="dsh-df-lv dsh-df-lv-1">业务域</span>
+                {renaming?.kind === 'domain' && renaming.key === domain ? (
+                  <RenameInput
+                    value={renaming.value}
+                    busy={renameBusy}
+                    onChange={onRenameChange}
+                    onCommit={onCommitRename}
+                    onCancel={onCancelRename}
+                  />
+                ) : (
+                  <span className="dsh-df-dname">{domain}</span>
+                )}
+                <span className="dsh-df-meta">{domainTotals.get(domain) ?? list.length} 条流程</span>
+                <span className="dsh-df-caret">▼</span>
+              </div>
+              {domain !== '未分组' ? (
+                <button
+                  type="button"
+                  className="dsh-df-edit-btn"
+                  title="重命名业务域"
+                  disabled={renameBusy}
+                  onClick={(event) => { event.stopPropagation(); onStartRename('domain', domain) }}
+                >
+                  ✎
+                </button>
+              ) : null}
+            </div>
             <div className="dsh-df-domain-body">
               {list.map((item) => {
                 const key = `${item.site}/${item.flow}`
@@ -630,15 +761,47 @@ function FlowsView(props: {
                 const latest = item.versions.find((version) => version.version === item.latest)
                 return (
                   <div key={key} className={`dsh-df-flow${flowCollapsed ? ' dsh-df-collapsed' : ''}`}>
-                    <button type="button" className="dsh-df-flow-head" onClick={() => { onToggleFlow(key) }}>
-                      <span className="dsh-df-lv dsh-df-lv-2">流程</span>
-                      <span className="dsh-df-fname">{item.flow}</span>
-                      <span className="dsh-df-meta">
-                        {item.nodeCount ?? 0} {item.kind === 'interface-chain' ? '接口' : '页面'}节点 ·
-                        更新于 {formatTime(item.updatedAt)}
-                      </span>
-                      <span className="dsh-df-caret">▼</span>
-                    </button>
+                    <div className="dsh-df-flow-header">
+                      <div
+                        className="dsh-df-flow-head"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => { onToggleFlow(key) }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault()
+                            onToggleFlow(key)
+                          }
+                        }}
+                      >
+                        <span className="dsh-df-lv dsh-df-lv-2">流程</span>
+                        {renaming?.kind === 'flow' && renaming.key === item.flow ? (
+                          <RenameInput
+                            value={renaming.value}
+                            busy={renameBusy}
+                            onChange={onRenameChange}
+                            onCommit={onCommitRename}
+                            onCancel={onCancelRename}
+                          />
+                        ) : (
+                          <span className="dsh-df-fname">{item.flow}</span>
+                        )}
+                        <span className="dsh-df-meta">
+                          {item.nodeCount ?? 0} {item.kind === 'interface-chain' ? '接口' : '页面'}节点 ·
+                          更新于 {formatTime(item.updatedAt)}
+                        </span>
+                        <span className="dsh-df-caret">▼</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="dsh-df-edit-btn"
+                        title="重命名流程"
+                        disabled={renameBusy}
+                        onClick={(event) => { event.stopPropagation(); onStartRename('flow', item.flow) }}
+                      >
+                        ✎
+                      </button>
+                    </div>
                     <div className="dsh-df-flow-body">
                       {item.unreadable === undefined ? null : (
                         <div className="dsh-df-errline">最新版本读不出来：{item.unreadable}</div>

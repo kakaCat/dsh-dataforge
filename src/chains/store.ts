@@ -15,7 +15,7 @@
  *
  * @module dsh-dataforge/chains/store
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CardResolver, ChainDoc, ChainIssue, ChainKind, ChainSource, InterfaceCardDoc } from './schema.js'
 import { chainToYaml, loadYamlValue, parseCardDoc, parseChainYaml } from './schema.js'
@@ -250,6 +250,200 @@ function safeDirs(dir: string): string[] {
   } catch {
     return []
   }
+}
+
+/* ------------------------------------------------------------------ 重命名 */
+
+/**
+ * 业务域 / 流程改名（R-2 M5 的「重命名」部分）。
+ *
+ * 语义（刻意写在这里，因为它是唯一会修改**历史版本文件**的操作）：
+ *   - 流程改名 = 目录改名 + 每个版本文件的 `meta.flow` 同步改名；
+ *   - 业务域改名 = 组内每个流程的每个版本里 `meta.domain` 同步改名；
+ *   - 节点/边/常量/槽位等内容一个字节都不改，版本号也不变——这是元数据修正，
+ *     不是重新保存（与 saveChain「只增版本」的纪律区分开）；
+ *   - 全部文件先读+校验+生成新文本，写盘走「临时文件 → rename 覆盖」，
+ *     坏文件、目标冲突、空名一律整次拒绝，不产生半改状态的目录。
+ *
+ * 已知取舍：会破坏「版本文件不可变」的字面承诺（设计文档 r2 M5 已记录该风险）。
+ */
+export type ChainRenameErrorCode = 'rename-invalid' | 'rename-conflict' | 'rename-not-found' | 'invalid-chain'
+
+export type ChainRenameResult =
+  | { ok: true; site: string; flow?: string; updatedFlows?: number; updatedVersions?: number }
+  | { ok: false; code: ChainRenameErrorCode; message: string; issues?: ChainIssue[] }
+
+type PreparedVersion = { version: number; text: string }
+
+/** 读一个版本并生成改写后的文本；坏文件返回可读错误（整次改名拒绝）。 */
+function prepareVersionText(
+  workspaceRoot: string,
+  site: string,
+  flow: string,
+  version: number,
+  patch: (doc: ChainDoc) => ChainDoc,
+): { ok: true; text: string } | { ok: false; message: string; issues: ChainIssue[] } {
+  let parsed: ReturnType<typeof parseChainYaml>
+  try {
+    parsed = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, version), 'utf8'))
+  } catch (error) {
+    return { ok: false, message: `v${version} 读取失败：${error instanceof Error ? error.message : String(error)}`, issues: [] }
+  }
+  if (!parsed.ok) {
+    return { ok: false, message: `v${version} 校验不过，先修好再改名`, issues: parsed.issues }
+  }
+  return { ok: true, text: chainToYaml(patch(parsed.doc)) }
+}
+
+/** 先写临时文件、再逐个 rename 覆盖：尽量把「写到一半」的窗口压到最小。 */
+function writePreparedVersions(dir: string, versions: PreparedVersion[]): void {
+  const pending: Array<{ tmp: string; final: string }> = []
+  try {
+    for (const version of versions) {
+      const final = join(dir, `v${version.version}.yaml`)
+      const tmp = `${final}.tmp-${process.pid}-${Date.now()}`
+      writeFileSync(tmp, version.text, 'utf8')
+      pending.push({ tmp, final })
+    }
+    for (const file of pending) renameSync(file.tmp, file.final)
+  } catch (error) {
+    for (const file of pending) {
+      try {
+        unlinkSync(file.tmp)
+      } catch {
+        // 临时文件可能已被 rename 掉；清理失败不覆盖原始错误。
+      }
+    }
+    throw error
+  }
+}
+
+/** 流程改名：目录 + 每个版本的 meta.flow；同名（slug 相同）时只改展示名。 */
+export function renameChainFlow(
+  workspaceRoot: string,
+  site: string,
+  flow: string,
+  newFlow: string,
+): ChainRenameResult {
+  const trimmed = String(newFlow ?? '').trim()
+  if (trimmed === '' || slugOf(trimmed) === '') {
+    return { ok: false, code: 'rename-invalid', message: '流程名称不能为空（或只含路径分隔符）' }
+  }
+  const oldDir = chainDir(workspaceRoot, site, flow)
+  if (!existsSync(oldDir)) {
+    return { ok: false, code: 'rename-not-found', message: `流程「${flow}」不存在` }
+  }
+  const versions = listChainVersions(workspaceRoot, site, flow)
+  if (versions.length === 0) {
+    return { ok: false, code: 'rename-not-found', message: `流程「${flow}」没有可改名的版本` }
+  }
+
+  const prepared: PreparedVersion[] = []
+  for (const version of versions) {
+    const text = prepareVersionText(workspaceRoot, site, flow, version, (doc) => ({
+      ...doc,
+      meta: { ...doc.meta, flow: trimmed },
+    }))
+    if (!text.ok) {
+      return { ok: false, code: 'invalid-chain', message: text.message, issues: text.issues }
+    }
+    prepared.push({ version, text: text.text })
+  }
+
+  const oldSlug = slugOf(flow)
+  const newSlug = slugOf(trimmed)
+  const newDir = join(chainsRoot(workspaceRoot), slugOf(site), newSlug)
+  if (newDir !== oldDir && existsSync(newDir)) {
+    return { ok: false, code: 'rename-conflict', message: `目标流程目录已存在：${newSlug}` }
+  }
+
+  let moved = false
+  try {
+    if (newDir !== oldDir) {
+      renameSync(oldDir, newDir)
+      moved = true
+    }
+    writePreparedVersions(newDir, prepared)
+  } catch (error) {
+    if (moved) {
+      try {
+        renameSync(newDir, oldDir)
+      } catch {
+        // 回滚失败时保留原错误：目录至少还在新位置，不会消失。
+      }
+    }
+    throw error
+  }
+  return { ok: true, site, flow: trimmed, updatedVersions: prepared.length }
+}
+
+/**
+ * 业务域改名：把该网站下「最新版 domain = old」的所有流程的所有版本里
+ * `meta.domain === old` 的版本改写为新名字。
+ */
+export function renameChainDomain(
+  workspaceRoot: string,
+  site: string,
+  domain: string,
+  newDomain: string,
+): ChainRenameResult {
+  const oldName = String(domain ?? '').trim()
+  const trimmed = String(newDomain ?? '').trim()
+  if (oldName === '') {
+    return { ok: false, code: 'rename-invalid', message: '原业务域名称不能为空' }
+  }
+  if (trimmed === '') {
+    return { ok: false, code: 'rename-invalid', message: '业务域名称不能为空' }
+  }
+  if (trimmed === oldName) return { ok: true, site, updatedFlows: 0, updatedVersions: 0 }
+
+  const siteDir = join(chainsRoot(workspaceRoot), slugOf(site))
+  if (!existsSync(siteDir)) {
+    return { ok: false, code: 'rename-not-found', message: `网站「${site}」不存在` }
+  }
+
+  let updatedFlows = 0
+  let updatedVersions = 0
+  for (const flow of safeDirs(siteDir)) {
+    const versions = listChainVersions(workspaceRoot, site, flow)
+    if (versions.length === 0) continue
+    const latestVersion = versions[versions.length - 1]
+    // 以最新版判断该流程属于哪个业务域（与 overview 的分组口径一致）；读不出来就跳过。
+    let latestDoc: ReturnType<typeof parseChainYaml>
+    try {
+      latestDoc = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, latestVersion), 'utf8'))
+    } catch {
+      continue
+    }
+    if (!latestDoc.ok || latestDoc.doc.meta.domain !== oldName) continue
+
+    const prepared: PreparedVersion[] = []
+    for (const version of versions) {
+      const candidate = parseChainYaml(readFileSync(chainFilePath(workspaceRoot, site, flow, version), 'utf8'))
+      if (!candidate.ok) {
+        return {
+          ok: false,
+          code: 'invalid-chain',
+          message: `流程「${flow}」的 v${version} 校验不过，先修好再改名`,
+          issues: candidate.issues,
+        }
+      }
+      if (candidate.doc.meta.domain !== oldName) continue
+      prepared.push({
+        version,
+        text: chainToYaml({ ...candidate.doc, meta: { ...candidate.doc.meta, domain: trimmed } }),
+      })
+    }
+    if (prepared.length === 0) continue
+    writePreparedVersions(chainDir(workspaceRoot, site, flow), prepared)
+    updatedFlows += 1
+    updatedVersions += prepared.length
+  }
+
+  if (updatedFlows === 0) {
+    return { ok: false, code: 'rename-not-found', message: `没有业务域「${oldName}」可改名` }
+  }
+  return { ok: true, site, updatedFlows, updatedVersions }
 }
 
 /* ------------------------------------------------------------------ 读取 */

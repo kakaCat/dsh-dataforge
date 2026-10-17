@@ -8,6 +8,7 @@
  *   GET  /orchestration/overview          网站 + 流程 + 逐版本摘要（编排页一次拿够）
  *   GET  /orchestration/graph?site&flow&version   单个版本的完整链文档（画布渲染用）
  *   POST /orchestration/graph             画布保存：链 YAML → saveChain 落新版本
+ *   POST /orchestration/rename            业务域 / 流程改名（同步改写各版本 meta，见 store 注释）
  *
  * 纪律：
  *   - 链文件是项目资产，读侧**不静默吞坏文件**：坏版本在 versions[] 里带 unreadable 说明；
@@ -19,7 +20,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
-import { listChainVersionInfos, listChainVersions, listChains, loadChain, readCard, readChainText, saveChain } from '../chains/store.js'
+import {
+  listChainVersionInfos, listChainVersions, listChains, loadChain, readCard, readChainText,
+  renameChainDomain, renameChainFlow, saveChain,
+} from '../chains/store.js'
 import { listCards } from '../library/store.js'
 import type { ChainDoc, ChainIssue, ChainKind, ChainSource } from '../chains/schema.js'
 
@@ -152,7 +156,11 @@ async function handle(deps: OrchestrationPanelDeps, req: IncomingMessage, res: S
         await handleSave(deps, req, res, url)
         return
       }
-      fail(res, 405, `编排路由不支持 POST ${suffix}（写入口仅 POST /orchestration/graph）`, 'method-not-allowed')
+      if (suffix === '/rename') {
+        await handleRename(deps, req, res, url)
+        return
+      }
+      fail(res, 405, `编排路由不支持 POST ${suffix}（写入口仅 /graph 与 /rename）`, 'method-not-allowed')
       return
     }
     if (method !== 'GET') {
@@ -441,6 +449,86 @@ async function handleSave(deps: OrchestrationPanelDeps, req: IncomingMessage, re
     return
   }
   ok(res, { ok: true, version: saved.version, path: saved.path, warnings: toIssues(saved.warnings) })
+}
+
+/**
+ * POST /orchestration/rename
+ *
+ * body：{ kind: 'flow'|'domain', site, flow?, domain?, newName }
+ * 改名语义与「不改内容、不改版本号」的边界见 `chains/store.ts` 的 renameChainFlow / renameChainDomain。
+ */
+async function handleRename(
+  deps: OrchestrationPanelDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+): Promise<void> {
+  const body = await readBody(req)
+  if (body === undefined) {
+    fail(res, 413, `请求体超过 ${MAX_SAVE_BODY_BYTES} 字节`, 'too-large')
+    return
+  }
+  let parsed: { kind?: unknown; site?: unknown; flow?: unknown; domain?: unknown; newName?: unknown }
+  try {
+    parsed = JSON.parse(body) as typeof parsed
+  } catch {
+    fail(res, 400, '请求体不是合法 JSON', 'bad-json')
+    return
+  }
+  const site = typeof parsed.site === 'string' ? parsed.site.trim() : ''
+  const newName = typeof parsed.newName === 'string' ? parsed.newName.trim() : ''
+  if (site === '' || newName === '') {
+    fail(res, 400, 'site 与 newName 必须是非空字符串', 'bad-param')
+    return
+  }
+  const workspaceRoot = await resolveRoot(deps, url)
+
+  if (parsed.kind === 'flow') {
+    const flow = typeof parsed.flow === 'string' ? parsed.flow.trim() : ''
+    if (flow === '') {
+      fail(res, 400, 'kind=flow 时必须给 flow', 'bad-param')
+      return
+    }
+    const result = renameChainFlow(workspaceRoot, site, flow, newName)
+    if (!result.ok) {
+      failRename(res, result)
+      return
+    }
+    ok(res, result)
+    return
+  }
+  if (parsed.kind === 'domain') {
+    const domain = typeof parsed.domain === 'string' ? parsed.domain.trim() : ''
+    if (domain === '') {
+      fail(res, 400, 'kind=domain 时必须给 domain', 'bad-param')
+      return
+    }
+    const result = renameChainDomain(workspaceRoot, site, domain, newName)
+    if (!result.ok) {
+      failRename(res, result)
+      return
+    }
+    ok(res, result)
+    return
+  }
+  fail(res, 400, `kind 只接受 flow / domain，收到 ${String(parsed.kind)}`, 'bad-param')
+}
+
+/** 改名失败码 → HTTP 状态（错误的可读消息原样透出给面板）。 */
+function failRename(
+  res: ServerResponse,
+  result: { code: string; message: string; issues?: ChainIssue[] },
+): void {
+  const status = result.code === 'rename-not-found' ? 404
+    : result.code === 'rename-conflict' ? 409
+    : 400
+  res.writeHead(status)
+  res.end(JSON.stringify({
+    success: false,
+    error: result.message,
+    code: result.code,
+    ...(result.issues === undefined ? {} : { issues: toIssues(result.issues) }),
+  }))
 }
 
 function toIssues(issues: ChainIssue[]): Array<{ target: string; code: string; reason: string }> {

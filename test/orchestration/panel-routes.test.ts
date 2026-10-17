@@ -393,3 +393,104 @@ describe('?workspace=：面板显式指定工作区根', () => {
     }
   })
 })
+
+describe('POST /orchestration/rename（业务域 / 流程改名，R-2 M5）', () => {
+  const RENAME = '/dashboard/api/dataforge/orchestration/rename'
+
+  it('流程改名：目录与各版本 meta.flow 同步改名，版本号不变，可继续读图', async () => {
+    seedChain()
+    const response = await serveAsync('POST', RENAME, JSON.stringify({
+      kind: 'flow', site: '智慧供应链 SCM', flow: '采购下单', newName: '采购下单-改名',
+    }))
+    const payload = json(response)
+    expect(response.status).toBe(200)
+    expect(payload.success).toBe(true)
+    expect(payload.data).toMatchObject({ ok: true, flow: '采购下单-改名', updatedVersions: 1 })
+
+    // 列表里只剩新名字，版本号仍是 1
+    const overview = json(await serveAsync('GET', OVERVIEW))
+    const flows = overview.data?.flows as Array<Record<string, unknown>>
+    expect(flows.map((flow) => flow.flow)).toEqual(['采购下单-改名'])
+    expect((flows[0]?.versions as Array<Record<string, unknown>>).map((version) => version.version)).toEqual([1])
+
+    // 新名字能读到图，meta.flow 已同步；旧名字不存在
+    const graph = json(await serveAsync('GET', `${GRAPH}?site=${encodeURIComponent('智慧供应链 SCM')}&flow=${encodeURIComponent('采购下单-改名')}`))
+    expect(graph.success).toBe(true)
+    expect((graph.data?.doc as Record<string, unknown>).meta).toMatchObject({ flow: '采购下单-改名' })
+    const oldName = await serveAsync('GET', `${GRAPH}?site=${encodeURIComponent('智慧供应链 SCM')}&flow=${encodeURIComponent('采购下单')}`)
+    expect(oldName.status).toBe(404)
+    expect(json(oldName).code).toBe('chain-not-found')
+  })
+
+  it('流程改名保留展示名原文（目录用 slug）：带空格的名称只影响 meta.flow', async () => {
+    seedChain()
+    const response = await serveAsync('POST', RENAME, JSON.stringify({
+      kind: 'flow', site: '智慧供应链 SCM', flow: '采购下单', newName: '采购 下单',
+    }))
+    expect(json(response).success).toBe(true)
+
+    const overview = json(await serveAsync('GET', OVERVIEW))
+    const flows = overview.data?.flows as Array<Record<string, unknown>>
+    expect(flows[0]?.flow).toBe('采购-下单')
+
+    const graph = json(await serveAsync('GET', `${GRAPH}?site=${encodeURIComponent('智慧供应链 SCM')}&flow=${encodeURIComponent('采购-下单')}`))
+    expect((graph.data?.doc as Record<string, unknown>).meta).toMatchObject({ flow: '采购 下单' })
+  })
+
+  it('目标流程已存在 → 409 rename-conflict，且两边都不丢', async () => {
+    seedChain()
+    saveChain(workspace(), chainDoc({ meta: { ...chainDoc().meta, flow: '目标流程' } }), { resolveCard: allCards })
+
+    const response = await serveAsync('POST', RENAME, JSON.stringify({
+      kind: 'flow', site: '智慧供应链 SCM', flow: '采购下单', newName: '目标流程',
+    }))
+    expect(response.status).toBe(409)
+    expect(json(response).code).toBe('rename-conflict')
+
+    const overview = json(await serveAsync('GET', OVERVIEW))
+    const flows = overview.data?.flows as Array<Record<string, unknown>>
+    expect(flows.map((flow) => String(flow.flow)).sort((left, right) => left.localeCompare(right, 'zh'))).toEqual(['采购下单', '目标流程'])
+  })
+
+  it('业务域改名：组内流程的所有版本 meta.domain 同步改名', async () => {
+    writeCards()
+    const base = chainDoc()
+    saveChain(workspace(), chainDoc({ meta: { ...base.meta, domain: '采购域' } }), { resolveCard: allCards })
+    saveChain(workspace(), chainDoc({ meta: { ...base.meta, domain: '采购域', note: 'v2' } }), { resolveCard: allCards })
+
+    const response = await serveAsync('POST', RENAME, JSON.stringify({
+      kind: 'domain', site: '智慧供应链 SCM', domain: '采购域', newName: '采购域-新',
+    }))
+    const payload = json(response)
+    expect(response.status).toBe(200)
+    expect(payload.data).toMatchObject({ ok: true, updatedFlows: 1, updatedVersions: 2 })
+
+    const overview = json(await serveAsync('GET', OVERVIEW))
+    const flows = overview.data?.flows as Array<Record<string, unknown>>
+    expect(flows[0]?.domain).toBe('采购域-新')
+    const sites = overview.data?.sites as Array<Record<string, unknown>>
+    expect(sites[0]?.domains).toEqual(['采购域-新'])
+
+    const graph = json(await serveAsync('GET', `${GRAPH}?site=${encodeURIComponent('智慧供应链 SCM')}&flow=${encodeURIComponent('采购下单')}`))
+    expect((graph.data?.doc as Record<string, unknown>).meta).toMatchObject({ domain: '采购域-新' })
+  })
+
+  it('不存在的流程 → 404；空名 / 非法 body → 400', async () => {
+    seedChain()
+    const absent = await serveAsync('POST', RENAME, JSON.stringify({
+      kind: 'flow', site: '智慧供应链 SCM', flow: '不存在', newName: '新名字',
+    }))
+    expect(absent.status).toBe(404)
+    expect(json(absent).code).toBe('rename-not-found')
+
+    const emptyName = await serveAsync('POST', RENAME, JSON.stringify({
+      kind: 'flow', site: '智慧供应链 SCM', flow: '采购下单', newName: '   ',
+    }))
+    expect(emptyName.status).toBe(400)
+    expect(json(emptyName).code).toBe('bad-param')
+
+    const badBody = await serveAsync('POST', RENAME, '{not json')
+    expect(badBody.status).toBe(400)
+    expect(json(badBody).code).toBe('bad-json')
+  })
+})

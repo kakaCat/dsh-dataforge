@@ -372,6 +372,18 @@ const CSS = `
 .dsh-df-domain.dsh-df-collapsed .dsh-df-domain-body { display: none; }
 .dsh-df-domain.dsh-df-collapsed .dsh-df-caret { transform: rotate(-90deg); }
 .dsh-df-domain-body { padding: 10px 18px 14px; }
+/* 业务域/流程标题（原型 div>header + ✎ 重命名）：head 是 role=button，✎ 是兄弟节点。 */
+.dsh-df-domain-header, .dsh-df-flow-header { display: flex; align-items: center; gap: 6px; }
+.dsh-df-domain-header .dsh-df-domain-head { flex: 1; min-width: 0; }
+.dsh-df-flow-header .dsh-df-flow-head { flex: 1; min-width: 0; }
+.dsh-df-edit-btn { border: none; background: none; cursor: pointer; color: var(--dsh-df-ink-3);
+  font-size: 12px; padding: 0 6px; opacity: 0; transition: opacity .15s; font-family: inherit; }
+.dsh-df-domain-header:hover .dsh-df-edit-btn, .dsh-df-flow-header:hover .dsh-df-edit-btn { opacity: 1; }
+.dsh-df-edit-btn:hover { color: var(--dsh-df-accent); }
+@media (hover: none) { .dsh-df-edit-btn { opacity: 1; } }
+.dsh-df-rename-input { border: 1px solid var(--dsh-df-accent); border-radius: 6px; padding: 2px 8px;
+  font-size: 13px; font-family: inherit; flex: 1; min-width: 0; background: #fff;
+  color: var(--dsh-df-ink); outline: none; }
 .dsh-df-flow { margin-left: 18px; padding-left: 16px; border-left: 2px solid var(--dsh-df-line); }
 .dsh-df-flow + .dsh-df-flow { margin-top: 10px; }
 .dsh-df-flow-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px;

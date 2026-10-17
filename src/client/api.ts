@@ -149,3 +149,29 @@ export async function saveChainGraph(doc: ChainDocLike): Promise<ChainSaveResult
 export async function importChainYaml(chainYaml: string): Promise<ChainSaveResult> {
   return postPanelData<ChainSaveResult>('/orchestration/graph', { chainYaml, source: 'import' })
 }
+
+/* ───────────────────────── 业务域 / 流程改名（R-2 M5） ───────────────────────── */
+
+export type ChainRenameArgs = {
+  kind: 'flow' | 'domain'
+  site: string
+  flow?: string
+  domain?: string
+  newName: string
+}
+
+export type ChainRenameResult = {
+  ok: boolean
+  site: string
+  flow?: string
+  updatedFlows?: number
+  updatedVersions?: number
+}
+
+/**
+ * 改名：同步改写各版本 meta 的元数据修正（不改节点/边/内容，版本号不变）。
+ * 失败（重名/不存在/坏文件）走 HTTP 错误信封，由 postPanelData 抛出可读 message。
+ */
+export async function renameChainEntry(args: ChainRenameArgs): Promise<ChainRenameResult> {
+  return postPanelData<ChainRenameResult>('/orchestration/rename', args)
+}
