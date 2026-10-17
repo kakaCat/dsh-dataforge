@@ -27,7 +27,12 @@ export type LibraryInput = {
   /** 点路径，首段是位置：`query.q` / `body.lines[*].materialId` / `header.content-type`。 */
   path: string
   type: LibraryFieldType
-  /** 真入参（多形态下值变化过）→ true；常量/单形态未验证 → false。 */
+  /**
+   * 语义 =「**采集期观察到该值会变**」（多形态下值变化过），**不是业务必填**：
+   * 单样本卡的入参几乎全是 `role: constant, required: false`。执行引擎不得拿它
+   * 当「必须提供」的判据。唯一例外是 URL 模板的 `path.<name>` 段：它恒为 true，
+   * 因为该段确实必须由调用方/上游提供（没有它 URL 拼不出来）。
+   */
   required: boolean
   role: LibraryFieldRole
   /** 只在为 true 时出现：单样本或值从未变化过，模板尚未被验证。 */

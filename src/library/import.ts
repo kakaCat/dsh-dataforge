@@ -255,12 +255,26 @@ function inputPathOf(field: TemplateField): string {
 function projectInputs(template: Template | undefined): LibraryInput[] {
   if (template === undefined) return []
   const out: LibraryInput[] = []
+  const seen = new Set<string>()
+  // URL 模板里的 `{id}` 段（采集模板 `pathParams`）先投影：它们天然由调用方/上游提供，
+  // 缺了它详情页接口（`/api/orders/{p}/items`）在卡里就没有 `path.*` 入参、链也绑不上。
+  // 顺序按 pathParams 原序，保证重复导入不抖动。
+  for (const name of template.pathParams ?? []) {
+    const path = `path.${normalizeFieldPath(name)}`
+    if (seen.has(path)) continue
+    seen.add(path)
+    out.push({ path, type: 'string', required: true, role: 'input' })
+  }
   for (const field of template.fields) {
     // 凭证角色字段不入卡：鉴权只以 auth 标志 + 来源名表达（红线）。
     if (field.role === 'credential') continue
+    const path = inputPathOf(field)
+    // 与 pathParams 投影按 path 去重（同名 path 字段已有入参，不重复出条目）。
+    if (seen.has(path)) continue
+    seen.add(path)
     const role = libraryRoleOf(field)
     out.push({
-      path: inputPathOf(field),
+      path,
       type: libraryTypeOf(field),
       required: role === 'input',
       role,
