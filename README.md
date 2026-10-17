@@ -16,6 +16,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
   └─ dataforge_library_import                   采集卡 → 项目接口库（稳定 cardId、跨 run 归并）
   └─ dataforge_chain_upsert / dataforge_chain_get  接口链：版本快照、绑定即拓扑依赖
   └─ dataforge_chain_run / dataforge_chain_runs    执行：拓扑调度 + 纯 HTTP 直调 + 运行留痕
+  └─ dataforge_chain_probe                        首跑：单节点试探 + 每个值带来源 + 写操作确认闸
         │
         ▼  编排/执行/复跑一律走「接口卡模板 + 凭证卡」＋纯 HTTP，不再开浏览器
 ```
@@ -33,6 +34,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | 接口链 | `src/chains/{schema,validate,store,compile}.ts` | 链 schema / 语义校验 / 版本快照 / page-chain 编译 |
 | 执行引擎 | `src/execute/{plan,coverage,request,binding,http,run}.ts` | 计划编译 / 缺参覆盖 / 请求构造 / 绑定求值 / HTTP 出口 / 调度器 |
 | 凭证注入 | `src/{execute,capture}/credentials.ts` | cookie 匹配纯函数 / 只读采集库 provider / 注入摘要（R-4 M1） |
+| 首跑试探 | `src/{execute,orchestration}/{probe,explore}.ts` | 单节点请求 / 值来源校验 / 缺参与写闸 / `probe-run` 留痕（R-5 M1） |
 | 编排应用层 | `src/orchestration/application.ts` | 链读写、执行闸门与 IF-1/2 的错误码折叠与回执值 |
 
 ## 三道闸（调用纪律，写进 dataforge_run 工具描述）
@@ -198,6 +200,49 @@ runs/<runId>/{run.json,events.ndjson}（meta → step×N → terminal → result
 - 下一次运行由 provider 按目标 origin 读回，同名覆盖采集期的旧 cookie；采集库缺席时也能靠持久化 jar 兜底；
 - 关闭方式：`chainCredentialPersistence: false`（换票只活一次运行）；
 - **零泄漏扫描门**：换票端到端用例会扫描 `dataRoot` 下除持久化 jar 外的所有文件 + 工具回执，断言密码/token/新 cookie 原文零命中。
+
+### 探索执行（R-5 M1：单节点 probe）
+
+首跑时链往往还不完整：缺参数、缺绑定。`dataforge_chain_probe` 把执行单位缩到**一个节点**，避免为了试一个值整链重跑（尤其是写节点）：
+
+```json
+{
+  "site": "智慧供应链 SCM", "flow": "采购下单",
+  "node": "query-material",
+  "values": {
+    "query.q": { "value": "螺丝", "source": "user", "evidence": "用户原话：先用螺丝试" }
+  }
+}
+```
+
+（`query.orgId` 这类固定值放在节点 `constants` 里，probe 会自动标 `constant`。）
+```
+
+**值来源词表**（每个入参必须能说出出处）：
+
+| source | 含义 | 约束 |
+|---|---|---|
+| `user` | 用户明确给出的值 | evidence 建议写原话；工具无法替代真人确认 |
+| `agent-inferred` | agent 推断的值 | **必须带 evidence**（推断依据），否则 `invalid-source` |
+| `upstream` | 来自某次 probe 的响应 | **必须带 evidence**（如 `probe:<runId> · body.items[0].internalId`） |
+| `constant` | 节点 `constants` 里的值 | 自动标注，不要放进 `values` |
+
+**四道门**：
+
+1. **缺参**：发请求前返回 `gate=paused` + `gaps` + 卡入参模板，一个请求都不发；仍落一条 `probe-run` 留痕；
+2. **写操作**（POST/PUT/PATCH/DELETE）：没有 `confirm=true` 只返回计划卡，**零请求、零 run**；
+3. **来源校验**：未知字段 → `unknown-value`；`agent-inferred`/`upstream` 缺 evidence → `invalid-source`；
+4. **敏感值**：路径命中 `password/token/secret/authorization/cookie/api-key…` 时，值在 `run.json`、事件、回执里一律 `***`。
+
+**成功时返回**：请求/响应摘要、耗时、尝试次数、卡出参的实际值（`outputs`，用来发现绑定边）、逐值来源（`provenance`）。下一步：
+
+```text
+probe 试探 → 读 outputs 发现绑定 → dataforge_chain_upsert 写边（R-1 校验）→ dataforge_chain_run 整链
+```
+
+**留痕**：每次 probe 一条 `runs/<runId>/`，`run.json` 的 `kind: probe-run` + `probe.explorationId`，同一次首跑的多发 probe 用同一个 explorationId 串起来。`dataforge_status` 可直接读。
+
+**诚实边界**：probe 不消费绑定边、不缓存上游响应、不自动猜值、不自动推断绑定；probe 也不换票（401 会提示走 `dataforge_chain_run` 的 `relogin`）。
 
 ### 编排页签（面板内可视化编辑）
 
