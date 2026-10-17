@@ -23,6 +23,7 @@ import {
 } from './normalizer.js'
 import { openCapturingPage, responseToRawSample, type WireSample } from './browser.js'
 import type { CaptureStore } from './store.js'
+import { harvestTokenCredentials } from './token-harvest.js'
 import type { Config } from '../config.js'
 import type { Cookie } from 'playwright-core'
 import type {
@@ -364,6 +365,13 @@ function makeAutonomousRun(
           deps.store.upsertCredential(
             captureId, 'cookie', String(c['domain'] ?? ''), String(c['name'] ?? ''), Date.now(), c,
           )
+        }
+        // R-4 M3：从本次请求样本补采 token（Authorization / query token）→ credential_events。
+        // 补采失败不打断收口：cookie 已经入库，token 是增强面；下次重新采集会再试。
+        try {
+          harvestTokenCredentials(deps.store, captureId)
+        } catch {
+          // 静默降级：value_json 坏行会在内部跳过，走到这里说明 store 本身不可用。
         }
         deps.store.finishRun(captureId, 'done', undefined)
         return { status: 'completed', detail: `capture ${captureId} 完成` }

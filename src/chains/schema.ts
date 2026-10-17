@@ -195,6 +195,8 @@ export type InterfaceCardDoc = {
   outputs: CardIoField[]
   /** 鉴权标志（如 cookie-session）——永不含凭证值。 */
   auth?: string
+  /** 鉴权证据来源名（如 `header:authorization` / `query:access_token`）——只投影名字，永不含值。 */
+  authEvidence?: string
   sources?: CardSource[]
   name?: string
 }
@@ -260,6 +262,9 @@ export const InterfaceCardSchema = Schema.object({
   inputs: Schema.array(IoFieldSchema).default([]),
   outputs: Schema.array(IoFieldSchema).default([]),
   auth: Schema.string(),
+  // R-4 M3：token 注入按证据名匹配（header:authorization / query:access_token）。
+  // 只投影名字，值不落卡；缺省时 provider 按 token 位置取缺省名。
+  authEvidence: Schema.string(),
   sources: Schema.array(CardSourceSchema),
   name: Schema.string(),
 })

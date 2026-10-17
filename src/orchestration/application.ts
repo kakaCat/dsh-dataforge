@@ -32,7 +32,17 @@ import type { RunSummary } from '../shared/types.js'
 import type { CredentialProvider } from '../execute/credentials.js'
 import { cookieHeaderFromSetCookies, cookieNamesOf } from '../execute/credentials.js'
 import { persistCookies } from '../capture/credential-store.js'
+import { createReloginThrottle } from '../execute/throttle.js'
 import { extractJobId, ownerOf } from '../application.js'
+
+/**
+ * R-4 M3：跨运行换票单飞。key = 主链 origin + 登录链 site/flow。
+ *
+ * M2 的单飞只在一条 run 内；这里提到进程级：同一站点同一登录链被并发运行时，
+ * 只打一次登录接口，其余运行等待并共享结果（避免账号锁定与握手风暴）。
+ * 失败不缓存——settle 后清理，下一次触发重新登录。
+ */
+const reloginThrottle = createReloginThrottle()
 
 export type OrchestrationDeps = {
   /** 采集库 SQLite 路径（导入侧只读打开，绝不建表/写事件）。 */
@@ -546,93 +556,107 @@ function createReloginRunner(
   expectedBaseUrl: string,
 ): ReloginRunner {
   return async (spec: ReloginSpec, signal: AbortSignal): Promise<ReloginOutcome> => {
-    if (spec.site.trim() === '' || spec.flow.trim() === '') {
-      return { ok: false, code: 'relogin-unavailable', message: '登录链的 site / flow 不能为空' }
-    }
-    const loaded = loadChain(workspaceRoot, spec.site, spec.flow, {
-      ...(spec.version === undefined ? {} : { version: spec.version }),
-    })
-    if (!loaded.ok) {
-      return { ok: false, code: 'relogin-unavailable', message: `登录链不可用：${loaded.message}` }
-    }
-    const doc = loaded.doc
-    if (doc.kind !== 'interface-chain') {
-      return { ok: false, code: 'relogin-unavailable', message: `登录链必须是 interface-chain（当前 ${doc.kind}）` }
-    }
-    const cards = cardsForChain(workspaceRoot, doc)
-    const inputCheck = validateChainInputs(doc, spec.inputs)
-    if (!inputCheck.ok) {
-      return { ok: false, code: 'relogin-unavailable', message: `登录链入参不合法：${inputCheck.message}` }
-    }
-    const base = resolveChainBaseUrl(doc, cards, spec.baseUrl)
-    if (!base.ok) {
-      return { ok: false, code: 'relogin-unavailable', message: `登录链 baseUrl 无法确定：${base.message}` }
-    }
-    const planned = buildPlan(doc, cards, spec.inputs ?? {}, base.baseUrl)
-    if (!planned.ok) {
-      return { ok: false, code: 'relogin-unavailable', message: `登录链不可执行：${planned.message}` }
-    }
+    // R-4 M3：跨运行单飞——同一站点的登录链并发触发只执行一次。
+    // key 里带主链 origin：不同站点的同名登录链不会被误合并。
+    const throttleKey = `${originOf(expectedBaseUrl) ?? 'unknown'}|${spec.site}/${spec.flow}`
+    return reloginThrottle.run(throttleKey, () => reloginOnce(deps, workspaceRoot, expectedBaseUrl, spec, signal))
+  }
+}
 
-    // 安全边界：登录链与主链必须同源，否则登录链下发的 cookie 会被带去另一个站点。
-    const expectedOrigin = originOf(expectedBaseUrl)
-    const loginOrigin = originOf(planned.plan.baseUrl)
-    if (expectedOrigin !== undefined && loginOrigin !== undefined && expectedOrigin !== loginOrigin) {
-      return {
-        ok: false,
-        code: 'relogin-unavailable',
-        message: `登录链与主链不同源（登录 ${loginOrigin} / 主链 ${expectedOrigin}）：拒绝跨站复用凭证`,
-      }
-    }
+/** 真正执行一条登录链（单飞的实际负载；同一时刻同 key 只有一个在飞）。 */
+async function reloginOnce(
+  deps: ChainRunToolDeps,
+  workspaceRoot: string,
+  expectedBaseUrl: string,
+  spec: ReloginSpec,
+  signal: AbortSignal,
+): Promise<ReloginOutcome> {
+  if (spec.site.trim() === '' || spec.flow.trim() === '') {
+    return { ok: false, code: 'relogin-unavailable', message: '登录链的 site / flow 不能为空' }
+  }
+  const loaded = loadChain(workspaceRoot, spec.site, spec.flow, {
+    ...(spec.version === undefined ? {} : { version: spec.version }),
+  })
+  if (!loaded.ok) {
+    return { ok: false, code: 'relogin-unavailable', message: `登录链不可用：${loaded.message}` }
+  }
+  const doc = loaded.doc
+  if (doc.kind !== 'interface-chain') {
+    return { ok: false, code: 'relogin-unavailable', message: `登录链必须是 interface-chain（当前 ${doc.kind}）` }
+  }
+  const cards = cardsForChain(workspaceRoot, doc)
+  const inputCheck = validateChainInputs(doc, spec.inputs)
+  if (!inputCheck.ok) {
+    return { ok: false, code: 'relogin-unavailable', message: `登录链入参不合法：${inputCheck.message}` }
+  }
+  const base = resolveChainBaseUrl(doc, cards, spec.baseUrl)
+  if (!base.ok) {
+    return { ok: false, code: 'relogin-unavailable', message: `登录链 baseUrl 无法确定：${base.message}` }
+  }
+  const planned = buildPlan(doc, cards, spec.inputs ?? {}, base.baseUrl)
+  if (!planned.ok) {
+    return { ok: false, code: 'relogin-unavailable', message: `登录链不可执行：${planned.message}` }
+  }
 
-    const cookies: string[] = []
-    const chainDeps = { dataRoot: deps.dataRoot, config: deps.chain }
-    const runInput = {
-      doc,
-      cards,
-      plan: planned.plan,
-      inputs: spec.inputs ?? {},
-      baseUrl: planned.plan.baseUrl,
-      chainPath: chainPathForRecord(workspaceRoot, loaded.path),
-      sensitive: true,
-      redactParams: true,
-      onSetCookies: (values: string[]) => {
-        for (const value of values) cookies.push(value)
-      },
-    }
-    const prepared = prepareChainRun(chainDeps, runInput)
-    const result = await executeChainRun(chainDeps, prepared, { ...runInput, signal })
-    if (!result.ok) {
-      return { ok: false, code: 'relogin-failed', message: result.message, runId: prepared.runId }
-    }
-    if (result.summary.status !== 'completed') {
-      return {
-        ok: false,
-        code: 'relogin-failed',
-        message: result.summary.message ?? `登录链未完成（${result.summary.status}）`,
-        runId: prepared.runId,
-      }
-    }
-    const cookieHeader = cookieHeaderFromSetCookies(cookies)
-    if (cookieHeader === undefined) {
-      return {
-        ok: false,
-        code: 'relogin-failed',
-        message: '登录链执行完成但没有下发可用的 set-cookie（登录接口可能不是 cookie 型）',
-        runId: prepared.runId,
-      }
-    }
-    // R-4 M3：换票结果落本地 jar（0600，按 origin）。落盘失败不打断当前链。
-    const persisted =
-      deps.credentialStorePath !== undefined && expectedOrigin !== undefined
-        ? persistCookies(deps.credentialStorePath, expectedOrigin, cookies, Date.now())
-        : 0
+  // 安全边界：登录链与主链必须同源，否则登录链下发的 cookie 会被带去另一个站点。
+  const expectedOrigin = originOf(expectedBaseUrl)
+  const loginOrigin = originOf(planned.plan.baseUrl)
+  if (expectedOrigin !== undefined && loginOrigin !== undefined && expectedOrigin !== loginOrigin) {
     return {
-      ok: true,
-      cookieHeader,
-      cookieNames: cookieNamesOf(cookieHeader),
-      runId: prepared.runId,
-      ...(persisted > 0 ? { persisted } : {}),
+      ok: false,
+      code: 'relogin-unavailable',
+      message: `登录链与主链不同源（登录 ${loginOrigin} / 主链 ${expectedOrigin}）：拒绝跨站复用凭证`,
     }
+  }
+
+  const cookies: string[] = []
+  const chainDeps = { dataRoot: deps.dataRoot, config: deps.chain }
+  const runInput = {
+    doc,
+    cards,
+    plan: planned.plan,
+    inputs: spec.inputs ?? {},
+    baseUrl: planned.plan.baseUrl,
+    chainPath: chainPathForRecord(workspaceRoot, loaded.path),
+    sensitive: true,
+    redactParams: true,
+    onSetCookies: (values: string[]) => {
+      for (const value of values) cookies.push(value)
+    },
+  }
+  const prepared = prepareChainRun(chainDeps, runInput)
+  const result = await executeChainRun(chainDeps, prepared, { ...runInput, signal })
+  if (!result.ok) {
+    return { ok: false, code: 'relogin-failed', message: result.message, runId: prepared.runId }
+  }
+  if (result.summary.status !== 'completed') {
+    return {
+      ok: false,
+      code: 'relogin-failed',
+      message: result.summary.message ?? `登录链未完成（${result.summary.status}）`,
+      runId: prepared.runId,
+    }
+  }
+  const cookieHeader = cookieHeaderFromSetCookies(cookies)
+  if (cookieHeader === undefined) {
+    return {
+      ok: false,
+      code: 'relogin-failed',
+      message: '登录链执行完成但没有下发可用的 set-cookie（登录接口可能不是 cookie 型）',
+      runId: prepared.runId,
+    }
+  }
+  // R-4 M3：换票结果落本地 jar（0600，按 origin）。落盘失败不打断当前链。
+  const persisted =
+    deps.credentialStorePath !== undefined && expectedOrigin !== undefined
+      ? persistCookies(deps.credentialStorePath, expectedOrigin, cookies, Date.now())
+      : 0
+  return {
+    ok: true,
+    cookieHeader,
+    cookieNames: cookieNamesOf(cookieHeader),
+    runId: prepared.runId,
+    ...(persisted > 0 ? { persisted } : {}),
   }
 }
 

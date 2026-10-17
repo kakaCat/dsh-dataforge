@@ -1,8 +1,8 @@
 /**
- * 凭证注入的纯函数与契约（R-4 M1）。
+ * 凭证注入的纯函数与契约（R-4 M1/M3）。
  *
  * 边界（重要）：
- *   - 本模块**不读盘、不联网**：只做 cookie 匹配、排序、头合并；
+ *   - 本模块**不读盘、不联网**：只做 cookie 匹配、排序、头合并、token query 拼接与脱敏；
  *   - 执行层不认识采集库、不认识 SQLite：凭证来源由注入的 `CredentialProvider` 提供；
  *   - 摘要（`CredentialApplication`）**永不含凭证值**，只留名字/域/来源 captureId。
  *
@@ -32,12 +32,20 @@ export type CredentialCookie = {
 /** 注入状态：`applied` 才有 `headers`；其余都是「没带」的诚实叙述。 */
 export type CredentialApplicationStatus = 'applied' | 'none' | 'expired' | 'unsupported'
 
+/**
+ * 凭证落在请求的哪个位置（R-4 M3 扩展 token）：
+ *   - `cookie`：`Cookie` 头（cookie-session 卡）；
+ *   - `authorization`：`Authorization`（或采集到的同名 token 头）原样注入（token-header 卡）；
+ *   - `query`：URL query 参数（token-param 卡）。
+ */
+export type CredentialInjectionSite = 'cookie' | 'authorization' | 'query'
+
 /** 可审计的注入摘要：只留名字，不留值。 */
 export type CredentialApplication = {
   status: CredentialApplicationStatus
   source: 'capture'
-  /** 目前只有 cookie；未来 token 注入会扩展，但不改名。 */
-  header?: 'cookie'
+  /** 注入落点；令牌型是 `authorization` / `query`，cookie 型是 `cookie`。 */
+  header?: CredentialInjectionSite
   /** 注入的 cookie 名（不是值）。 */
   names: string[]
   /** 匹配到的 cookie 域（不是页面 URL）。 */
@@ -62,8 +70,15 @@ export type CredentialNeed = {
 }
 
 export type CredentialResolution = {
-  /** 要合并进请求的头（目前只有 `cookie`）；没有就是空对象。 */
+  /** 要合并进请求的头（`cookie` / `authorization` 等）；没有就是空对象。 */
   headers: Record<string, string>
+  /**
+   * R-4 M3：token-param 凭证要拼进 URL 的 query 参数（`name → value`）。
+   *
+   * 执行层负责把它拼到请求 URL 上并做正确的 URL 编码（见 {@link withQueryParams}）；
+   * 摘要里只留参数名，值绝不进事件/回执。
+   */
+  query?: Record<string, string>
   application: CredentialApplication
 }
 
@@ -195,6 +210,63 @@ export function mergeCredentialHeaders(
     if (key.toLowerCase() === 'cookie' && out[key] !== '') out[key] = `${out[key]}; ${value}`
     else out[key] = value
   }
+  return out
+}
+
+/* ---------------------------------------------------------- M3：token 注入的纯函数 */
+
+/** 参与二次脱敏的最小值长度：太短的值会把正常业务文本打碎。 */
+const MIN_SECRET_LENGTH = 4
+
+/**
+ * 把凭证 query 参数拼进 URL（R-4 M3 token-param）。
+ *
+ * - 同名参数以凭证值为准（`searchParams.set`），URL 其余部分原样保留；
+ * - 编码交给 `URL` 的序列化（空格→`+`、`&`/`=` 等百分号编码），不手拼字符串；
+ * - 非法 URL / 非 http(s) / 空参数表原样返回，不抛。
+ */
+export function withQueryParams(url: string, params: Record<string, string> | undefined): string {
+  if (params === undefined) return url
+  const entries = Object.entries(params).filter(([name]) => name !== '')
+  if (entries.length === 0) return url
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return url
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return url
+  for (const [name, value] of entries) parsed.searchParams.set(name, value)
+  return parsed.toString()
+}
+
+/**
+ * 敏感值集合：去空/去短（< 4 字符，避免打碎正常文本）、去重、按长度降序。
+ *
+ * 降序是为了先替换长值：当短值恰好是长值子串时（如 `abc` 与 `abcdef`），
+ * 先替换长值才不会留下半截泄漏。返回值只在内存里用，不落任何地方。
+ */
+export function redactSecretValues(values: Iterable<string | undefined | null>): string[] {
+  const unique = new Set<string>()
+  for (const value of values) {
+    if (typeof value !== 'string') continue
+    if (value.length < MIN_SECRET_LENGTH) continue
+    unique.add(value)
+  }
+  return [...unique].sort((left, right) => right.length - left.length)
+}
+
+/**
+ * 文本脱敏：把已知凭证值替换成 `***`。
+ *
+ * 用在「服务端把凭证回显进响应正文/URL」这类二次泄漏面：请求 URL 摘要、正文摘要、
+ * `emitted` 出参、错误消息都要过这一道。secrets 为空时原样返回。
+ */
+export function redactSecretsInText(text: string, secrets: Iterable<string | undefined | null>): string {
+  const list = redactSecretValues(secrets)
+  if (list.length === 0) return text
+  let out = text
+  for (const secret of list) out = out.split(secret).join('***')
   return out
 }
 

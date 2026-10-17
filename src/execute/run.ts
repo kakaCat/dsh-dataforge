@@ -51,7 +51,9 @@ import {
   cookieHeaderIn,
   mergeCookieValues,
   mergeCredentialHeaders,
+  redactSecretsInText,
   withCookieHeader,
+  withQueryParams,
 } from './credentials.js'
 
 /* ================================================================== 常量 */
@@ -665,15 +667,22 @@ export async function executeChainRun(
       return failAfterStart(bindings, built.code, message)
     }
 
-    // 2.5) R-4 M1：凭证注入（buildRequest 之后、发请求之前——唯一注入点）。
+    // 2.5) R-4 M1/M3：凭证注入（buildRequest 之后、发请求之前——唯一注入点）。
     //      provider 缺席 = R-3 行为；provider 自身不抛异常，降级只体现在摘要里。
     let request = built.request
     let credentialApplication: CredentialApplication | undefined
+    /** token-param 注入的 query 参数：只用于拼真实 URL 与脱敏，值绝不进事件/回执。 */
+    let injectedQuery: Record<string, string> = {}
     if (input.credentials !== undefined) {
       const resolution = input.credentials({ card, url: request.url, method: request.method, nodeId })
       credentialApplication = resolution.application
       if (Object.keys(resolution.headers).length > 0) {
         request = { ...request, headers: mergeCredentialHeaders(request.headers, resolution.headers) }
+      }
+      if (resolution.query !== undefined && Object.keys(resolution.query).length > 0) {
+        injectedQuery = resolution.query
+        // token-param：编码交给 URL 序列化（不手拼），同名参数以凭证值为准。
+        request = { ...request, url: withQueryParams(request.url, resolution.query) }
       }
       result.credentials = credentialApplication
     }
@@ -685,7 +694,7 @@ export async function executeChainRun(
     }
 
     // 凭证值只用于两件事：发请求、给留痕做脱敏。绝不写进事件/摘要/回执。
-    let secrets = credentialApplication?.status === 'applied' ? secretValuesOf(request.headers) : []
+    let secrets = credentialApplication?.status === 'applied' ? secretValuesOf(request.headers, injectedQuery) : []
     const sensitive = input.sensitive === true
     if (secrets.length > 0) {
       for (const binding of bindings) {
@@ -699,19 +708,20 @@ export async function executeChainRun(
     }
     const requestDigest: RequestDigest = {
       method: request.method,
-      url: request.url,
+      // token-param 的凭证值在 query 里：摘要按参数名打码，正文/回显由 secrets 二次脱敏。
+      url: digestUrlFor(request.url, injectedQuery, secrets),
       headers: redactHeaders(request.headers),
       ...(request.body === undefined ? {} : { bodyPreview: bodyPreviewOf(request.body, secrets, sensitive) }),
     }
     result.requestDigest = requestDigest
-    result.url = request.url
+    result.url = requestDigest.url
 
     // 3) start 事件先于请求落盘：请求一旦发出，记录里必须已经有它。
     //    凭证摘要只在这里出现一次；值永远不会进事件。
     emit({
       event: 'step',
       id: nodeId,
-      action: `${request.method} ${request.url}`,
+      action: `${request.method} ${requestDigest.url}`,
       status: 'start',
       data: {
         card: planNode.cardId,
@@ -720,7 +730,7 @@ export async function executeChainRun(
         ...(credentialApplication === undefined ? {} : { credentials: credentialApplication }),
       },
     })
-    input.onProgress?.(`▶ ${nodeId}：${request.method} ${request.url}`)
+    input.onProgress?.(`▶ ${nodeId}：${request.method} ${requestDigest.url}`)
 
     const sendRequest = async (target: {
       method: string
@@ -800,14 +810,15 @@ export async function executeChainRun(
       // 新 cookie 覆盖旧值，重放一次（只一次；重放仍 401 走普通鉴权诊断）。
       const freshCookie = mergeCookieValues(cookieHeaderIn(request.headers), runtimeCookieHeader ?? relogin.cookieHeader)
       request = { ...request, headers: withCookieHeader(request.headers, freshCookie) }
-      secrets = secretValuesOf(request.headers)
+      secrets = secretValuesOf(request.headers, injectedQuery)
+      const replayDigestUrl = digestUrlFor(request.url, injectedQuery, secrets)
       result.requestDigest = {
         method: request.method,
-        url: request.url,
+        url: replayDigestUrl,
         headers: redactHeaders(request.headers),
         ...(request.body === undefined ? {} : { bodyPreview: bodyPreviewOf(request.body, secrets, sensitive) }),
       }
-      result.url = request.url
+      result.url = replayDigestUrl
       outcome = await sendRequest(request)
       result.attempts += outcome.ok ? outcome.response.attempts : outcome.attempts
     }
@@ -1314,7 +1325,16 @@ function authHint(
     return `HTTP ${status}：自动换票失败（${relogin.code ?? 'relogin-failed'}）：${relogin.message ?? '未知原因'}；需人工重新登录并更新凭证`
   }
   if (application?.status === 'applied') {
-    return `HTTP ${status}：已注入 ${application.names.length} 个 cookie（${application.names.join('、')}）但仍被拒；凭证可能过期。可传 relogin 登录链自动换票，或重新采集/登录后重跑`
+    const names = application.names.join('、')
+    const injected =
+      application.header === 'cookie'
+        ? `已注入 ${application.names.length} 个 cookie（${names}）`
+        : application.header === 'authorization'
+          ? `已注入 authorization 头（${names}）`
+          : application.header === 'query'
+            ? `已注入 query token（${names}）`
+            : `已注入 ${application.names.length} 个凭证（${names}）`
+    return `HTTP ${status}：${injected}但仍被拒；凭证可能过期或账号权限不足。可传 relogin 登录链自动换票，或重新采集/登录后重跑`
   }
   const reason =
     application === undefined
@@ -1354,32 +1374,80 @@ export function previewText(text: string): string {
   return buffer.subarray(0, DIGEST_PREVIEW_BYTES).toString('utf8')
 }
 
+/** 留痕里必须二次脱敏的 token 类头（与 http.ts 的 SECRET_HEADERS 对齐）。 */
+const TOKEN_SECRET_HEADERS = new Set([
+  'authorization',
+  'proxy-authorization',
+  'x-api-key',
+  'x-auth-token',
+  'x-csrf-token',
+])
+
 /**
- * 从已注入的请求头里取「需要从留痕中抹掉的值」。
+ * 请求 URL 的留痕版本：先按注入的 query 参数名打码，再按已知凭证值全文替换。
  *
- * 只认 cookie 头的值；太短（< 4 字符）的值不参与替换，避免把正常业务文本打碎。
- * 这些值只在本次节点的内存里存在，函数返回后不写任何地方。
+ * token-param 的凭证就在 URL 里，原样落 `events.ndjson`/回执就是泄漏；参数名保留
+ * 是为了让运行记录还能回答「带了哪个参数」，值一律 `***`。
  */
-function secretValuesOf(headers: Record<string, string>): string[] {
-  const cookie = Object.entries(headers).find(([name]) => name.toLowerCase() === 'cookie')?.[1]
-  if (cookie === undefined || cookie === '') return []
+function digestUrlFor(url: string, query: Record<string, string>, secrets: string[]): string {
+  const names = Object.keys(query)
+  const masked =
+    names.length === 0
+      ? url
+      : withQueryParams(url, Object.fromEntries(names.map((name) => [name, '***'])))
+  return redactSecrets(masked, secrets)
+}
+
+/**
+ * 从已注入的凭证里取「需要从留痕中抹掉的值」。
+ *
+ * 覆盖三类（R-4 M3 起）：cookie 值、token 头值（`Bearer xxx` 连同裸 token）、
+ * query token 值（原始值 + URL 编码形态）。太短（< 4 字符）的值不参与替换，
+ * 避免把正常业务文本打碎。这些值只在本次节点的内存里存在，函数返回后不写任何地方。
+ */
+function secretValuesOf(headers: Record<string, string>, query: Record<string, string> = {}): string[] {
   const secrets = new Set<string>()
-  for (const part of cookie.split(';')) {
-    const trimmed = part.trim()
-    const at = trimmed.indexOf('=')
-    if (at === -1) continue
-    const value = trimmed.slice(at + 1)
-    if (value.length >= 4) secrets.add(value)
+  const add = (raw: string | undefined): void => {
+    if (raw === undefined) return
+    const value = raw.trim()
+    if (value.length < 4) return
+    secrets.add(value)
+    // `Bearer xxx` / `Basic xxx`：服务端回显时常只回裸 token。
+    const space = value.indexOf(' ')
+    if (space > 0) {
+      const tail = value.slice(space + 1).trim()
+      if (tail.length >= 4) secrets.add(tail)
+    }
+  }
+  for (const [name, headerValue] of Object.entries(headers)) {
+    const lower = name.toLowerCase()
+    if (lower === 'cookie') {
+      for (const part of headerValue.split(';')) {
+        const trimmed = part.trim()
+        const at = trimmed.indexOf('=')
+        if (at === -1) continue
+        add(trimmed.slice(at + 1))
+      }
+      continue
+    }
+    if (TOKEN_SECRET_HEADERS.has(lower)) add(headerValue)
+  }
+  for (const value of Object.values(query)) {
+    add(value)
+    // URLSearchParams 把空格编码成 `+`，encodeURIComponent 编码成 `%20`：两种形态都要能抹掉。
+    add(value.replace(/ /g, '+'))
+    try {
+      add(encodeURIComponent(value))
+    } catch {
+      // 非法 UTF-16 代理对没法编码：原始值已进集合，不影响主脱敏。
+    }
   }
   return [...secrets]
 }
 
-/** 文本脱敏：把已知凭证值替换成 `***`。 */
+/** 文本脱敏：把已知凭证值替换成 `***`（先长后短，避免半截泄漏）。 */
 function redactSecrets(text: string, secrets: string[]): string {
-  if (secrets.length === 0) return text
-  let out = text
-  for (const secret of secrets) out = out.split(secret).join('***')
-  return out
+  return redactSecretsInText(text, secrets)
 }
 
 /** 递归脱敏（只用于事件里的 emitted 值，不改变绑定求值本身）。 */
