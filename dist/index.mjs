@@ -1,5 +1,5 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { spawn } from "node:child_process";
@@ -3436,6 +3436,7 @@ const NodeSchema = Schema.object({
 	card: Schema.string(),
 	page: Schema.string(),
 	constants: Schema.dict(ConstantValueSchema).default({}),
+	files: Schema.dict(Schema.string()),
 	retry: Schema.number().min(0),
 	timeoutSeconds: Schema.number().min(0),
 	layout: LayoutSchema
@@ -3448,7 +3449,8 @@ const EdgeSchema = Schema.object({
 		Schema.const("string"),
 		Schema.const("json"),
 		Schema.const("array-json")
-	])
+	]),
+	pick: Schema.any()
 });
 const InputSchema = Schema.object({
 	name: Schema.string().required(),
@@ -3533,6 +3535,15 @@ function isFieldDeclared(bindingPath, fields) {
 	}
 	return false;
 }
+/** 绑定路径是否是某个已声明字段的容器前缀（例如 body.list 之于 body.list[*].fs_id）。 */
+function isDeclaredContainer(bindingPath, fields) {
+	const target = fieldSegments(bindingPath);
+	if (target.length === 0) return false;
+	return fields.some((field) => {
+		const declared = fieldSegments(field.path);
+		return declared.length > target.length && target.every((segment, index) => segment.replace(/\[\*\]$/, "") === declared[index].replace(/\[\*\]$/, ""));
+	});
+}
 function issueOfSchemaFailure(error) {
 	const message = error instanceof Error ? error.message : String(error);
 	return {
@@ -3542,6 +3553,26 @@ function issueOfSchemaFailure(error) {
 	};
 }
 /** 把 schema 产物收敛成规范化的 ChainDoc（默认值补齐 + 常量统一成字符串）。 */
+/** 把 YAML 里的 pick 收敛成类型；缺 match/field 视为没写（不静默猜）。 */
+function normalizePick(raw) {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
+	const record = raw;
+	const match = record["match"];
+	if (typeof match !== "object" || match === null || Array.isArray(match)) return void 0;
+	const matchRecord = match;
+	const field = matchRecord["field"];
+	const equals = matchRecord["equals"];
+	if (typeof field !== "string" || field === "" || equals === void 0) return void 0;
+	if (typeof equals !== "string" && typeof equals !== "number" && typeof equals !== "boolean") return void 0;
+	const take = record["field"];
+	return {
+		match: {
+			field,
+			equals
+		},
+		...typeof take === "string" && take !== "" ? { field: take } : {}
+	};
+}
 function normalizeDoc(raw) {
 	const doc = raw;
 	return {
@@ -3568,6 +3599,7 @@ function normalizeDoc(raw) {
 		nodes: (doc.nodes ?? []).map((node) => {
 			const rest = unknownKeysOf(node);
 			delete rest.layout;
+			delete rest.files;
 			const layout = nodeLayoutOf(node.layout);
 			return {
 				...rest,
@@ -3575,6 +3607,7 @@ function normalizeDoc(raw) {
 				...node.card === void 0 ? {} : { card: node.card },
 				...node.page === void 0 ? {} : { page: node.page },
 				constants: Object.fromEntries(Object.entries(node.constants ?? {}).map(([key, value]) => [key, String(value)])),
+				...node.files === void 0 || Object.keys(node.files).length === 0 ? {} : { files: { ...node.files } },
 				...node.retry === void 0 ? {} : { retry: node.retry },
 				...node.timeoutSeconds === void 0 ? {} : { timeoutSeconds: node.timeoutSeconds },
 				...layout === void 0 ? {} : { layout }
@@ -3585,7 +3618,8 @@ function normalizeDoc(raw) {
 			from: edge.from,
 			to: edge.to,
 			...edge.suggested === true ? { suggested: true } : {},
-			...edge.transform === void 0 ? {} : { transform: edge.transform }
+			...edge.transform === void 0 ? {} : { transform: edge.transform },
+			...normalizePick(edge.pick) === void 0 ? {} : { pick: normalizePick(edge.pick) }
 		}))
 	};
 }
@@ -3889,7 +3923,7 @@ function checkInterfaceEdges(doc, nodeIds, cards, constantsOf, declaredSlots, re
 			});
 			else {
 				const card = cards.get(from.nodeId);
-				if (card && !isFieldDeclared(from.fieldPath, card.outputs)) issues.push({
+				if (card && !isFieldDeclared(from.fieldPath, card.outputs) && !(edge.pick !== void 0 && isDeclaredContainer(from.fieldPath, card.outputs))) issues.push({
 					target,
 					code: "unknown-source-field",
 					reason: `${edge.from} 不在卡 ${card.cardId} 的出参模板里（卡模板里没有这个字段）`
@@ -4316,6 +4350,10 @@ function normalizePath(path) {
 function coveredPaths(doc, node) {
 	const covered = /* @__PURE__ */ new Set();
 	for (const key of Object.keys(node.constants ?? {})) {
+		const normalized = normalizePath(key);
+		if (normalized.length > 0) covered.add(normalized);
+	}
+	for (const key of Object.keys(node.files ?? {})) {
 		const normalized = normalizePath(key);
 		if (normalized.length > 0) covered.add(normalized);
 	}
@@ -4868,7 +4906,7 @@ function hasOwn(record, key) {
 * 没解析出值的字段不在这里报错——`plan.buildPlan` 已经做过静态缺参判定，
 * 走到这里还缺就是运行期漏传，由 {@link buildRequest} 统一报 `param-missing`。
 */
-function resolveFields(input) {
+function resolveFields(input, filePaths) {
 	const provided = input.provided ?? {};
 	const inputs = input.inputs ?? {};
 	const constants = input.node.constants ?? {};
@@ -4878,6 +4916,7 @@ function resolveFields(input) {
 	for (const field of input.card.inputs ?? []) {
 		if (field.role === "credential") continue;
 		const key = normalizePath(field.path);
+		if (filePaths.has(key)) continue;
 		if (hasOwn(provided, key)) {
 			fields.push({
 				path: field.path,
@@ -4989,6 +5028,30 @@ function parseTemplateQuery(query) {
 function serializeQuery(pairs) {
 	return pairs.map(([name, value]) => value === "" ? name : `${name}=${encodeURIComponent(value)}`).join("&");
 }
+/** multipart 字段值：标量原样，数组/对象 JSON 字面量。 */
+function multipartValueOf(value) {
+	if (typeof value === "string") return value;
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	if (value === null) return "";
+	return JSON.stringify(value);
+}
+/** 构造 multipart 正文（文本字段 + 文件分片）；filePaths 里的字段不再重复写文本。 */
+function multipartBodyOf(boundary, body, fileParts, filePaths) {
+	const chunks = [];
+	for (const [key, value] of Object.entries(body)) {
+		if (filePaths.has(normalizePath(`body.${key}`))) continue;
+		chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${multipartValueOf(value)}\r\n`, "utf8"));
+	}
+	for (const part of fileParts) {
+		const formName = part.field.startsWith("body.") ? part.field.slice(5) : part.field;
+		const safeName = part.filename.replace(/"/g, "_");
+		chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${formName}"; filename="${safeName}"\r\nContent-Type: ${part.contentType}\r\n\r\n`, "utf8"));
+		chunks.push(Buffer.from(part.data));
+		chunks.push(Buffer.from("\r\n", "utf8"));
+	}
+	chunks.push(Buffer.from(`--${boundary}--\r\n`, "utf8"));
+	return Buffer.concat(chunks);
+}
 /** 扁平 body → application/x-www-form-urlencoded；数组/对象按 JSON 字面量落值。 */
 function formBodyOf(body) {
 	const params = new URLSearchParams();
@@ -5006,7 +5069,9 @@ function formBodyOf(body) {
 * 失败一律带 `path`（能指到具体字段就指），让回执能直接告诉 agent 该改链上的哪个位置。
 */
 function buildRequest(input) {
-	const { fields, missing } = resolveFields(input);
+	const fileParts = input.fileParts ?? [];
+	const filePaths = new Set(fileParts.map((part) => normalizePath(part.field)));
+	const { fields, missing } = resolveFields(input, filePaths);
 	const notices = [];
 	if (missing.length > 0) {
 		const first = missing[0];
@@ -5053,6 +5118,7 @@ function buildRequest(input) {
 			continue;
 		}
 		if (location === "body") {
+			if (filePaths.has(normalizePath(field.path))) continue;
 			const failure = assignBody(body, rest, field.value);
 			if (failure !== void 0) return {
 				ok: false,
@@ -5122,20 +5188,25 @@ function buildRequest(input) {
 		};
 	}
 	const method = input.node.method.toUpperCase();
-	const sendsBody = method !== "GET" && method !== "HEAD" && hasBodyField;
+	const sendsBody = method !== "GET" && method !== "HEAD" && (hasBodyField || fileParts.length > 0);
 	let bodyText;
 	if (sendsBody) {
 		const contentTypeKey = Object.keys(headers).find((name) => name.toLowerCase() === "content-type");
 		const contentType = contentTypeKey === void 0 ? "" : headers[contentTypeKey].toLowerCase();
-		if (contentType === "") {
+		if (contentType.includes("multipart/form-data")) {
+			const boundary = `----dshDataforge${Math.random().toString(16).slice(2)}`;
+			const nextKey = Object.keys(headers).find((name) => name.toLowerCase() === "content-type") ?? "content-type";
+			headers[nextKey] = `multipart/form-data; boundary=${boundary}`;
+			bodyText = multipartBodyOf(boundary, body, fileParts, filePaths);
+		} else if (fileParts.length > 0) return {
+			ok: false,
+			code: "file-part-invalid",
+			message: `文件分片要求 content-type 为 multipart/form-data（当前 ${contentType === "" ? "未设置" : contentType}）`
+		};
+		else if (contentType === "") {
 			headers["content-type"] = JSON_CONTENT_TYPE;
 			bodyText = JSON.stringify(body);
 		} else if (contentType.includes("application/x-www-form-urlencoded")) bodyText = formBodyOf(body);
-		else if (contentType.includes("multipart/form-data")) return {
-			ok: false,
-			code: "body-type-unsupported",
-			message: "multipart/form-data 请求体暂不支持：需要文件分片/边界，当前执行引擎只支持 JSON 与 urlencoded（R-5 真实站点上传待补）"
-		};
 		else bodyText = JSON.stringify(body);
 	}
 	return {
@@ -5931,7 +6002,7 @@ async function executeChainRun(deps, prepared, input) {
 				});
 				return failPreRequest(bindings, "binding-path-not-found", message);
 			}
-			const bound = resolveBinding(root, from.fieldPath, edge.transform === void 0 ? edgeTargetType(card, to.fieldPath) : void 0);
+			const bound = resolveBinding(root, from.fieldPath, edge.transform === void 0 && edge.pick === void 0 ? edgeTargetType(card, to.fieldPath) : void 0);
 			if (!bound.ok) {
 				const code = bindingCodeOf(bound.code);
 				const message = `绑定边 ${edge.from} → ${edge.to} 求值失败：${bound.message}`;
@@ -5943,21 +6014,48 @@ async function executeChainRun(deps, prepared, input) {
 				});
 				return failPreRequest(bindings, code, message);
 			}
-			const transformed = edge.transform === void 0 ? bound.value : applyEdgeTransform(bound.value, edge.transform);
+			let value = bound.value;
+			if (edge.pick !== void 0) {
+				const picked = applyPick(value, edge.pick);
+				if (!picked.ok) {
+					bindings.push({
+						from: edge.from,
+						to: edge.to,
+						code: "pick-not-found",
+						error: picked.message
+					});
+					return failPreRequest(bindings, "pick-not-found", picked.message);
+				}
+				value = picked.value;
+			}
+			const transformed = edge.transform === void 0 ? value : applyEdgeTransform(value, edge.transform);
 			provided[normalizePath(to.fieldPath)] = transformed;
 			bindings.push({
 				from: edge.from,
 				to: edge.to,
 				...edge.transform === void 0 ? {} : { transform: edge.transform },
+				...edge.pick === void 0 ? {} : { pick: edge.pick },
 				valuePreview: previewValue$1(transformed)
 			});
+		}
+		const fileParts = resolveNodeFiles(node, inputs);
+		if (!fileParts.ok) {
+			emit({
+				event: "step",
+				id: nodeId,
+				action: `${method} ${planNode.urlTemplate}`,
+				status: "start",
+				data: { card: planNode.cardId }
+			});
+			return failAfterStart(bindings, fileParts.code, fileParts.message);
 		}
 		const built = buildRequest({
 			node: planNode,
 			card,
 			baseUrl: plan.baseUrl,
 			provided,
-			inputs
+			inputs,
+			...fileParts.parts.length === 0 ? {} : { fileParts: fileParts.parts }
 		});
 		if (!built.ok) {
 			const message = built.message;
@@ -6005,7 +6103,7 @@ async function executeChainRun(deps, prepared, input) {
 			method: request.method,
 			url: request.url,
 			headers: redactHeaders(request.headers),
-			...request.body === void 0 ? {} : { bodyPreview: sensitive ? "[已脱敏]" : previewText(redactSecrets(request.body, secrets)) }
+			...request.body === void 0 ? {} : { bodyPreview: bodyPreviewOf(request.body, secrets, sensitive) }
 		};
 		result.requestDigest = requestDigest;
 		result.url = request.url;
@@ -6114,7 +6212,7 @@ async function executeChainRun(deps, prepared, input) {
 				method: request.method,
 				url: request.url,
 				headers: redactHeaders(request.headers),
-				...request.body === void 0 ? {} : { bodyPreview: sensitive ? "[已脱敏]" : previewText(redactSecrets(request.body, secrets)) }
+				...request.body === void 0 ? {} : { bodyPreview: bodyPreviewOf(request.body, secrets, sensitive) }
 			};
 			result.url = request.url;
 			outcome = await sendRequest(request);
@@ -6382,6 +6480,99 @@ function terminalMessage(doc, plan, failure, cancelled, cancelledMessage, nodes)
 	if (cancelled) return `链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} 已取消：${doneCount}/${plan.order.length} 个节点完成${cancelledMessage === void 0 ? "" : `（${cancelledMessage}）`}`;
 	return `链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} 执行完成：${plan.order.length} 个节点全绿`;
 }
+/** 从数组出参里按字段值选一个元素，再取字段（缺省取整个元素）。 */
+function applyPick(value, pick) {
+	if (!Array.isArray(value)) return {
+		ok: false,
+		message: `pick 需要数组出参，实际是 ${Array.isArray(value) ? "array" : typeof value}`
+	};
+	const hit = value.find((item) => fieldValueOf(item, pick.match.field) !== void 0 && String(fieldValueOf(item, pick.match.field)) === String(pick.match.equals));
+	if (hit === void 0) return {
+		ok: false,
+		message: `pick 没有匹配项：${pick.match.field} = ${String(pick.match.equals)}`
+	};
+	if (pick.field === void 0) return {
+		ok: true,
+		value: hit
+	};
+	const picked = fieldValueOf(hit, pick.field);
+	if (picked === void 0) return {
+		ok: false,
+		message: `pick 命中元素里没有字段 ${pick.field}`
+	};
+	return {
+		ok: true,
+		value: picked
+	};
+}
+/** 点路径取值（只用于 pick 的 match.field / field，不支持通配）。 */
+function fieldValueOf(value, path) {
+	let cursor = value;
+	for (const segment of path.split(".").filter((part) => part !== "")) {
+		if (Array.isArray(cursor)) {
+			const index = Number(segment);
+			if (!Number.isInteger(index) || index < 0 || index >= cursor.length) return void 0;
+			cursor = cursor[index];
+			continue;
+		}
+		if (typeof cursor !== "object" || cursor === null) return void 0;
+		cursor = cursor[segment];
+	}
+	return cursor;
+}
+/** 节点 files → 本地文件分片；文件不存在/读失败在发请求前拒。 */
+function resolveNodeFiles(node, inputs) {
+	const parts = [];
+	for (const [field, ref] of Object.entries(node.files ?? {})) {
+		if (typeof ref !== "string" || ref.trim() === "") return {
+			ok: false,
+			code: "file-field-invalid",
+			message: `节点 ${node.id} 的文件字段 ${field} 没有路径`
+		};
+		const slot = isInputSlotRef(ref) ? ref.slice(8) : void 0;
+		const path = slot === void 0 ? ref : inputs[slot];
+		if (typeof path !== "string" || path.trim() === "") return {
+			ok: false,
+			code: "file-not-found",
+			message: `节点 ${node.id} 的文件字段 ${field} 取不到路径（${ref}）`
+		};
+		if (!existsSync(path) || !statSync(path).isFile()) return {
+			ok: false,
+			code: "file-not-found",
+			message: `节点 ${node.id} 的文件不存在或不是普通文件：${path}`
+		};
+		let data;
+		try {
+			data = readFileSync(path);
+		} catch (error) {
+			return {
+				ok: false,
+				code: "file-read-failed",
+				message: `读取文件失败 ${path}：${error instanceof Error ? error.message : String(error)}`
+			};
+		}
+		parts.push({
+			field,
+			filename: basename(path),
+			contentType: contentTypeOfFile(path),
+			data
+		});
+	}
+	return {
+		ok: true,
+		parts
+	};
+}
+function contentTypeOfFile(path) {
+	const ext = extname(path).toLowerCase();
+	if (ext === ".txt") return "text/plain";
+	if (ext === ".json") return "application/json";
+	if (ext === ".png") return "image/png";
+	if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+	if (ext === ".gif") return "image/gif";
+	if (ext === ".pdf") return "application/pdf";
+	return "application/octet-stream";
+}
 /** 绑定值转换：显式声明才做，绝不隐式改变类型。 */
 function applyEdgeTransform(value, transform) {
 	if (transform === "string") return typeof value === "string" ? value : String(value);
@@ -6408,8 +6599,16 @@ function collectEmitted(doc, cards, nodeId, root) {
 		if (!from || from.nodeId !== nodeId) continue;
 		const to = splitBindingPath(edge.to);
 		const card = to === void 0 ? void 0 : cards.get(cardOfNode(doc, to.nodeId));
-		const bound = resolveBinding(root, from.fieldPath, edge.transform !== void 0 || to === void 0 || card === void 0 ? void 0 : edgeTargetType(card, to.fieldPath));
-		if (bound.ok) emitted[edge.from] = edge.transform === void 0 ? bound.value : applyEdgeTransform(bound.value, edge.transform);
+		const bound = resolveBinding(root, from.fieldPath, edge.transform !== void 0 || edge.pick !== void 0 || to === void 0 || card === void 0 ? void 0 : edgeTargetType(card, to.fieldPath));
+		if (bound.ok) {
+			let value = bound.value;
+			if (edge.pick !== void 0) {
+				const picked = applyPick(value, edge.pick);
+				if (!picked.ok) continue;
+				value = picked.value;
+			}
+			emitted[edge.from] = edge.transform === void 0 ? value : applyEdgeTransform(value, edge.transform);
+		}
 	}
 	return emitted;
 }
@@ -6457,6 +6656,11 @@ function retryOf(node, method) {
 	return Math.max(0, Math.min(MAX_NODE_RETRY, Math.floor(raw)));
 }
 /** 正文预览：按字节截前 4 KiB（多字节字符被切断时留替换符，比超限更可接受）。 */
+/** 请求正文预览：字符串脱敏截断；multipart 二进制只报字节数。 */
+function bodyPreviewOf(body, secrets, sensitive) {
+	if (typeof body !== "string") return `[multipart ${body.byteLength} bytes]`;
+	return sensitive ? "[已脱敏]" : previewText(redactSecrets(body, secrets));
+}
 function previewText(text) {
 	const buffer = Buffer.from(text ?? "", "utf8");
 	if (buffer.byteLength <= DIGEST_PREVIEW_BYTES) return text ?? "";
@@ -7678,12 +7882,36 @@ async function probeNode(input) {
 		gaps: []
 	};
 	const providedValues = Object.fromEntries([...prepared.provided.values()].map((value) => [value.path, value.value]));
+	const fileParts = resolveNodeFiles(node, input.chainInputs ?? {});
+	if (!fileParts.ok) {
+		appendEvent(input.dataRoot, runId, {
+			event: "terminal",
+			success: false,
+			cancelled: false,
+			message: fileParts.message
+		});
+		return {
+			ok: false,
+			gate: "blocked",
+			code: fileParts.code,
+			message: fileParts.message,
+			runId,
+			runDir,
+			explorationId,
+			nodeId: node.id,
+			cardId: card.cardId,
+			method,
+			cardInputs: prepared.cardInputs,
+			provenance: prepared.provenance
+		};
+	}
 	const built = buildRequest({
 		node: planNode,
 		card,
 		baseUrl: input.baseUrl,
 		provided: providedValues,
-		inputs: input.chainInputs ?? {}
+		inputs: input.chainInputs ?? {},
+		...fileParts.parts.length === 0 ? {} : { fileParts: fileParts.parts }
 	});
 	if (!built.ok) {
 		appendEvent(input.dataRoot, runId, {
@@ -7745,7 +7973,7 @@ async function probeNode(input) {
 		method: request.method,
 		url: request.url,
 		headers: redactedHeaders,
-		...request.body === void 0 ? {} : { bodyPreview: previewText(redactText(request.body, sensitiveValues)) }
+		...request.body === void 0 ? {} : { bodyPreview: typeof request.body === "string" ? previewText(redactText(request.body, sensitiveValues)) : `[multipart ${request.body.byteLength} bytes]` }
 	};
 	appendEvent(input.dataRoot, runId, {
 		event: "step",
