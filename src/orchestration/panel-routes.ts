@@ -291,8 +291,9 @@ async function handleSave(deps: OrchestrationPanelDeps, req: IncomingMessage, re
   }
 
   let input: ChainDoc | string
+  let source: ChainSource = 'canvas'
   try {
-    const parsed = JSON.parse(body) as { chainYaml?: unknown; doc?: unknown }
+    const parsed = JSON.parse(body) as { chainYaml?: unknown; doc?: unknown; source?: unknown }
     if (typeof parsed.chainYaml === 'string' && parsed.chainYaml.trim().length > 0) {
       input = parsed.chainYaml
     } else if (parsed.doc !== null && typeof parsed.doc === 'object') {
@@ -301,13 +302,19 @@ async function handleSave(deps: OrchestrationPanelDeps, req: IncomingMessage, re
       fail(res, 400, '请求体必须形如 {"doc": {…链文档…}} 或 {"chainYaml": "<链 YAML 文本>"}', 'bad-param')
       return
     }
+    // 来源由调用方声明：画布保存 vs YAML 导入。别的值一律不认（避免写入不可解释的来源）。
+    if (parsed.source === 'import') source = 'import'
+    else if (parsed.source !== undefined && parsed.source !== 'canvas') {
+      fail(res, 400, `source 只接受 canvas / import，收到 ${String(parsed.source)}`, 'bad-param')
+      return
+    }
   } catch {
     fail(res, 400, '请求体不是合法 JSON', 'bad-json')
     return
   }
 
   const workspaceRoot = await deps.resolveWorkspaceRoot()
-  const saved = saveChain(workspaceRoot, input, { source: 'canvas' })
+  const saved = saveChain(workspaceRoot, input, { source })
   if (!saved.ok) {
     ok(res, {
       ok: false,

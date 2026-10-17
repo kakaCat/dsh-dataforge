@@ -112,3 +112,13 @@ export async function fetchChainGraph(site: string, flow: string, version?: numb
 export async function saveChainGraph(doc: ChainDocLike): Promise<ChainSaveResult> {
   return postPanelData<ChainSaveResult>('/orchestration/graph', { doc })
 }
+
+/**
+ * YAML 导入：同一写入口，只是 source 声明成 import（版本列表会显示「YAML 导入」）。
+ *
+ * 为什么导入也用 JSON 信封而不是表单上传：链 YAML 是纯文本、体积极小，JSON 里带一个
+ * 字符串就够；表单 multipart 只会多一层解析。校验完全交给服务端 saveChain。
+ */
+export async function importChainYaml(chainYaml: string): Promise<ChainSaveResult> {
+  return postPanelData<ChainSaveResult>('/orchestration/graph', { chainYaml, source: 'import' })
+}

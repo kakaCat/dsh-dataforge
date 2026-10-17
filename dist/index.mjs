@@ -6231,6 +6231,7 @@ async function handleSave(deps, req, res) {
 		return;
 	}
 	let input;
+	let source = "canvas";
 	try {
 		const parsed = JSON.parse(body);
 		if (typeof parsed.chainYaml === "string" && parsed.chainYaml.trim().length > 0) input = parsed.chainYaml;
@@ -6239,12 +6240,17 @@ async function handleSave(deps, req, res) {
 			fail(res, 400, "请求体必须形如 {\"doc\": {…链文档…}} 或 {\"chainYaml\": \"<链 YAML 文本>\"}", "bad-param");
 			return;
 		}
+		if (parsed.source === "import") source = "import";
+		else if (parsed.source !== void 0 && parsed.source !== "canvas") {
+			fail(res, 400, `source 只接受 canvas / import，收到 ${String(parsed.source)}`, "bad-param");
+			return;
+		}
 	} catch {
 		fail(res, 400, "请求体不是合法 JSON", "bad-json");
 		return;
 	}
 	const workspaceRoot = await deps.resolveWorkspaceRoot();
-	const saved = saveChain(workspaceRoot, input, { source: "canvas" });
+	const saved = saveChain(workspaceRoot, input, { source });
 	if (!saved.ok) {
 		ok(res, {
 			ok: false,

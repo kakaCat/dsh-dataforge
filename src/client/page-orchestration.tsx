@@ -16,8 +16,8 @@
  *
  * @module dsh-dataforge/client/page-orchestration
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { fetchChainGraph, fetchOrchestrationOverview, saveChainGraph } from './api.js'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { fetchChainGraph, fetchOrchestrationOverview, importChainYaml, saveChainGraph } from './api.js'
 import { OrchestrationCanvas } from './orchestration-canvas.js'
 import type {
   ChainDocLike, ChainGraph, ChainSaveResult, ChainSource, OrchestrationFlow,
@@ -69,6 +69,7 @@ export interface OrchestrationPageProps {
 export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNode {
   const [overview, setOverview] = useState<OrchestrationOverview | undefined>()
   const [error, setError] = useState<string | undefined>()
+  const [notice, setNotice] = useState<string | undefined>()
   const [loading, setLoading] = useState(false)
 
   const [view, setView] = useState<View>('sites')
@@ -264,6 +265,12 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
 
   return (
     <div className="dsh-df-page">
+      {notice === undefined ? null : (
+        <div className="dsh-df-canvas-notice" role="status">
+          {notice}
+          <button type="button" className="dsh-df-btn" onClick={() => { setNotice(undefined) }}>知道了</button>
+        </div>
+      )}
       {error === undefined ? null : (
         <div className="dsh-df-errline" role="alert">
           {error}
@@ -320,6 +327,7 @@ export function OrchestrationPage({ visible }: OrchestrationPageProps): ReactNod
           onOpenGraphs={openGraphs}
           onOpenCanvas={(target, version) => { void openCanvas(target, version) }}
           onCreated={createDraft}
+          onImported={(text) => { setNotice(text); void reload() }}
         />
       )}
 
@@ -434,12 +442,15 @@ function FlowsView(props: {
   onOpenGraphs: (flow: OrchestrationFlow) => void
   onOpenCanvas: (flow: OrchestrationFlow, version?: number) => void
   onCreated: (draft: { flow: string; kind: KindTab; domain: string; note: string }) => void
+  onImported: (notice: string) => void
 }): ReactNode {
   const {
     siteName, kind, search, domains, total, page, pageSize, collapsedDomains, collapsedFlows,
-    onKind, onSearch, onToggleDomain, onToggleFlow, onPage, onBack, onOpenGraphs, onOpenCanvas, onCreated,
+    onKind, onSearch, onToggleDomain, onToggleFlow, onPage, onBack, onOpenGraphs, onOpenCanvas, onCreated, onImported,
   } = props
   const [modalOpen, setModalOpen] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const fileRef = useRef<HTMLInputElement | null>(null)
   const pages = Math.max(1, Math.ceil(total / pageSize))
 
   return (
@@ -470,7 +481,41 @@ function FlowsView(props: {
         />
         <div className="dsh-df-ops">
           <span className="dsh-df-fmt-tag">导入格式：YAML</span>
-          <button type="button" className="dsh-df-btn" onClick={() => { setModalOpen(true) }}>+ 新建流程</button>
+          <button
+            type="button"
+            className="dsh-df-btn"
+            disabled={importing}
+            onClick={() => { fileRef.current?.click() }}
+          >
+            {importing ? '导入中…' : '导入编排'}
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".yaml,.yml,text/yaml"
+            style={{ display: 'none' }}
+            onChange={(event) => {
+              const file = event.target.files?.[0]
+              event.target.value = ''
+              if (file === undefined) return
+              setImporting(true)
+              void file.text()
+                .then((text) => importChainYaml(text))
+                .then((result) => {
+                  if (result.ok) {
+                    onImported(`已导入为 v${result.version ?? '?'}（来源：YAML 导入）`)
+                  } else {
+                    const lines = (result.issues ?? []).map((issue) => `${issue.target}：${issue.reason}`)
+                    onImported(`导入被拒绝，未落盘：\n${lines.join('\n')}`)
+                  }
+                })
+                .catch((err: unknown) => {
+                  onImported(`导入失败：${err instanceof Error ? err.message : String(err)}`)
+                })
+                .finally(() => { setImporting(false) })
+            }}
+          />
+          <button type="button" className="dsh-df-btn-primary" onClick={() => { setModalOpen(true) }}>+ 新建流程</button>
         </div>
       </div>
 

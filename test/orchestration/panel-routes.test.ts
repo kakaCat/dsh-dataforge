@@ -214,6 +214,29 @@ describe('POST /orchestration/graph（画布保存）', () => {
     expect(saved.meta).toMatchObject({ version: 2, source: 'canvas' })
   })
 
+  it('source=import 的导入版本被如实标注（与画布保存区分开）', async () => {
+    seedChain()
+    const response = await serveAsync('POST', GRAPH, JSON.stringify({
+      chainYaml: chainToYaml(chainDoc()),
+      source: 'import',
+    }))
+    expect(json(response).data).toMatchObject({ ok: true, version: 2 })
+
+    const overview = json(await serveAsync('GET', OVERVIEW))
+    const versions = (overview.data?.flows as Array<Record<string, unknown>>)[0]?.versions as Array<Record<string, unknown>>
+    expect(versions[1]?.source).toBe('import')
+  })
+
+  it('source 只接受 canvas / import（别的值 400，不写不可解释的来源）', async () => {
+    seedChain()
+    const response = await serveAsync('POST', GRAPH, JSON.stringify({
+      chainYaml: chainToYaml(chainDoc()),
+      source: 'agent',
+    }))
+    expect(response.status).toBe(400)
+    expect(json(response).code).toBe('bad-param')
+  })
+
   it('校验不过不落盘，issues 原样回给画布', async () => {
     seedChain()
     const broken = chainToYaml({ ...chainDoc(), edges: [{ from: 'ghost.body.x', to: 'create-order.body.orgId' }] })
