@@ -3437,6 +3437,9 @@ const NodeSchema = Schema.object({
 	page: Schema.string(),
 	constants: Schema.dict(ConstantValueSchema).default({}),
 	files: Schema.dict(Schema.string()),
+	baseUrl: Schema.string(),
+	hashes: Schema.dict(Schema.string()),
+	expect: Schema.any(),
 	retry: Schema.number().min(0),
 	timeoutSeconds: Schema.number().min(0),
 	layout: LayoutSchema
@@ -3553,6 +3556,19 @@ function issueOfSchemaFailure(error) {
 	};
 }
 /** 把 schema 产物收敛成规范化的 ChainDoc（默认值补齐 + 常量统一成字符串）。 */
+/** 把 YAML 里的 expect 收敛成类型；缺 path/equals 视为没写。 */
+function normalizeExpect(raw) {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
+	const record = raw;
+	const path = record["path"];
+	const equals = record["equals"];
+	if (typeof path !== "string" || path === "" || equals === void 0) return void 0;
+	if (typeof equals !== "string" && typeof equals !== "number" && typeof equals !== "boolean") return void 0;
+	return {
+		path,
+		equals
+	};
+}
 /** 把 YAML 里的 pick 收敛成类型；缺 match/field 视为没写（不静默猜）。 */
 function normalizePick(raw) {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
@@ -3600,6 +3616,9 @@ function normalizeDoc(raw) {
 			const rest = unknownKeysOf(node);
 			delete rest.layout;
 			delete rest.files;
+			delete rest.baseUrl;
+			delete rest.hashes;
+			delete rest.expect;
 			const layout = nodeLayoutOf(node.layout);
 			return {
 				...rest,
@@ -3607,7 +3626,10 @@ function normalizeDoc(raw) {
 				...node.card === void 0 ? {} : { card: node.card },
 				...node.page === void 0 ? {} : { page: node.page },
 				constants: Object.fromEntries(Object.entries(node.constants ?? {}).map(([key, value]) => [key, String(value)])),
+				...node.baseUrl === void 0 || node.baseUrl === "" ? {} : { baseUrl: node.baseUrl },
 				...node.files === void 0 || Object.keys(node.files).length === 0 ? {} : { files: { ...node.files } },
+				...node.hashes === void 0 || Object.keys(node.hashes).length === 0 ? {} : { hashes: { ...node.hashes } },
+				...normalizeExpect(node.expect) === void 0 ? {} : { expect: normalizeExpect(node.expect) },
 				...node.retry === void 0 ? {} : { retry: node.retry },
 				...node.timeoutSeconds === void 0 ? {} : { timeoutSeconds: node.timeoutSeconds },
 				...layout === void 0 ? {} : { layout }
@@ -3831,6 +3853,27 @@ function checkChain(doc, resolveCard) {
 		}
 		cards.set(node.id, card);
 	});
+	doc.nodes.forEach((node, index) => {
+		if (node.baseUrl !== void 0) try {
+			const url = new URL(node.baseUrl);
+			if (url.protocol !== "http:" && url.protocol !== "https:") issues.push({
+				target: `nodes[${index}]`,
+				code: "invalid-chain",
+				reason: `节点 ${node.id} 的 baseUrl 必须是 http(s)：${node.baseUrl}`
+			});
+		} catch {
+			issues.push({
+				target: `nodes[${index}]`,
+				code: "invalid-chain",
+				reason: `节点 ${node.id} 的 baseUrl 不是合法 URL：${node.baseUrl}`
+			});
+		}
+		for (const [field, spec] of Object.entries(node.hashes ?? {})) if (!/^(md5|md5-array|sha1):.+/.test(spec)) issues.push({
+			target: `nodes[${index}]`,
+			code: "invalid-chain",
+			reason: `节点 ${node.id} 的 hash 字段 ${field} 规格非法：${spec}（只支持 md5:/md5-array:/sha1: + 文件路径）`
+		});
+	});
 	const declaredSlots = /* @__PURE__ */ new Set();
 	doc.inputs.forEach((input, index) => {
 		const target = `inputs[${index}]`;
@@ -3860,6 +3903,16 @@ function checkChain(doc, resolveCard) {
 				target,
 				code: "unknown-input-slot",
 				reason: `节点 ${node.id} 的常量 ${key} 引用了未声明的槽位 $inputs.${slot}`
+			});
+		}
+		for (const [key, value] of [...Object.entries(node.files ?? {}), ...Object.entries(node.hashes ?? {})]) {
+			const slot = inputSlotNameOf(value.replace(/^(md5|md5-array|sha1):/, ""));
+			if (slot === void 0) continue;
+			referencedSlots.add(slot);
+			if (!declaredSlots.has(slot)) issues.push({
+				target,
+				code: "unknown-input-slot",
+				reason: `节点 ${node.id} 的文件/hash 字段 ${key} 引用了未声明的槽位 $inputs.${slot}`
 			});
 		}
 		constantsOf.set(node.id, keys);
@@ -4357,6 +4410,10 @@ function coveredPaths(doc, node) {
 		const normalized = normalizePath(key);
 		if (normalized.length > 0) covered.add(normalized);
 	}
+	for (const key of Object.keys(node.hashes ?? {})) {
+		const normalized = normalizePath(key);
+		if (normalized.length > 0) covered.add(normalized);
+	}
 	for (const edge of doc.edges) {
 		const to = splitBindingPath(edge.to);
 		if (!to || to.nodeId !== node.id) continue;
@@ -4466,8 +4523,13 @@ function buildPlan(doc, cards, inputs, baseUrl) {
 		const uncoveredCredentials = (card.inputs ?? []).filter((field) => field.role === "credential" && !covered.has(normalizePath(field.path)));
 		if (uncoveredCredentials.length > 0) authGapNodes.push(`${node.id}（${uncoveredCredentials.map((field) => field.path).join(" / ")}）`);
 		const seenSlots = /* @__PURE__ */ new Set();
-		for (const value of Object.values(node.constants ?? {})) {
-			const slot = inputSlotNameOf(String(value));
+		const slotValues = [
+			...Object.values(node.constants ?? {}).map((value) => String(value)),
+			...Object.values(node.files ?? {}),
+			...Object.values(node.hashes ?? {}).map((value) => value.replace(/^(md5|md5-array|sha1):/, ""))
+		];
+		for (const value of slotValues) {
+			const slot = inputSlotNameOf(value);
 			if (slot === void 0 || seenSlots.has(slot)) continue;
 			seenSlots.add(slot);
 			const gap = slotGapOf(nodeId, slot, declaredSlots, runtimeInputs);
@@ -4484,7 +4546,9 @@ function buildPlan(doc, cards, inputs, baseUrl) {
 	const allGaps = topo.order.flatMap((nodeId) => gapsByNode.get(nodeId) ?? []);
 	if (allGaps.length > 0) return failure("missing-params", `静态缺参 ${allGaps.length} 条（一个请求都不会发）：${describeGaps(allGaps)}`, allGaps);
 	const resolvedBase = resolveBaseUrl(baseUrl);
-	if (!resolvedBase.ok) return failure("base-url-unresolved", resolvedBase.message);
+	const nodesWithoutBase = doc.nodes.filter((node) => node.baseUrl === void 0);
+	if (!resolvedBase.ok && nodesWithoutBase.length > 0) return failure("base-url-unresolved", resolvedBase.message);
+	const planBaseUrl = resolvedBase.ok ? resolvedBase.baseUrl : "";
 	if (authGapNodes.length > 0) notices.push(`auth-not-injected：节点 ${authGapNodes.join("、")} 的凭证入参未注入（R-4 负责），引擎不会发送空值`);
 	const idSet = new Set(topo.order);
 	const dependsOn = /* @__PURE__ */ new Map();
@@ -4502,6 +4566,7 @@ function buildPlan(doc, cards, inputs, baseUrl) {
 			cardId: card.cardId,
 			method: card.identity.method,
 			urlTemplate: card.identity.urlTemplate,
+			...node.baseUrl === void 0 ? {} : { baseUrl: resolveBaseUrl(node.baseUrl).ok ? node.baseUrl : node.baseUrl },
 			dependsOn: dependsOn.get(nodeId) ?? [],
 			constants: { ...node.constants ?? {} },
 			gaps: gapsByNode.get(nodeId) ?? []
@@ -4513,7 +4578,7 @@ function buildPlan(doc, cards, inputs, baseUrl) {
 			order: [...topo.order],
 			nodes,
 			gaps: [],
-			baseUrl: resolvedBase.baseUrl,
+			baseUrl: planBaseUrl,
 			writeNodes: nodes.filter((node) => isWriteMethod(node.method)).map((node) => node.nodeId),
 			totalNodes: topo.order.length
 		},
@@ -5025,8 +5090,12 @@ function parseTemplateQuery(query) {
 		return at === -1 ? [pair, ""] : [pair.slice(0, at), pair.slice(at + 1)];
 	});
 }
+/** query 值编码：冒号/等号按采集原文保留（百度 uploadid 这类值按字面校验）。 */
+function encodeQueryValue(value) {
+	return encodeURIComponent(value).replace(/%3A/g, ":").replace(/%3D/g, "=");
+}
 function serializeQuery(pairs) {
-	return pairs.map(([name, value]) => value === "" ? name : `${name}=${encodeURIComponent(value)}`).join("&");
+	return pairs.map(([name, value]) => value === "" ? name : `${name}=${encodeQueryValue(value)}`).join("&");
 }
 /** multipart 字段值：标量原样，数组/对象 JSON 字面量。 */
 function multipartValueOf(value) {
@@ -5054,14 +5123,14 @@ function multipartBodyOf(boundary, body, fileParts, filePaths) {
 }
 /** 扁平 body → application/x-www-form-urlencoded；数组/对象按 JSON 字面量落值。 */
 function formBodyOf(body) {
-	const params = new URLSearchParams();
+	const encode = (value) => encodeURIComponent(value).replace(/%3A/g, ":");
+	const pairs = [];
 	for (const [key, value] of Object.entries(body)) {
 		if (value === void 0) continue;
-		if (typeof value === "string") params.append(key, value);
-		else if (typeof value === "object" && value !== null) params.append(key, JSON.stringify(value));
-		else params.append(key, String(value));
+		const text = typeof value === "string" ? value : typeof value === "object" && value !== null ? JSON.stringify(value) : String(value);
+		pairs.push(`${encodeURIComponent(key)}=${encode(text)}`);
 	}
-	return params.toString();
+	return pairs.join("&");
 }
 /**
 * 构造一条请求。
@@ -5877,8 +5946,12 @@ async function executeChainRun(deps, prepared, input) {
 	const indegree = /* @__PURE__ */ new Map();
 	for (const id of plan.order) indegree.set(id, 0);
 	const downstream = /* @__PURE__ */ new Map();
+	const seenDependencies = /* @__PURE__ */ new Set();
 	for (const pair of dependencyPairs(doc)) {
 		if (!idSet.has(pair.from) || !idSet.has(pair.to)) continue;
+		const dependencyKey = `${pair.from}\u0000${pair.to}`;
+		if (seenDependencies.has(dependencyKey)) continue;
+		seenDependencies.add(dependencyKey);
 		indegree.set(pair.to, (indegree.get(pair.to) ?? 0) + 1);
 		const list = downstream.get(pair.from) ?? [];
 		if (!list.includes(pair.to)) list.push(pair.to);
@@ -6049,10 +6122,22 @@ async function executeChainRun(deps, prepared, input) {
 			});
 			return failAfterStart(bindings, fileParts.code, fileParts.message);
 		}
+		const hashes = resolveNodeHashes(node, inputs);
+		if (!hashes.ok) {
+			emit({
+				event: "step",
+				id: nodeId,
+				action: `${method} ${planNode.urlTemplate}`,
+				status: "start",
+				data: { card: planNode.cardId }
+			});
+			return failAfterStart(bindings, hashes.code, hashes.message);
+		}
+		for (const [field, value] of Object.entries(hashes.values)) provided[normalizePath(field)] = value;
 		const built = buildRequest({
 			node: planNode,
 			card,
-			baseUrl: plan.baseUrl,
+			baseUrl: planNode.baseUrl ?? plan.baseUrl,
 			provided,
 			inputs,
 			...fileParts.parts.length === 0 ? {} : { fileParts: fileParts.parts }
@@ -6317,6 +6402,28 @@ async function executeChainRun(deps, prepared, input) {
 				message: `节点 ${nodeId}：${result.error}`
 			};
 		}
+		const expectation = checkNodeExpect(node, response.json === void 0 ? void 0 : { body: response.json });
+		if (!expectation.ok) {
+			result.errorCode = "node-business-error";
+			result.error = expectation.message;
+			results.set(nodeId, result);
+			emit({
+				event: "step",
+				id: nodeId,
+				status: "error",
+				elapsed: result.elapsedMs,
+				error: expectation.message,
+				data: {
+					code: "node-business-error",
+					response: responseDigest
+				}
+			});
+			return {
+				kind: "failed",
+				code: "node-business-error",
+				message: `节点 ${nodeId}：${expectation.message}`
+			};
+		}
 		roots.set(nodeId, {
 			body: response.json ?? response.bodyText,
 			status: response.status,
@@ -6480,6 +6587,24 @@ function terminalMessage(doc, plan, failure, cancelled, cancelledMessage, nodes)
 	if (cancelled) return `链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} 已取消：${doneCount}/${plan.order.length} 个节点完成${cancelledMessage === void 0 ? "" : `（${cancelledMessage}）`}`;
 	return `链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} 执行完成：${plan.order.length} 个节点全绿`;
 }
+/** 业务码校验：expect 缺省 = 不检查。 */
+function checkNodeExpect(node, json) {
+	if (node.expect === void 0) return { ok: true };
+	if (json === void 0) return {
+		ok: false,
+		message: `业务码校验失败：响应不是 JSON，取不到 ${node.expect.path}`
+	};
+	const actual = fieldValueOf(json, node.expect.path);
+	if (actual === void 0) return {
+		ok: false,
+		message: `业务码校验失败：响应里没有 ${node.expect.path}`
+	};
+	if (String(actual) !== String(node.expect.equals)) return {
+		ok: false,
+		message: `业务码不符：${node.expect.path} 期望 ${String(node.expect.equals)}，实际 ${String(actual)}`
+	};
+	return { ok: true };
+}
 /** 从数组出参里按字段值选一个元素，再取字段（缺省取整个元素）。 */
 function applyPick(value, pick) {
 	if (!Array.isArray(value)) return {
@@ -6519,6 +6644,47 @@ function fieldValueOf(value, path) {
 		cursor = cursor[segment];
 	}
 	return cursor;
+}
+/** 节点 hashes → 文件派生值（md5 / md5-array / sha1）。 */
+function resolveNodeHashes(node, inputs) {
+	const values = {};
+	for (const [field, spec] of Object.entries(node.hashes ?? {})) {
+		const match = /^(md5|md5-array|sha1):(.+)$/.exec(spec);
+		if (match === null) return {
+			ok: false,
+			code: "hash-spec-invalid",
+			message: `节点 ${node.id} 的 hash 字段 ${field} 规格非法：${spec}`
+		};
+		const algorithm = match[1] === "sha1" ? "sha1" : "md5";
+		const rawRef = match[2].trim();
+		const slot = isInputSlotRef(rawRef) ? rawRef.slice(8) : void 0;
+		const path = slot === void 0 ? rawRef : inputs[slot];
+		if (typeof path !== "string" || path.trim() === "") return {
+			ok: false,
+			code: "hash-file-not-found",
+			message: `节点 ${node.id} 的 hash 字段 ${field} 取不到文件路径（${spec}）`
+		};
+		if (!existsSync(path) || !statSync(path).isFile()) return {
+			ok: false,
+			code: "hash-file-not-found",
+			message: `节点 ${node.id} 的 hash 文件不存在：${path}`
+		};
+		let digest;
+		try {
+			digest = createHash(algorithm).update(readFileSync(path)).digest("hex");
+		} catch (error) {
+			return {
+				ok: false,
+				code: "hash-failed",
+				message: `计算 ${algorithm} 失败 ${path}：${error instanceof Error ? error.message : String(error)}`
+			};
+		}
+		values[field] = match[1] === "md5-array" ? [digest] : digest;
+	}
+	return {
+		ok: true,
+		values
+	};
 }
 /** 节点 files → 本地文件分片；文件不存在/读失败在发请求前拒。 */
 function resolveNodeFiles(node, inputs) {
@@ -8228,8 +8394,8 @@ async function probeForTool(deps, exec, args) {
 	const card = cards.get(node.card);
 	if (card === void 0) return blocked("card-not-imported", `节点 ${node.id} 引用的卡 ${node.card} 不在项目接口库：先 dataforge_library_import`);
 	const base = resolveChainBaseUrl(doc, cards, args.baseUrl);
-	if (!base.ok) return blocked("base-url-unresolved", base.message);
-	if (base.baseUrl === void 0) return blocked("base-url-unresolved", "推不出目标站点源：显式传 baseUrl（卡的来源页面跨多个 origin 时只能人来定）");
+	const baseUrl = node.baseUrl ?? (base.ok ? base.baseUrl : void 0);
+	if (baseUrl === void 0) return blocked("base-url-unresolved", base.ok ? "推不出目标站点源：显式传 baseUrl（卡的来源页面跨多个 origin 时只能人来定）" : base.message);
 	return probeNode({
 		dataRoot: deps.dataRoot,
 		doc,
@@ -8237,7 +8403,7 @@ async function probeForTool(deps, exec, args) {
 		card,
 		...args.values === void 0 ? {} : { values: args.values },
 		...args.inputs === void 0 ? {} : { chainInputs: args.inputs },
-		baseUrl: base.baseUrl,
+		baseUrl,
 		...args.confirm === void 0 ? {} : { confirm: args.confirm },
 		...args.retry === void 0 ? {} : { retry: args.retry },
 		...args.explorationId === void 0 ? {} : { explorationId: args.explorationId },
