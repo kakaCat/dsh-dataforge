@@ -55,7 +55,7 @@
 - [ ] **Step 1: 安装依赖**
 
 ```bash
-cd /Volumes/ORICO/doc/github/dsh/dsh-dataforge && pnpm add playwright-core better-sqlite3 && pnpm add -D @types/better-sqlite3
+cd <repo-root> && pnpm add playwright-core better-sqlite3 && pnpm add -D @types/better-sqlite3
 ```
 
 - [ ] **Step 2: config.ts 追加字段（改 `export interface Config` 与 `Schema.object`）**

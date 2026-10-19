@@ -1,7 +1,7 @@
 ---
 title: 探索执行（首跑打通）· R-5 设计
 status: draft
-owner: yunpeng
+owner: kakaCat
 reviewers: 待定
 prd: docs/projects/PRJ-0002/requirement/r5-exploratory-execution.md
 serves: FR-5.1、FR-5.2、FR-5.3、FR-5.4、FR-5.5、FR-5.6
@@ -262,8 +262,8 @@ agent 读 outputs → 用 dataforge_chain_upsert 写绑定边 → dataforge_chai
 
 | 失败场景 | 触发条件 | 用户可见影响 | 检测手段 | 回滚动作 | 决策人 |
 |---|---|---|---|---|---|
-| 写请求被误发 | agent 没带 `confirm` 或方法判断漏了 | 真实写操作发生 | 写方法白名单 + 单测断言「无 confirm 零请求」 | 关 `chainRunEnabled=false`；业务侧人工核对 | yunpeng |
-| 敏感值进留痕 | 新字段没命中敏感词规则 | 密码/token 落 `run.json` | 敏感路径单测 + 事件全文扫描 | 删泄漏 run 目录；补规则；后续加扫描门 | yunpeng |
+| 写请求被误发 | agent 没带 `confirm` 或方法判断漏了 | 真实写操作发生 | 写方法白名单 + 单测断言「无 confirm 零请求」 | 关 `chainRunEnabled=false`；业务侧人工核对 | kakaCat |
+| 敏感值进留痕 | 新字段没命中敏感词规则 | 密码/token 落 `run.json` | 敏感路径单测 + 事件全文扫描 | 删泄漏 run 目录；补规则；后续加扫描门 | kakaCat |
 | 值来源造假 | agent 把猜的值标 `user` | 结晶（R-6）把猜测当事实 | `agent-inferred` 强制 evidence；工具无法验证真人确认（诚实边界） | R-6 结晶前二次确认；修标注后重 probe | 用户/agent |
 | 探测把读接口打爆 | agent 高频 probe | 目标站限流/封禁 | 每次 probe 一条 run；无自动循环 | 降低调用频率；必要时关执行开关 | 用户 |
 | 绑定写错 | agent 选错出参/入参 | 整链跑出脏数据 | probe `outputs` + R-1 校验拒悬空/成环 | 回读旧链版本；upsert 新版本修正 | agent/用户 |
@@ -288,9 +288,9 @@ agent 读 outputs → 用 dataforge_chain_upsert 写绑定边 → dataforge_chai
 
 | 里程碑 | 内容 | 出口判据 | 负责人 | 目标日期 |
 |---|---|---|---|---|
-| M1 | `execute/probe.ts` + `orchestration/explore.ts` + `dataforge_chain_probe` + 来源校验 + 写闸 + 留痕 | 本地服务：缺参 paused、写闸零请求、成功 probe 带 provenance/outputs、run 可回读；typecheck/test/build 全绿 | yunpeng | 已完成（2026-10-17） |
-| M2 | 绑定回写便捷入口（`dataforge_chain_bind` 或 upsert 提示增强）+ 首跑任务测试 | agent 不手写 YAML 也能把 probe 发现的边写回；真实链首跑一次 | yunpeng | 已完成（2026-10-17）：新增 `dataforge_chain_bind`（只给边、to 相同替换、只经 saveChain） |
-| M3 | 探索组汇总（一次看全组尝试）+ 有限自动重试策略 + 面板展示 | 首跑从 N 次 probe 到整链成功可复盘；无 P0/P1 | yunpeng | 2026-10-25 |
+| M1 | `execute/probe.ts` + `orchestration/explore.ts` + `dataforge_chain_probe` + 来源校验 + 写闸 + 留痕 | 本地服务：缺参 paused、写闸零请求、成功 probe 带 provenance/outputs、run 可回读；typecheck/test/build 全绿 | kakaCat | 已完成（2026-10-17） |
+| M2 | 绑定回写便捷入口（`dataforge_chain_bind` 或 upsert 提示增强）+ 首跑任务测试 | agent 不手写 YAML 也能把 probe 发现的边写回；真实链首跑一次 | kakaCat | 已完成（2026-10-17）：新增 `dataforge_chain_bind`（只给边、to 相同替换、只经 saveChain） |
+| M3 | 探索组汇总（一次看全组尝试）+ 有限自动重试策略 + 面板展示 | 首跑从 N 次 probe 到整链成功可复盘；无 P0/P1 | kakaCat | 2026-10-25 |
 
 ## 需求追溯  serves: 全文
 
@@ -320,10 +320,10 @@ agent 读 outputs → 用 dataforge_chain_upsert 写绑定边 → dataforge_chai
 
 | 问题 | 选项 | 负责人 | 截止 |
 |---|---|---|---|
-| Q1（需求原问题）agent 自主权边界 | **已决（M1）：`agent-inferred` 必须带依据，写操作只认 `confirm`；`user` 由 agent 声明，工具不验证真人** | yunpeng | 已决：2026-10-17 |
-| Q2 绑定回写用 upsert 还是新工具 | **已决（M2）：新增 `dataforge_chain_bind`**——只收边、按 `to` 合并，避免 agent 每次重抄整份 YAML；写仍只经 `saveChain` | yunpeng | 已决：2026-10-17 |
-| Q3 探索组是否需要汇总视图 | (a) 只按 `explorationId` 过滤 run（M1）；(b) 新增 `dataforge_explore_runs`（M3） | yunpeng | M3 开工前 |
-| Q4 是否缓存 probe 响应供后续复用 | (a) 不复用（M1，审计优先）；(b) 探索组内缓存（M2 评估） | yunpeng | M2 开工前 |
+| Q1（需求原问题）agent 自主权边界 | **已决（M1）：`agent-inferred` 必须带依据，写操作只认 `confirm`；`user` 由 agent 声明，工具不验证真人** | kakaCat | 已决：2026-10-17 |
+| Q2 绑定回写用 upsert 还是新工具 | **已决（M2）：新增 `dataforge_chain_bind`**——只收边、按 `to` 合并，避免 agent 每次重抄整份 YAML；写仍只经 `saveChain` | kakaCat | 已决：2026-10-17 |
+| Q3 探索组是否需要汇总视图 | (a) 只按 `explorationId` 过滤 run（M1）；(b) 新增 `dataforge_explore_runs`（M3） | kakaCat | M3 开工前 |
+| Q4 是否缓存 probe 响应供后续复用 | (a) 不复用（M1，审计优先）；(b) 探索组内缓存（M2 评估） | kakaCat | M2 开工前 |
 
 ## 验收证据  serves: 全文
 

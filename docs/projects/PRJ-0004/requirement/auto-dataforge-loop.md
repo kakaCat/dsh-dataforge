@@ -1,7 +1,7 @@
 ---
 title: AI 造数闭环（采集 → 自动编排 → 场景执行）· 需求
 status: draft
-owner: yunpeng
+owner: kakaCat
 reviewers: 待定
 created: 2026-10-18
 updated: 2026-10-18

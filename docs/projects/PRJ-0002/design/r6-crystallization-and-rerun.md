@@ -1,7 +1,7 @@
 ---
 title: 结晶与复跑 · R-6 设计
 status: draft
-owner: yunpeng
+owner: kakaCat
 reviewers: 待定
 prd: docs/projects/PRJ-0002/requirement/r6-crystallization-and-rerun.md
 serves: FR-6.1、FR-6.2、FR-6.3、FR-6.4、FR-6.5、FR-6.6、FR-6.7
@@ -303,12 +303,12 @@ edges:
 
 | 失败场景 | 触发条件 | 用户可见影响 | 检测手段 | 回滚动作 | 决策人 |
 |---|---|---|---|---|---|
-| 响应值被冻成常量 | 决策/实现绕过铁律 | 换入参复跑必挂 | `crystal-iron-rule` 写前拒；单测 | 回读旧链版本；重新结晶 | yunpeng |
+| 响应值被冻成常量 | 决策/实现绕过铁律 | 换入参复跑必挂 | `crystal-iron-rule` 写前拒；单测 | 回读旧链版本；重新结晶 | kakaCat |
 | agent 猜的值被当用户值 | 未确认就写回 | 资产含不可信值 | `agent-inferred` 强制 `confirmed:true`；草案标 requiresUserConfirmation | 撤回新版本；重新确认 | 用户 |
 | 冲突值写错 | 多 probe 值不一致且未决策 | 复跑用了错的常量/槽位 | `crystal-conflict` 写前拒 | 在 decisions 里重选；重新写回 | 用户/agent |
 | 绑定边缺失 | upstream 行没有边 | 链写回失败 | `crystal-chain-without-binding` | 先 upsert 补边，再结晶 | agent |
 | 写回后链被手改坏 | 文件被编辑 | 复跑 `invalid-chain` | `loadChain` 校验 | 回读旧版本；重新 upsert | 用户 |
-| 敏感值进草案 | probe 未脱敏/新字段 | 泄漏 | probe 扫描 + excluded 行 | 删除 crystal-run；补规则 | yunpeng |
+| 敏感值进草案 | probe 未脱敏/新字段 | 泄漏 | probe 扫描 + excluded 行 | 删除 crystal-run；补规则 | kakaCat |
 
 - **开关**：复用 `chainRunEnabled`（关闭后结晶工具也拒绝，避免在停执行时改资产）。
 - **回滚演练**：写回前后各回读一次版本；确认旧版本可读、复跑可用。
@@ -329,9 +329,9 @@ edges:
 
 | 里程碑 | 内容 | 出口判据 | 负责人 | 目标日期 |
 |---|---|---|---|---|
-| M1 | draft 生成 + 铁律 + 确认闸 + 槽位写回 + crystal-run + A/B→C/D 端到端 | 本地服务：A/B 首跑 probe → 结晶 v2 → C/D 复跑成功且内部 ID 重新求解；写回无响应常量；typecheck/test/build 全绿 | yunpeng | 已完成（2026-10-17） |
-| M2 | 复跑诊断（`dataforge_chain_diagnose`）+ 复跑对照视图 + 冲突决策体验 | 一次无效 C 的失败报告能直接指到绑定边；两次 run 可对照 | yunpeng | 已完成（2026-10-17）：diagnose + compare 已落地；冲突决策面板体验留 M3 |
-| M3 | 调度/批量（需求 Q1）+ 增量结晶（Q2）+ 面板 | 多组入参批量复跑；旧链增量确认 | yunpeng | 2026-10-25 |
+| M1 | draft 生成 + 铁律 + 确认闸 + 槽位写回 + crystal-run + A/B→C/D 端到端 | 本地服务：A/B 首跑 probe → 结晶 v2 → C/D 复跑成功且内部 ID 重新求解；写回无响应常量；typecheck/test/build 全绿 | kakaCat | 已完成（2026-10-17） |
+| M2 | 复跑诊断（`dataforge_chain_diagnose`）+ 复跑对照视图 + 冲突决策体验 | 一次无效 C 的失败报告能直接指到绑定边；两次 run 可对照 | kakaCat | 已完成（2026-10-17）：diagnose + compare 已落地；冲突决策面板体验留 M3 |
+| M3 | 调度/批量（需求 Q1）+ 增量结晶（Q2）+ 面板 | 多组入参批量复跑；旧链增量确认 | kakaCat | 2026-10-25 |
 
 ## 需求追溯  serves: 全文
 
@@ -362,11 +362,11 @@ edges:
 
 | 问题 | 选项 | 负责人 | 截止 |
 |---|---|---|---|
-| Q1（需求原问题）复跑调度形态 | **已决（M1）：仅手动触发**；定时/批量留 M3 | yunpeng | 已决：2026-10-17 |
-| Q2（需求原问题）结晶后再编辑链 | **已决（M1）：以一次 exploration 重新出草案，不自动合并**；旧常量/槽位保留但不自动继承新值 | yunpeng | 已决：2026-10-17 |
-| Q3 槽位命名规则 | 取字段叶子名；同名加节点前缀（M1） | yunpeng | M1 |
-| Q4 冲突决策是否需要 UI | M1 用 decisions 文本；M2 评估面板 | yunpeng | M2 |
-| Q5 复跑诊断是否单独工具 | M1 复用 R-3 回执；M2 评估 `dataforge_chain_diagnose` | yunpeng | M2 |
+| Q1（需求原问题）复跑调度形态 | **已决（M1）：仅手动触发**；定时/批量留 M3 | kakaCat | 已决：2026-10-17 |
+| Q2（需求原问题）结晶后再编辑链 | **已决（M1）：以一次 exploration 重新出草案，不自动合并**；旧常量/槽位保留但不自动继承新值 | kakaCat | 已决：2026-10-17 |
+| Q3 槽位命名规则 | 取字段叶子名；同名加节点前缀（M1） | kakaCat | M1 |
+| Q4 冲突决策是否需要 UI | M1 用 decisions 文本；M2 评估面板 | kakaCat | M2 |
+| Q5 复跑诊断是否单独工具 | M1 复用 R-3 回执；M2 评估 `dataforge_chain_diagnose` | kakaCat | M2 |
 
 ## 验收证据  serves: 全文
 

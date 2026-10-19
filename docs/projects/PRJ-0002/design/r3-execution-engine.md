@@ -1,7 +1,7 @@
 ---
 title: 执行引擎（拓扑调度 + HTTP 直调）· R-3 设计
 status: draft
-owner: yunpeng
+owner: kakaCat
 reviewers: 待定
 prd: docs/projects/PRJ-0002/requirement/r3-execution-engine.md
 serves: FR-3.1、FR-3.2、FR-3.3、FR-3.4、FR-3.5、FR-3.6
@@ -369,23 +369,23 @@ application 层的执行编排，工具壳只负责参数与回执渲染（沿�
 | 可行性 | 我们建得出来吗 | `topoOrder` / `dependencyPairs` 已导出并有单测；`runs/store.ts` 的即写即落盘已在流程造数上跑通；Node 22 内置 fetch 与 `AbortSignal.timeout` 在运行时可用；本设计不需要新依赖 | 已验证 |
 | 商业可行性 | 公司能接受吗 | 纯本地执行，无云资源、无外部服务采购；运行记录落在本机 `dataRoot` | 已验证 |
 
-**未验证项的补课计划**：可用性（无 UI 时的可诊断性）→ 用 M2 的一条真实 3 节点链 + 一次故意失败，让用户只看运行记录回答「失败在哪、传了什么值」，读不懂就补回执字段；yunpeng，M3 开始前要结论。真实站点的响应结构多样性（同一卡多形态）→ M2 用两条不同站点链各跑一次，记录 `binding-*` 错误分布。
+**未验证项的补课计划**：可用性（无 UI 时的可诊断性）→ 用 M2 的一条真实 3 节点链 + 一次故意失败，让用户只看运行记录回答「失败在哪、传了什么值」，读不懂就补回执字段；kakaCat，M3 开始前要结论。真实站点的响应结构多样性（同一卡多形态）→ M2 用两条不同站点链各跑一次，记录 `binding-*` 错误分布。
 
 ## 失败模式与回滚  serves: 全文
 
 | 失败场景 | 触发条件 | 用户可见影响 | 检测手段 | 回滚动作 | 决策人 |
 |---|---|---|---|---|---|
-| 缺参被静默发成空值 | 误把卡 `required` 当判据 / 覆盖判定漏了 `[*]` 归一 | 下游收到空值，可能写脏数据 | 预检单测 + e2e 断言请求串无空值键 | 关执行开关 `chainRunEnabled=false`，修覆盖判定后重跑；已发生的写入需人工核对 | yunpeng |
+| 缺参被静默发成空值 | 误把卡 `required` 当判据 / 覆盖判定漏了 `[*]` 归一 | 下游收到空值，可能写脏数据 | 预检单测 + e2e 断言请求串无空值键 | 关执行开关 `chainRunEnabled=false`，修覆盖判定后重跑；已发生的写入需人工核对 | kakaCat |
 | 上游响应结构变化导致绑定取不到值 | 站点改字段 / 重新采集刷新了卡模板 | 链在绑定边处中止 | `binding-path-not-found` / `empty-wildcard` 进运行记录 | 修绑定路径或重新采集导卡，upsert 新版本；旧链版本仍可回读 | 用户 / agent |
 | 节点 5xx / 超时 / 网络错误 | 下游服务故障、网络抖动 | 链中止，失败节点与状态码可见 | `node-http-error` / `node-timeout` / `node-network-error` | 重试只按 `node.retry` 生效；修复后用新 run 重跑 | 用户 |
 | 并行节点互相踩写 | 两条无依赖边同时写同一业务对象 | 业务数据冲突，可能一方 409 或脏写 | 运行记录里两节点 `start` 时间重叠 + 业务侧对账 | 把并发降到 1（`concurrency: 1`）或显式加一条依赖边；已发生的写入不可自动回滚 | 用户 |
-| baseUrl 推错（多来源跨域） | 卡 `sources.pages` 混了多个 origin | 请求打到错误站点，401/404 或数据串站 | `base-url-unresolved` 预检直接拒；实际 host 写进运行记录 | 显式传 `baseUrl` 重跑；已发出的请求按不可逆动作处理 | yunpeng |
+| baseUrl 推错（多来源跨域） | 卡 `sources.pages` 混了多个 origin | 请求打到错误站点，401/404 或数据串站 | `base-url-unresolved` 预检直接拒；实际 host 写进运行记录 | 显式传 `baseUrl` 重跑；已发出的请求按不可逆动作处理 | kakaCat |
 | 后台 job 缺席（前台降级） | 宿主未装配 `dsh-jobs` | 长链阻塞对话，且不可取消 | 回执 `kind: foreground` + `degradedNotice` | 部署 jobs 插件；或调小 `timeoutSeconds` 并用只读链验证 | 平台 |
 | 运行悬挂（进程被杀） | 执行中插件重启/崩溃 | `dataforge_status` 长期显示 `running` | 无 `terminal` 事件 + `startedAt` 过旧 | 手动结束本地 run，重跑新 run；不对旧 run 做自动判死 | 用户 |
 | 取消时在飞请求已到达服务端 | 用户在写请求发出瞬间取消 | 服务端可能已执行，本地记 `cancelled` | 运行记录里取消时的在飞节点清单 | 人工核对业务侧；对写类链约定「先 dry-run 再真跑」 | 用户 |
 
 - **开关**：`config.chainRunEnabled`（默认 `true`，全局粒度）；关闭后 IF-1 直接返回 `execution-disabled`，不影响链读写与已有运行回看。新增 `config.chainNodeTimeoutSeconds`（默认 30）、`config.chainConcurrency`（默认 4，上限 16）、`config.chainResponseLimitBytes`（默认 2 MiB）。
-- **回滚演练**：M4 前做一次「关开关 → 工具拒跑 → 打开 → 恢复」的演练，yunpeng 执行，预期 1 分钟内恢复；数据面无需迁移。
+- **回滚演练**：M4 前做一次「关开关 → 工具拒跑 → 打开 → 恢复」的演练，kakaCat 执行，预期 1 分钟内恢复；数据面无需迁移。
 - **不可逆动作**：**已发出的写请求（非 GET/HEAD）无法撤销**。事前保护：首次调用必须 `confirm: true`、计划卡列出写方法与目标 host、`dry_run` 可先看计划；事后只能靠业务侧核对与运行记录追溯，不做自动补偿。
 
 ## 跨关注点  serves: 全文
@@ -403,10 +403,10 @@ application 层的执行编排，工具壳只负责参数与回执渲染（沿�
 
 | 里程碑 | 内容 | 出口判据 | 负责人 | 目标日期 |
 |---|---|---|---|---|
-| M1 | 计划与预检（`plan.ts` / `coverage.ts`）+ dry-run + 绑定求值单测 | **执行契约冻结**（错误码、缺参判据、`[*]`/`[n]` 语义）；5 类坏链（缺参/环/非 interface-chain/baseUrl/槽位）回执与 dry-run 计划可读；单测覆盖 `body.items[*]` 与 `body.items[0]` | yunpeng | 2026-10-24 |
-| M2 | 主路径执行（`request.ts` / `http.ts` / `run.ts`）+ runs 留痕 + 并发调度 | 3 节点链 e2e 全绿且绑定值可核对；S2 并发计时达标；进程列表无浏览器；`run.json.chain` 可读 | yunpeng | 2026-10-28 |
-| M3 | 失败语义 + 后台 job + 取消 + `dataforge_chain_runs` + status 扩展 | 500/超时/绑定失败均中止并指到节点；job 可轮询、可取消且终态 `killed`；可用性补课结论出炉 | yunpeng | 2026-10-30 |
-| M4 | 硬化（截断/重定向/类型边界/脱敏）+ 开关 + README + 验收逐条过 | typecheck / build / vitest 全绿；R-3 验收判据逐条有证据；开关演练完成 | yunpeng | 2026-11-03 |
+| M1 | 计划与预检（`plan.ts` / `coverage.ts`）+ dry-run + 绑定求值单测 | **执行契约冻结**（错误码、缺参判据、`[*]`/`[n]` 语义）；5 类坏链（缺参/环/非 interface-chain/baseUrl/槽位）回执与 dry-run 计划可读；单测覆盖 `body.items[*]` 与 `body.items[0]` | kakaCat | 2026-10-24 |
+| M2 | 主路径执行（`request.ts` / `http.ts` / `run.ts`）+ runs 留痕 + 并发调度 | 3 节点链 e2e 全绿且绑定值可核对；S2 并发计时达标；进程列表无浏览器；`run.json.chain` 可读 | kakaCat | 2026-10-28 |
+| M3 | 失败语义 + 后台 job + 取消 + `dataforge_chain_runs` + status 扩展 | 500/超时/绑定失败均中止并指到节点；job 可轮询、可取消且终态 `killed`；可用性补课结论出炉 | kakaCat | 2026-10-30 |
+| M4 | 硬化（截断/重定向/类型边界/脱敏）+ 开关 + README + 验收逐条过 | typecheck / build / vitest 全绿；R-3 验收判据逐条有证据；开关演练完成 | kakaCat | 2026-11-03 |
 
 ## 需求追溯  serves: 全文
 
@@ -436,12 +436,12 @@ application 层的执行编排，工具壳只负责参数与回执渲染（沿�
 
 | 问题 | 选项 | 负责人 | 截止 |
 |---|---|---|---|
-| 卡缺 baseUrl 权威来源 | 运行参数显式传 / 卡 `identity.baseUrl`（需 R-1 扩字段）/ 站点级配置 | yunpeng | M1 开工前定；倾向「运行参数兜底 + 给 R-1 提 `identity.baseUrl`」 |
-| 「可省略入参」如何表达 | 卡上新增 `optional` 标记 / 仅 `role: constant` 视为可省略 / 一律必填 | yunpeng | M2 前定；倾向新增显式标记，不放宽现有判据 |
-| 默认并发与写节点是否默认串行 | 全部并发 4 / 写方法默认串行 / 按链配置 | yunpeng | M2 前定；倾向「读并发 4，写默认串行并在回执说明」 |
-| `dataforge_chain_runs` 何时加索引 | 扫描 run.json / `runs/index.ndjson` / SQLite | yunpeng | 单项目运行数 > 500 时再定 |
-| 悬挂 run（无 terminal）如何判死与清理 | 只提示不自动处理 / `startedAt` 超 2×超时判 stale / 启动时清扫 | yunpeng | M4 前定；倾向只提示，不自动改状态 |
-| SSRF 与目标站点白名单 | 不做 / 仅允许卡来源 origin / 配置站点白名单 | yunpeng | 与 R-4 一起定（凭证注入后风险面变大）；本期只做 http/https 限制与目标 host 记录 |
+| 卡缺 baseUrl 权威来源 | 运行参数显式传 / 卡 `identity.baseUrl`（需 R-1 扩字段）/ 站点级配置 | kakaCat | M1 开工前定；倾向「运行参数兜底 + 给 R-1 提 `identity.baseUrl`」 |
+| 「可省略入参」如何表达 | 卡上新增 `optional` 标记 / 仅 `role: constant` 视为可省略 / 一律必填 | kakaCat | M2 前定；倾向新增显式标记，不放宽现有判据 |
+| 默认并发与写节点是否默认串行 | 全部并发 4 / 写方法默认串行 / 按链配置 | kakaCat | M2 前定；倾向「读并发 4，写默认串行并在回执说明」 |
+| `dataforge_chain_runs` 何时加索引 | 扫描 run.json / `runs/index.ndjson` / SQLite | kakaCat | 单项目运行数 > 500 时再定 |
+| 悬挂 run（无 terminal）如何判死与清理 | 只提示不自动处理 / `startedAt` 超 2×超时判 stale / 启动时清扫 | kakaCat | M4 前定；倾向只提示，不自动改状态 |
+| SSRF 与目标站点白名单 | 不做 / 仅允许卡来源 origin / 配置站点白名单 | kakaCat | 与 R-4 一起定（凭证注入后风险面变大）；本期只做 http/https 限制与目标 host 记录 |
 
 ## 验收证据  serves: 全文
 

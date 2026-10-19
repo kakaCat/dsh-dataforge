@@ -1,7 +1,7 @@
 ---
 title: 凭证注入与登录态换票 · R-4 设计
 status: draft
-owner: yunpeng
+owner: kakaCat
 reviewers: 待定
 prd: docs/projects/PRJ-0002/requirement/r4-credential-injection.md
 serves: FR-4.1、FR-4.2、FR-4.3、FR-4.4、FR-4.5、FR-4.6
@@ -488,7 +488,7 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 | **安全** | 会不会把凭证写进日志/链/事件 | R-3 的 `redactHeaders` 已覆盖 cookie/authorization；M1 摘要不含值；M2 登录链敏感模式；M3 扫描门扫 dataRoot 除持久化 jar 外所有文件 + 工具回执 | 已验证（M3 扫描门）；持续守住 |
 
 **未验证项的补课计划**：
-- 真实登录态站点（`cookie-session` 卡）当前样本库为 0 → M1 用本地 HTTP 服务 + 合成卡验证；真实站点首跑归 R-5 的 agent 在环场景，yunpeng 在 M2 前给一条真实链；
+- 真实登录态站点（`cookie-session` 卡）当前样本库为 0 → M1 用本地 HTTP 服务 + 合成卡验证；真实站点首跑归 R-5 的 agent 在环场景，kakaCat 在 M2 前给一条真实链；
 - token 型凭证覆盖不足 → 需求 Q1 已决「限定 cookie 型验收」；token 补课放 M3，补课内容是采集期收割 `Authorization`/`localStorage` 并落 `credential_events`；
 - 换票节流的并发语义 → M2 先用单飞（同运行只换一次），M3 再做跨运行/跨会话节流。
 
@@ -496,12 +496,12 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 
 | 失败场景 | 触发条件 | 用户可见影响 | 检测手段 | 回滚动作 | 决策人 |
 |---|---|---|---|---|---|
-| 凭证注错站点 | 卡来源混了多个 captureId / cookie domain 过宽 | 把 A 站 cookie 发给 B 站 | provider 按 `sources[].captureId` + domain 双重限定；单测覆盖 `badexample.com` 不匹配 | 停用注入（provider 缺席即回 R-3 行为），修来源后重采集 | yunpeng |
+| 凭证注错站点 | 卡来源混了多个 captureId / cookie domain 过宽 | 把 A 站 cookie 发给 B 站 | provider 按 `sources[].captureId` + domain 双重限定；单测覆盖 `badexample.com` 不匹配 | 停用注入（provider 缺席即回 R-3 行为），修来源后重采集 | kakaCat |
 | 凭证过期 | cookie `expires` 已过 | 请求 401，回执说「已注入但仍 401」 | `application.expired > 0` / `status:'expired'` | M1：重新采集；M2：换票 | 用户 |
-| 注入值进日志 | 新代码把 `headers` 直接序列化进事件 | 凭证泄漏到 `run.json`/`events.ndjson` | `redactHeaders` + 事件全文扫描单测 | 删除泄漏 run 目录；撤回事件格式；M3 加 CI 门 | yunpeng |
+| 注入值进日志 | 新代码把 `headers` 直接序列化进事件 | 凭证泄漏到 `run.json`/`events.ndjson` | `redactHeaders` + 事件全文扫描单测 | 删除泄漏 run 目录；撤回事件格式；M3 加 CI 门 | kakaCat |
 | 采集库坏/缺 | 数据根迁移、文件被删 | 所有 `cookie-session` 卡都不带凭证 | `application.status='none'` + reason | 重建 `dataRoot` 或重新采集；不阻断无鉴权链 | 用户 |
 | 401 被误判为凭证问题 | 卡 `auth` 标错（实际公开接口） | 回执建议重登，实际是业务 401 | 运行记录同时有 `credentials.status` 与响应摘要 | 重新采集刷新 `auth` 标志；必要时把卡改 `none` | agent/用户 |
-| 自动换票无限循环（M2） | 登录链本身 401、或换票后仍 401 | 请求风暴/账号锁定风险 | 单飞 + 每运行一次 + 重放一次硬上限 | 关执行开关 `chainRunEnabled=false`；手工登录后重跑 | yunpeng |
+| 自动换票无限循环（M2） | 登录链本身 401、或换票后仍 401 | 请求风暴/账号锁定风险 | 单飞 + 每运行一次 + 重放一次硬上限 | 关执行开关 `chainRunEnabled=false`；手工登录后重跑 | kakaCat |
 
 - **开关**：M1 不加新开关。回滚路径 = 不装配 provider（`index.ts` 删一行），行为立即回到 R-3；已有运行记录不回填、不迁移。
 - **回滚演练**：M1 合并前做一次「provider 缺席 → 无鉴权链照常、auth 卡回执退回 R-3 文案」的对照测试。
@@ -522,9 +522,9 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 
 | 里程碑 | 内容 | 出口判据 | 负责人 | 目标日期 |
 |---|---|---|---|---|
-| M1 | `execute/credentials.ts` 纯函数 + `capture/credentials.ts` provider + `run.ts` 注入点 + 401 诊断 + 单测/e2e | 本地 HTTP 服务收到注入 cookie；事件全文无凭证原文；provider 缺席行为与 R-3 一致；typecheck/test/build 全绿 | yunpeng | 2026-10-18 |
-| M2 | `relogin` 运行参数 + Set-Cookie 收割 + 内存 jar + 单飞 + 重放一次 + 敏感模式 + 同源/自环保护 + `relogin-*` 错误码 | 401 → 换票 → 重放成功；换票失败中止且文案含「需人工重新登录」；并发 401 只换一次；登录链参数/正文/token 不进留痕 | yunpeng | 已完成（2026-10-17） |
-| M3 | ✅ 换票持久化 jar（0600/按 origin）+ 零泄漏扫描门 + token 补采与注入（Authorization/query）+ 运行级缓存 + 跨运行换票单飞；⏳ body token 注入、localStorage 采集点 | 换票跨运行复跑通过；扫描门进 `pnpm test`；token-header/token-param 注入本地服务断言通过；body/localStorage 如实 `unsupported` | yunpeng | 已完成（2026-10-17，body/localStorage 为诚实边界） |
+| M1 | `execute/credentials.ts` 纯函数 + `capture/credentials.ts` provider + `run.ts` 注入点 + 401 诊断 + 单测/e2e | 本地 HTTP 服务收到注入 cookie；事件全文无凭证原文；provider 缺席行为与 R-3 一致；typecheck/test/build 全绿 | kakaCat | 2026-10-18 |
+| M2 | `relogin` 运行参数 + Set-Cookie 收割 + 内存 jar + 单飞 + 重放一次 + 敏感模式 + 同源/自环保护 + `relogin-*` 错误码 | 401 → 换票 → 重放成功；换票失败中止且文案含「需人工重新登录」；并发 401 只换一次；登录链参数/正文/token 不进留痕 | kakaCat | 已完成（2026-10-17） |
+| M3 | ✅ 换票持久化 jar（0600/按 origin）+ 零泄漏扫描门 + token 补采与注入（Authorization/query）+ 运行级缓存 + 跨运行换票单飞；⏳ body token 注入、localStorage 采集点 | 换票跨运行复跑通过；扫描门进 `pnpm test`；token-header/token-param 注入本地服务断言通过；body/localStorage 如实 `unsupported` | kakaCat | 已完成（2026-10-17，body/localStorage 为诚实边界） |
 
 ## 需求追溯  serves: 全文
 
@@ -556,11 +556,11 @@ M2 的可选运行参数，形状 `{ site, flow, version?, inputs?, baseUrl? }`�
 
 | 问题 | 选项 | 负责人 | 截止 |
 |---|---|---|---|
-| Q1（需求原问题）token 型覆盖不足：本期补采集还是限定 cookie 型 | **已决：限定 cookie 型（M1/M2），token 补课归 M3** | yunpeng | 已决：2026-10-17 |
-| Q2 登录链怎么声明 | **已决（M2）：先用运行参数 `relogin: { site, flow, version?, inputs?, baseUrl? }`**——不改 R-1 schema、不动画布保存路径；链级 `auth.login` 留到画布能编辑登录链时再评估 | yunpeng | 已决：2026-10-17 |
-| Q3 换票后的新 cookie 是否持久化 | **已决并实现：M2 只活一次运行；M3 落 `dataRoot/credentials/cookies.json`（0600、按 origin），`chainCredentialPersistence` 可关** | yunpeng | 已决：2026-10-17 |
-| Q4 登录链的账号/密码从哪来 | **已决（M2）：运行期 `relogin.inputs`**，敏感模式脱敏后不落盘；环境变量引用归 M3（无人值守复跑） | yunpeng | 已决：2026-10-17 |
-| Q5 同一站点多个 captureId 的 cookie 冲突怎么选 | 更近的 `obtainedAt` / 更具体的 domain（当前实现）；是否需要人工选择 | yunpeng | M3 |
+| Q1（需求原问题）token 型覆盖不足：本期补采集还是限定 cookie 型 | **已决：限定 cookie 型（M1/M2），token 补课归 M3** | kakaCat | 已决：2026-10-17 |
+| Q2 登录链怎么声明 | **已决（M2）：先用运行参数 `relogin: { site, flow, version?, inputs?, baseUrl? }`**——不改 R-1 schema、不动画布保存路径；链级 `auth.login` 留到画布能编辑登录链时再评估 | kakaCat | 已决：2026-10-17 |
+| Q3 换票后的新 cookie 是否持久化 | **已决并实现：M2 只活一次运行；M3 落 `dataRoot/credentials/cookies.json`（0600、按 origin），`chainCredentialPersistence` 可关** | kakaCat | 已决：2026-10-17 |
+| Q4 登录链的账号/密码从哪来 | **已决（M2）：运行期 `relogin.inputs`**，敏感模式脱敏后不落盘；环境变量引用归 M3（无人值守复跑） | kakaCat | 已决：2026-10-17 |
+| Q5 同一站点多个 captureId 的 cookie 冲突怎么选 | 更近的 `obtainedAt` / 更具体的 domain（当前实现）；是否需要人工选择 | kakaCat | M3 |
 
 ## 验收证据  serves: 全文
 

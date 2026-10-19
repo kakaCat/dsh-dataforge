@@ -120,7 +120,7 @@ describe('三道闸', () => {
 })
 
 // ── 真引擎集成（python3 可用且引擎 checkout 存在时运行）──
-const ENGINE_ROOT = '/Volumes/ORICO/doc/github/dsh/ai-dataforge-loop'
+const ENGINE_ROOT = '<engine-checkout-path>'
 const pythonReady = (() => {
   try {
     execSync('python3 --version', { stdio: 'ignore' })

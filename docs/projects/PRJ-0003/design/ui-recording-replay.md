@@ -1,7 +1,7 @@
 ---
 title: UI 自动化测试（浏览器录制 + 回放）· 设计
 status: draft
-owner: yunpeng
+owner: kakaCat
 reviewers: 待定
 prd: docs/projects/PRJ-0003/requirement/ui-recording-replay.md
 serves: FR-1.1～FR-1.12
@@ -224,17 +224,17 @@ M2 起 `POST /script` 同时接受整份 `doc`（面板编辑器，来源 `canva
 | 可行性 | 我们建得出来吗 | 真 Chrome 录制→落盘→无头回放 e2e 通过（`UI_E2E=1`）；单测 60+ 例 | 已验证 |
 | 商业可行性 | 公司能接受吗 | 无新增外部服务/云成本；仅本机 Chrome 与磁盘留痕 | 已验证（估算：每次运行 1 浏览器实例，与采集期一致） |
 
-**未验证项的补课计划**：M2 前用 2 个真实站点（含登录态）各录一条流程，记录选择器失效率与录制耗时，由 yunpeng 在下一个迭代评审前给结论。
+**未验证项的补课计划**：M2 前用 2 个真实站点（含登录态）各录一条流程，记录选择器失效率与录制耗时，由 kakaCat 在下一个迭代评审前给结论。
 
 ## 失败模式与回滚  serves: 全文
 
 | 失败场景 | 触发条件 | 用户可见影响 | 检测手段 | 回滚动作 | 决策人 |
 |---|---|---|---|---|---|
-| 选择器失效 | 前端改版 | 回放中断并留截图 | run 记录 failedStep + failure.png/html | 修脚本（新版本）或重录 | yunpeng |
-| 凭证泄漏 | 密码/上传被录进 YAML | 脚本进 git 即泄漏 | 录制器跳过 + 回执计数；评审看 YAML | 删版本文件/改写历史（需人） | yunpeng |
+| 选择器失效 | 前端改版 | 回放中断并留截图 | run 记录 failedStep + failure.png/html | 修脚本（新版本）或重录 | kakaCat |
+| 凭证泄漏 | 密码/上传被录进 YAML | 脚本进 git 即泄漏 | 录制器跳过 + 回执计数；评审看 YAML | 删版本文件/改写历史（需人） | kakaCat |
 | 真实写入副作用 | click/submit/upload | 业务数据被改 | 计划卡写操作计数 + confirm 闸 | 业务侧人工回滚/撤销 | 用户 |
-| 回放顺序错乱 | 事件去抖/异步 | 先点空表单 | e2e 已覆盖；断言失败即暴露 | 修录制器（本次已改为不去抖） | yunpeng |
-| 长脚本/站点慢 | 步骤多/网络慢 | 回放超时 | 单步超时事件 + failedStep | 调 `uiStepTimeoutSeconds` / 拆脚本 | yunpeng |
+| 回放顺序错乱 | 事件去抖/异步 | 先点空表单 | e2e 已覆盖；断言失败即暴露 | 修录制器（本次已改为不去抖） | kakaCat |
+| 长脚本/站点慢 | 步骤多/网络慢 | 回放超时 | 单步超时事件 + failedStep | 调 `uiStepTimeoutSeconds` / 拆脚本 | kakaCat |
 | 面板误触发 | 用户点录制/回放 | 打开浏览器/真实提交 | 服务端闸门 + confirm | 关闭浏览器 / 停用开关 | 用户 |
 
 - **开关**：`uiTestEnabled`（默认 true，全局）——关闭后所有回放返回 `ui-test-disabled`，录制与脚本读写/历史回看照常；
@@ -256,11 +256,11 @@ M2 起 `POST /script` 同时接受整份 `doc`（面板编辑器，来源 `canva
 
 | 里程碑 | 内容 | 出口判据 | 负责人 | 目标日期 |
 |---|---|---|---|---|
-| M1 | 契约/存储 + 录制器 + 回放器 + 8 工具 + 面板页签 + cookie jar | 真 Chrome 录制→回放 e2e 通过；全量测试绿；面板可录制/回放/看记录 | yunpeng | 2026-10-17（已完成） |
-| M2 | 面板步骤/断言编辑器 + 页面点选元素生成 selector + 插入等待步骤（用例矩阵暂未做） | 面板内「录制→加断言→回放」闭环可用：doc 保存只落 vN+1、点选不误触业务、真 Chrome 点选 e2e 通过 | yunpeng | 2026-10-18（已完成） |
-| M3 | 批量回归 + 报告（第一阶段，已完成 2026-10-18）；网络断言联动 / 定时调度 / CI 集成留后续 | 一键跑完一组脚本并出 `report.md/json`；缺参/坏文件不静默消失，单条失败不中断整批 | yunpeng | 2026-10-18（第一阶段完成） |
-| M4 | 浏览器引擎适配层（已完成 2026-10-18）：Playwright + 共享浏览器 seam 同契约；`uiTestBrowser` 配置切换；`cdp` 预留 | 两引擎共用录制核心与回放语义；假 seam 单测通过；切换只改配置 | yunpeng | 2026-10-18（完成） |
-| M4 | 共享真实浏览器依赖（`dsh-builtin-browser`）：peer 依赖 + 安装文档 + `ctx.browser` 探测/面板状态（已完成）；执行后端从 Playwright 切到 `ctx.browser`（待做） | 两个 bundle 同装后 `ctx.browser` 可用、面板显示已连接；切换后录制/回放走共享浏览器 | yunpeng | 2026-10-18（依赖接入完成，执行后端待做） |
+| M1 | 契约/存储 + 录制器 + 回放器 + 8 工具 + 面板页签 + cookie jar | 真 Chrome 录制→回放 e2e 通过；全量测试绿；面板可录制/回放/看记录 | kakaCat | 2026-10-17（已完成） |
+| M2 | 面板步骤/断言编辑器 + 页面点选元素生成 selector + 插入等待步骤（用例矩阵暂未做） | 面板内「录制→加断言→回放」闭环可用：doc 保存只落 vN+1、点选不误触业务、真 Chrome 点选 e2e 通过 | kakaCat | 2026-10-18（已完成） |
+| M3 | 批量回归 + 报告（第一阶段，已完成 2026-10-18）；网络断言联动 / 定时调度 / CI 集成留后续 | 一键跑完一组脚本并出 `report.md/json`；缺参/坏文件不静默消失，单条失败不中断整批 | kakaCat | 2026-10-18（第一阶段完成） |
+| M4 | 浏览器引擎适配层（已完成 2026-10-18）：Playwright + 共享浏览器 seam 同契约；`uiTestBrowser` 配置切换；`cdp` 预留 | 两引擎共用录制核心与回放语义；假 seam 单测通过；切换只改配置 | kakaCat | 2026-10-18（完成） |
+| M4 | 共享真实浏览器依赖（`dsh-builtin-browser`）：peer 依赖 + 安装文档 + `ctx.browser` 探测/面板状态（已完成）；执行后端从 Playwright 切到 `ctx.browser`（待做） | 两个 bundle 同装后 `ctx.browser` 可用、面板显示已连接；切换后录制/回放走共享浏览器 | kakaCat | 2026-10-18（依赖接入完成，执行后端待做） |
 
 ## 需求追溯  serves: 全文
 
@@ -298,12 +298,12 @@ M2 起 `POST /script` 同时接受整份 `doc`（面板编辑器，来源 `canva
 
 | 问题 | 选项 | 负责人 | 截止 |
 |---|---|---|---|
-| 断言编辑器交互 | A. 页面点选元素即时生成断言；B. 录完后在面板编辑步骤/断言 | yunpeng | M2 设计前 |
-| 参数化用例矩阵 | A. 单脚本多组 inputs（面板表单）；B. 复制脚本派生用例 | yunpeng | M2 设计前 |
-| 与接口链联动 | A. UI 操作顺带断言 XHR（复用采集 wire）；B. 保持两条执行面独立 | yunpeng | M3 立项前 |
-| 站点级登录 cookie 隔离 | A. 复用统一 jar（现状）；B. UI 测试独立 jar | yunpeng | 已决：A（复用 0600 jar） |
-| 回放实时画面 | A. CDP screencast 推流到面板；B. 侧栏浏览器打开本地流 URL；C. 不做（现状：只有失败截图） | yunpeng | M4 设计前 |
-| CDP 引擎落地 | A. 等 `dsh-builtin-browser` 暴露 CDP 访问器后新增 `cdp` 引擎；B. 保持 seam 适配 | yunpeng | 插件提供公开 CDP 契约后 |
+| 断言编辑器交互 | A. 页面点选元素即时生成断言；B. 录完后在面板编辑步骤/断言 | kakaCat | M2 设计前 |
+| 参数化用例矩阵 | A. 单脚本多组 inputs（面板表单）；B. 复制脚本派生用例 | kakaCat | M2 设计前 |
+| 与接口链联动 | A. UI 操作顺带断言 XHR（复用采集 wire）；B. 保持两条执行面独立 | kakaCat | M3 立项前 |
+| 站点级登录 cookie 隔离 | A. 复用统一 jar（现状）；B. UI 测试独立 jar | kakaCat | 已决：A（复用 0600 jar） |
+| 回放实时画面 | A. CDP screencast 推流到面板；B. 侧栏浏览器打开本地流 URL；C. 不做（现状：只有失败截图） | kakaCat | M4 设计前 |
+| CDP 引擎落地 | A. 等 `dsh-builtin-browser` 暴露 CDP 访问器后新增 `cdp` 引擎；B. 保持 seam 适配 | kakaCat | 插件提供公开 CDP 契约后 |
 
 ## 附录  serves: 全文
 

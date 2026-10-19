@@ -15,7 +15,9 @@
     - id: dsh-dataforge
       name: dsh-dataforge
       config:
-        engineRoot: "/Volumes/ORICO/doc/github/dsh/ai-dataforge-loop"
+        # engineRoot 仅 legacy Flow Pack 运行器（dataforge_run）需要；接口链执行不需要。
+        # 示例值请换成你自己的引擎 checkout 绝对路径：
+        engineRoot: "/path/to/ai-dataforge-loop"
         # pythonBin: "python3"
         # timeoutSeconds: 600
         # injectPolicy: true

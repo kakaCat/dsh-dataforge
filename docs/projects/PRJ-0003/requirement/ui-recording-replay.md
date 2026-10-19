@@ -1,7 +1,7 @@
 ---
 title: UI 自动化测试（浏览器录制 + 回放）· 需求
 status: draft
-owner: yunpeng
+owner: kakaCat
 reviewers: 待定
 created: 2026-10-17
 updated: 2026-10-18

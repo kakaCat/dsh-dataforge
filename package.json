@@ -3,8 +3,28 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "DSH 数据智造插件：声明式流程包（Flow Pack）运行器。发现流程、三道闸、后台 job 驱动外部引擎、NDJSON 进度流与证据留痕。DataForge Loop 是第一个内置流程包。",
+  "description": "DSH plugin: turn captured web traffic into executable, versioned interface-chains — trace analysis, chain drafting, binding, probe, run, verify and evidence export. TypeScript-only, HTTP-only execution core.",
   "license": "MIT",
+  "author": "kakaCat",
+  "homepage": "https://github.com/kakaCat/dsh-dataforge#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kakaCat/dsh-dataforge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kakaCat/dsh-dataforge/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "api-testing",
+    "test-data",
+    "http",
+    "interface-chain",
+    "trace-analysis"
+  ],
   "engines": {
     "node": ">=20"
   },

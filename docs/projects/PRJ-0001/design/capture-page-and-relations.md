@@ -1,8 +1,8 @@
 ---
 title: 采集页与页面-接口关系模型设计
 status: approved
-owner: yunpeng
-reviewers: yunpeng
+owner: kakaCat
+reviewers: kakaCat
 prd: docs/projects/PRJ-0001/requirement/interface-capture.md
 serves: FR-1、FR-3、FR-7
 created: 2026-10-17
@@ -240,10 +240,10 @@ run 详情现有 pages/samples/credentials 三块独缺 cards；本端点补齐�
 
 | 失败场景 | 触发条件 | 用户可见影响 | 检测手段 | 回滚动作 | 决策人 |
 |---|---|---|---|---|---|
-| 迁移失败 | 老库结构意外（手工改过表） | 插件启动失败 | 启动日志 + vitest 迁移用例 | 迁移包在 try 内、失败时跳过新表并降级为旧行为（不读新表） | yunpeng |
-| 指纹爆炸 | 某站把易变值放在 body 深层 | 关系行数膨胀、卡下形态刷屏 | run 详情 relations 计数；单卡关系行超 50 时面板如实提示 | 配置项追加易变 body 路径黑名单；存量行保留不删 | yunpeng |
-| host-busy 误伤 | 上一次 run 异常未收口（进程被杀） | 同站永远 409 | 采集页状态条可见 running 残留 | `capture_cancel` 幂等收口后即可重发；面板给"强制收口"提示文案 | yunpeng |
-| POST 路由被滥用 | 面板无鉴权，同机任意脚本可发起采集 | 对目标站的非预期请求 | NDJSON 审计流含发起来源 | 路由默认只绑 127.0.0.1（随宿主 webServer）；不暴露公网 | yunpeng |
+| 迁移失败 | 老库结构意外（手工改过表） | 插件启动失败 | 启动日志 + vitest 迁移用例 | 迁移包在 try 内、失败时跳过新表并降级为旧行为（不读新表） | kakaCat |
+| 指纹爆炸 | 某站把易变值放在 body 深层 | 关系行数膨胀、卡下形态刷屏 | run 详情 relations 计数；单卡关系行超 50 时面板如实提示 | 配置项追加易变 body 路径黑名单；存量行保留不删 | kakaCat |
+| host-busy 误伤 | 上一次 run 异常未收口（进程被杀） | 同站永远 409 | 采集页状态条可见 running 残留 | `capture_cancel` 幂等收口后即可重发；面板给"强制收口"提示文案 | kakaCat |
+| POST 路由被滥用 | 面板无鉴权，同机任意脚本可发起采集 | 对目标站的非预期请求 | NDJSON 审计流含发起来源 | 路由默认只绑 127.0.0.1（随宿主 webServer）；不暴露公网 | kakaCat |
 
 - **开关**：无新增配置开关；并发策略（同 host 409）若需放宽再加 `captureAllowSameHostConcurrent`，默认 false。
 - **回滚演练**：迁移用例在 vitest 内覆盖"老库 → 升级 → 再升级（幂等）"；代码级回滚 = revert 提交，旧逻辑不读新表。
@@ -264,9 +264,9 @@ run 详情现有 pages/samples/credentials 三块独缺 cards；本端点补齐�
 
 | 里程碑 | 内容 | 出口判据 | 负责人 | 目标日期 |
 |---|---|---|---|---|
-| M1（契约冻结） | normalizer 指纹 + location；store 关系表 + 迁移 | 纯函数与 store 单测全绿；DDL/路由契约冻结，后续里程碑不改 | yunpeng | 2026-10-18 |
-| M2（链路贯通） | application 桥三写 + POST /captures + GET /runs/:id/cards | 编排单测：两形态一卡两关系行；路由 400/409/200 用例齐 | yunpeng | 2026-10-18 |
-| M3（采集页 + 验收） | client 采集页 tab + e2e 门 | `CAPTURE_E2E=1` 真实站点 POST 发起 → 采集页看到接口文档；typecheck/build/test 全绿 | yunpeng | 2026-10-19 |
+| M1（契约冻结） | normalizer 指纹 + location；store 关系表 + 迁移 | 纯函数与 store 单测全绿；DDL/路由契约冻结，后续里程碑不改 | kakaCat | 2026-10-18 |
+| M2（链路贯通） | application 桥三写 + POST /captures + GET /runs/:id/cards | 编排单测：两形态一卡两关系行；路由 400/409/200 用例齐 | kakaCat | 2026-10-18 |
+| M3（采集页 + 验收） | client 采集页 tab + e2e 门 | `CAPTURE_E2E=1` 真实站点 POST 发起 → 采集页看到接口文档；typecheck/build/test 全绿 | kakaCat | 2026-10-19 |
 
 ## 需求追溯  serves: 全文
 
@@ -319,9 +319,9 @@ run 详情现有 pages/samples/credentials 三块独缺 cards；本端点补齐�
 
 | 问题 | 选项 | 负责人 | 截止 |
 |---|---|---|---|
-| 采集页是否放「强制收口残留 run」按钮 | A 只给文案提示 / B 加按钮直调 cancel | yunpeng | M3 评审 |
-| 形态在接口库的展示粒度 | A 卡详情列形态清单 / B 接口库列表直接展开形态行 | yunpeng | M3 评审 |
-| 易变 body 路径黑名单 | 默认空集，按真实站点积累后补默认值 | yunpeng | 下一迭代 |
+| 采集页是否放「强制收口残留 run」按钮 | A 只给文案提示 / B 加按钮直调 cancel | kakaCat | M3 评审 |
+| 形态在接口库的展示粒度 | A 卡详情列形态清单 / B 接口库列表直接展开形态行 | kakaCat | M3 评审 |
+| 易变 body 路径黑名单 | 默认空集，按真实站点积累后补默认值 | kakaCat | 下一迭代 |
 
 ## 附录  serves: 全文
 

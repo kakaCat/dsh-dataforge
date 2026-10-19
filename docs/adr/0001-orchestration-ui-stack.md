@@ -2,7 +2,7 @@
 
 - 状态：已接受
 - 日期：2026-10-17
-- 决策人：yunpeng
+- 决策人：kakaCat
 - 相关：[R-2 设计](../projects/PRJ-0002/design/r2-orchestration-canvas.md)、[R-2 需求](../projects/PRJ-0002/requirement/r2-orchestration-canvas.md)
 
 ## 背景

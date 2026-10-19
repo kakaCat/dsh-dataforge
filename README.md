@@ -1,15 +1,17 @@
 # dsh-dataforge
 
-DSH 数据智造插件：把**声明式流程包（Flow Pack）**变成 agent 可调用的工具面。
-DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件本体与领域无关——任何符合下列契约的 Python 引擎 + YAML 流程包都能挂进来。
+DSH（DeepSeek Harness）插件：**采集 → trace 分析 → 接口链编排 → 执行 → 验收 → 证据** 的一站式数据智造闭环。
+纯 TypeScript 实现，执行核心只走 **HTTP API**（不碰目标库 SQL、不内置 Python）。浏览器只用于采集与 UI 回放两条辅助执行面。
+
+> English summary: `dsh-dataforge` is a DSH plugin that turns captured web traffic into executable, versioned interface-chains. It provides trace analysis, chain drafting/probing, HTTP-only chain execution with credential injection, UI-record/replay verification, and dataset/evidence export. The execution core is TypeScript-only and talks to target systems over HTTP APIs only.
 
 ## 形态速览
 
 ```
 对话 agent
-  └─ dataforge_flows   列出可运行流程（含必填参数清单）
-  └─ dataforge_run     三道闸 → 后台 job（或前台降级）→ 引擎桥
-  └─ dataforge_status  按留痕查进度 / 业务单号链
+  └─ dataforge_flows   列出可运行流程（含必填参数清单）        【legacy：Flow Pack 运行器，S6 移除】
+  └─ dataforge_run     三道闸 → 后台 job（或前台降级）→ 引擎桥  【legacy：Flow Pack 运行器，S6 移除】
+  └─ dataforge_status  按留痕查进度 / 业务单号链                【legacy：Flow Pack 运行器，S6 移除】
 
 采集 → 编排（编排是本次新增的一段，见「编排」节）
   └─ dataforge_capture* / dataforge_browser_*   采集期浏览器：页面上的 XHR 成卡（UI 测试另起浏览器，见「UI 测试」节）
@@ -74,7 +76,7 @@ dsh plugin --profile web add dsh-dataforge dsh-builtin-browser@0.4.13
 - 该插件的权限边界（agent 可读侧栏页面与 Cookie、34 个 `dsh_browser_*` 工具）见其 README，装之前请确认接受；
 - 想显式选择引擎：`uiTestBrowser: auto|playwright|shared|cdp`（见「浏览器引擎」）；`shared` 下 `upload` 步骤不支持，需要上传的脚本切回 `playwright`。
 
-## 三道闸（调用纪律，写进 dataforge_run 工具描述）
+## 三道闸（调用纪律，写进 dataforge_run 工具描述）【legacy：Flow Pack 运行器，S6 移除】
 
 1. **必填校验**：流程 yaml `inputs.*.required: true` 的字段缺一即拒绝启动（`gate=missing-fields`），回执给中文标签清单。
 2. **用户确认**：无 `confirm=true` 只返回参数确认卡（`gate=confirm-required`），不启动任何进程。
@@ -86,8 +88,10 @@ dsh plugin --profile web add dsh-dataforge dsh-builtin-browser@0.4.13
 - id: dataforge
   name: dsh-dataforge
   config:
-    engineRoot: /Volumes/ORICO/doc/github/dsh/ai-dataforge-loop
-    pythonBin: python3
+    # engineRoot / pythonBin 仅 legacy Flow Pack 运行器（dataforge_run）需要，S6 移除后删除；
+    # 接口链执行（dataforge_chain_run）不需要任何引擎配置。
+    engineRoot: /path/to/ai-dataforge-loop
+    # pythonBin: python3
     dataRoot: ~/.dsh/storages/dsh-dataforge
     timeoutSeconds: 600
     injectPolicy: true
@@ -103,8 +107,8 @@ dsh plugin --profile web add dsh-dataforge dsh-builtin-browser@0.4.13
 
 | 字段 | 说明 | 缺省 |
 |---|---|---|
-| `engineRoot` | 引擎流程包 checkout 绝对路径（含 `dsh_bridge.py` 与 `configs/`）| 必填 |
-| `pythonBin` | 引擎运行时 | `python3` |
+| `engineRoot` | 引擎流程包 checkout 绝对路径（含 `dsh_bridge.py` 与 `configs/`）；**仅 legacy Flow Pack 运行器需要** | 必填（legacy） |
+| `pythonBin` | 引擎运行时；**仅 legacy Flow Pack 运行器需要** | `python3` |
 | `dataRoot` | 插件数据根：留痕 + 全局三方包（`<dataRoot>/flows/`）| `~/.dsh/storages/dsh-dataforge` |
 | `timeoutSeconds` | 桥进程硬超时，超时即杀 | `600` |
 | `injectPolicy` | 是否注入 `policy.md` 常驻策略段 | `true` |
@@ -117,7 +121,7 @@ dsh plugin --profile web add dsh-dataforge dsh-builtin-browser@0.4.13
 | `uiStepTimeoutSeconds` | UI 回放：单步动作 + 断言超时（秒）；到点该步失败并留截图 | `15` |
 | `uiTestBrowser` | UI 测试浏览器引擎：`auto`（有共享浏览器就用 shared，否则 playwright）/ `playwright` / `shared` / `cdp`（预留，未实现时回退 playwright） | `auto` |
 
-## 流程包发现（后写赢）
+## 流程包发现（后写赢）【legacy：Flow Pack 运行器，S6 移除】
 
 1. `engineRoot/configs/` —— 引擎内置默认包
 2. `<dataRoot>/flows/` —— 部署者三方包
@@ -125,7 +129,9 @@ dsh plugin --profile web add dsh-dataforge dsh-builtin-browser@0.4.13
 
 每次调用现扫盘（mtime 热重载），改 yaml 即生效，无需重启宿主；坏 yaml 跳过不炸。
 
-## 引擎桥契约（dsh_bridge.py）
+## 引擎桥契约（dsh_bridge.py）【deprecated：legacy Flow Pack 运行器，S6 整体移除】
+
+> 以下仅描述现存 legacy 路径的行为，新接入请使用「接口链执行（R-3）」一节的纯 HTTP 执行面。
 
 - `stdout` 纯 NDJSON：`meta`（flow/steps/dryRun）、`step`（id/action/status/elapsed）、`terminal`（name/success/message）、`result`（success/businessData）
 - `stderr` 人类可读日志，允许引擎随意打
@@ -672,19 +678,12 @@ DSH 桌面端自带右侧 Sidebar「浏览器」tab（`dsh-client-ui-sidebar-bro
 
 ```bash
 pnpm typecheck   # tsc --noEmit
-pnpm test        # vitest：全量用例（含真引擎 dry-run 集成；python3 + engineRoot 存在时自动启用）
-pnpm build       # tsdown → dist/ + lib/client.js（含画布与 UI 测试页，约 369 KB）
+pnpm test        # vitest：全量用例（777 个；真实站点/Chrome 端到端默认跳过，按需以环境变量开启）
+pnpm build       # tsdown → dist/ + lib/client.js
 # 真 Chrome 的 UI 录制→回放/点选端到端（默认跳过；需要本机 Chrome）：
 UI_E2E=1 pnpm exec vitest run test/uitest/e2e-local.test.ts
 # 共享浏览器引擎（seam）用假 seam 单测（不依赖 dsh-builtin-browser）：
 pnpm exec vitest run test/uitest/shared-engine.test.ts
-```
-
-直接 CLI 冒烟：
-
-```bash
-python3 dsh_bridge.py configs/znb-prpo.yaml --dry-run \
-  --stockOrg MI_IOT --purchaseOrg 2120 --supplierCode 108062 \
-  --materials '{"1710301000006A": 1}'
-# exit 0 + 39 行 NDJSON（meta 18 步 → step 对 → terminal SUCCESS → result）
+# 真实站点只读闭环 E2E（jsonplaceholder；需要网络 + 本机 Chrome）：
+NODE_OPTIONS=--dns-result-order=ipv4first E2E_REAL=1 pnpm exec vitest run test/e2e/real-site.test.ts
 ```
