@@ -10,9 +10,10 @@
  */
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { fetchRunDetail, postCapture } from './api.js'
-import { AuthBlock, Legend, MethodBadge, ShapesBlock, TemplateBlock } from './card-parts.js'
-import { AUTH_TYPE_LABELS, CAPTURE_POLL_MS, STATUS_LABELS } from './dom.js'
+import { AuthBlock, Legend, MethodBadge, PagerBar, ShapesBlock, TemplateBlock } from './card-parts.js'
+import { AUTH_TYPE_LABELS, CAPTURE_POLL_MS, IFACES_PER_PAGE, STATUS_LABELS } from './dom.js'
 import { fmtShort } from './el.js'
+import { pageIdentityOf } from '../shared/page-url.js'
 import { groupByPage, shapeStats, type GroupedPage } from './grouping.js'
 import type { CardRow, RecaptureSeed, RelationRow, RunDetail } from './types.js'
 
@@ -116,85 +117,89 @@ export function QuickCapturePage({ visible, seed }: QuickCapturePageProps): Reac
 
   return (
     <div className="dsh-df-page-spl">
-      <section className="dsh-df-card">
-        <h2>发起采集</h2>
-        <p className="dsh-df-sub">对单个页面发起，把它的 XHR / fetch 沉淀成接口卡。</p>
-        <form onSubmit={(event) => { void submit(event) }}>
-          <input
-            className="dsh-df-url-input"
-            type="url"
-            name="entryUrl"
-            placeholder="https://example.com/page（单页入口）"
-            autoComplete="off"
-            spellCheck={false}
-            style={{ marginTop: 10, display: 'block' }}
-            value={url}
-            onChange={(event) => { setUrl(event.target.value) }}
-          />
-          <div className="dsh-df-mode-tag">单页 · 只读 · 静止期监听</div>
-          <button className="dsh-df-btn-primary dsh-df-btn-block" type="submit" disabled={sending}>发起采集</button>
-        </form>
-        {outcome !== undefined && (
-          <div
-            className={outcome.ok ? 'dsh-df-noticeline' : 'dsh-df-errline'}
-            style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}
-          >
-            {outcome.text}
-          </div>
-        )}
-      </section>
-      <section className="dsh-df-card">
-        <h2>
-          本次进度
-          {statusLabel !== undefined && <span className={`dsh-df-badge ${run?.status ?? ''}`}>{statusLabel}</span>}
-        </h2>
-        {detail === undefined && detailError === undefined && (
-          <p className="dsh-df-sub">还没发起。发起后这里出现实时进度与统计。</p>
-        )}
-        {detailError !== undefined && <div className="dsh-df-errline">{detailError}</div>}
-        {detail !== undefined && run !== undefined && (
-          <>
-            <div className="dsh-df-stat-grid">
-              <div className="dsh-df-stat"><b>{run.stats.pages}</b><span>页面</span></div>
-              <div className="dsh-df-stat"><b>{run.stats.requests}</b><span>样本</span></div>
-              <div className="dsh-df-stat"><b>{run.stats.cards}</b><span>接口</span></div>
-              <div className="dsh-df-stat"><b>{run.stats.credentials}</b><span>凭证</span></div>
+      {/* 左列三块卡必须包在 aside 里：否则 grid 自动排布会把「本次进度」放进右列、
+          「采集结果」挤到第二行，结果区既不在顶上也更容易被视口裁掉。原型 .page > aside 同款。 */}
+      <aside>
+        <section className="dsh-df-card">
+          <h2>发起采集</h2>
+          <p className="dsh-df-sub">对单个页面发起，把它的 XHR / fetch 沉淀成接口卡。</p>
+          <form onSubmit={(event) => { void submit(event) }}>
+            <input
+              className="dsh-df-url-input"
+              type="url"
+              name="entryUrl"
+              placeholder="https://example.com/page（单页入口）"
+              autoComplete="off"
+              spellCheck={false}
+              style={{ marginTop: 10, display: 'block' }}
+              value={url}
+              onChange={(event) => { setUrl(event.target.value) }}
+            />
+            <div className="dsh-df-mode-tag">单页 · 只读 · 静止期监听</div>
+            <button className="dsh-df-btn-primary dsh-df-btn-block" type="submit" disabled={sending}>发起采集</button>
+          </form>
+          {outcome !== undefined && (
+            <div
+              className={outcome.ok ? 'dsh-df-noticeline' : 'dsh-df-errline'}
+              style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}
+            >
+              {outcome.text}
             </div>
-            <ul className="dsh-df-steps">
-              <li className="dsh-df-done">
-                发起采集
-                <small>{`${fmtShort(run.startedAt)} · captureId ${run.id}`}</small>
-              </li>
-              <li className={running ? 'dsh-df-doing' : 'dsh-df-done'}>
-                静止期监听 XHR / fetch
-                <small>
-                  {running
-                    ? `进行中 · 已捕获 ${run.stats.requests} 个请求样本`
-                    : `共捕获 ${run.stats.requests} 个请求样本`}
-                </small>
-              </li>
-              <li className={running ? undefined : 'dsh-df-done'}>
-                归并收口出接口文档
-                <small>
-                  {running
-                    ? '等待页面静止，收口后出文档'
-                    : `${run.stats.cards} 个接口卡${run.endedAt === undefined ? '' : ` · 收口于 ${fmtShort(run.endedAt)}`}`}
-                </small>
-              </li>
-            </ul>
-            {run.error !== undefined && run.error.length > 0 && <div className="dsh-df-errline">{run.error}</div>}
-            {run.notice !== undefined && run.notice.length > 0 && <div className="dsh-df-noticeline">{run.notice}</div>}
-            {running && <p className="dsh-df-sub">{`每 ${CAPTURE_POLL_MS / 1000} 秒刷新，收口后自动停止。`}</p>}
-          </>
-        )}
-      </section>
-      <section className="dsh-df-card">
-        <h2>边界说明</h2>
-        <div className="dsh-df-kv">只走 HTTP 请求洞察：不点按钮、不填表单、不执行写操作。</div>
-        <div className="dsh-df-kv">静止期窗口：页面加载完成后继续监听一小段时间，收走 XHR / fetch。</div>
-        <div className="dsh-df-kv">要驱动真实交互（登录、翻页、提交）→ 用 agent 会话 dataforge_capture。</div>
-        <div className="dsh-df-kv">凭证只记标志与来源，原文不进卡、不出路由。</div>
-      </section>
+          )}
+        </section>
+        <section className="dsh-df-card">
+          <h2>
+            本次进度
+            {statusLabel !== undefined && <span className={`dsh-df-badge ${run?.status ?? ''}`}>{statusLabel}</span>}
+          </h2>
+          {detail === undefined && detailError === undefined && (
+            <p className="dsh-df-sub">还没发起。发起后这里出现实时进度与统计。</p>
+          )}
+          {detailError !== undefined && <div className="dsh-df-errline">{detailError}</div>}
+          {detail !== undefined && run !== undefined && (
+            <>
+              <div className="dsh-df-stat-grid">
+                <div className="dsh-df-stat"><b>{run.stats.pages}</b><span>页面</span></div>
+                <div className="dsh-df-stat"><b>{run.stats.requests}</b><span>样本</span></div>
+                <div className="dsh-df-stat"><b>{run.stats.cards}</b><span>接口</span></div>
+                <div className="dsh-df-stat"><b>{run.stats.credentials}</b><span>凭证</span></div>
+              </div>
+              <ul className="dsh-df-steps">
+                <li className="dsh-df-done">
+                  发起采集
+                  <small>{`${fmtShort(run.startedAt)} · captureId ${run.id}`}</small>
+                </li>
+                <li className={running ? 'dsh-df-doing' : 'dsh-df-done'}>
+                  静止期监听 XHR / fetch
+                  <small>
+                    {running
+                      ? `进行中 · 已捕获 ${run.stats.requests} 个请求样本`
+                      : `共捕获 ${run.stats.requests} 个请求样本`}
+                  </small>
+                </li>
+                <li className={running ? undefined : 'dsh-df-done'}>
+                  归并收口出接口文档
+                  <small>
+                    {running
+                      ? '等待页面静止，收口后出文档'
+                      : `${run.stats.cards} 个接口卡${run.endedAt === undefined ? '' : ` · 收口于 ${fmtShort(run.endedAt)}`}`}
+                  </small>
+                </li>
+              </ul>
+              {run.error !== undefined && run.error.length > 0 && <div className="dsh-df-errline">{run.error}</div>}
+              {run.notice !== undefined && run.notice.length > 0 && <div className="dsh-df-noticeline">{run.notice}</div>}
+              {running && <p className="dsh-df-sub">{`每 ${CAPTURE_POLL_MS / 1000} 秒刷新，收口后自动停止。`}</p>}
+            </>
+          )}
+        </section>
+        <section className="dsh-df-card">
+          <h2>边界说明</h2>
+          <div className="dsh-df-kv">只走 HTTP 请求洞察：不点按钮、不填表单、不执行写操作。</div>
+          <div className="dsh-df-kv">静止期窗口：页面加载完成后继续监听一小段时间，收走 XHR / fetch。</div>
+          <div className="dsh-df-kv">要驱动真实交互（登录、翻页、提交）→ 用 agent 会话 dataforge_capture。</div>
+          <div className="dsh-df-kv">凭证只记标志与来源，原文不进卡、不出路由。</div>
+        </section>
+      </aside>
       <main>
         <div className="dsh-df-doc-head">
           <h1>采集结果</h1>
@@ -240,6 +245,15 @@ function ResultDoc({ detail }: { detail: RunDetail }): ReactNode {
       </div>
     )
   }
+  // 页面名（采集时记录的 document.title）按页面身份匹配：分组用的展示 URL 可能是
+  // 同一 SPA 页面的另一个变体，直接按字面 URL 查会漏。
+  const titlesByPage = new Map<string, string>()
+  for (const page of detail.pages) {
+    const title = page.title?.trim()
+    if (title === undefined || title === '') continue
+    const identity = pageIdentityOf(page.url)
+    if (!titlesByPage.has(identity)) titlesByPage.set(identity, title)
+  }
   const groups = groupByPage(cards, detail.relations ?? [])
   const shapeTotal = cards.reduce((sum, card) => sum + shapeStats(card, detail.relations ?? []).shapes, 0)
   return (
@@ -247,18 +261,26 @@ function ResultDoc({ detail }: { detail: RunDetail }): ReactNode {
       <div className="dsh-df-summary" style={{ marginBottom: 12 }}>
         {`${groups.length} 个页面 · ${cards.length} 个接口 · ${shapeTotal} 个形态`}
       </div>
-      {groups.map((group) => <PageNode group={group} key={group.pageUrl} />)}
+      {groups.map((group) => (
+        <PageNode group={group} key={group.pageUrl} title={titlesByPage.get(pageIdentityOf(group.pageUrl))} />
+      ))}
     </>
   )
 }
 
-function PageNode({ group }: { group: GroupedPage }): ReactNode {
+function PageNode({ group, title }: { group: GroupedPage; title?: string }): ReactNode {
   const [open, setOpen] = useState(true)
+  // 接口分页：页面节点展开后默认只渲染当前页，几百个接口不会把结果文档拉成一条长龙。
+  const [page, setPage] = useState(0)
   const pageCards = group.cards
   const shapeSum = pageCards.reduce(
     (sum, entry) => sum + shapeStats(entry.card, entry.relations).shapes,
     0,
   )
+  const totalPages = Math.max(1, Math.ceil(pageCards.length / IFACES_PER_PAGE))
+  const effectivePage = Math.min(page, totalPages - 1)
+  const first = effectivePage * IFACES_PER_PAGE
+  const shown = pageCards.slice(first, first + IFACES_PER_PAGE)
   return (
     <div className={`dsh-df-page-node${open ? '' : ' dsh-df-collapsed'}`}>
       <button
@@ -267,7 +289,10 @@ function PageNode({ group }: { group: GroupedPage }): ReactNode {
         onClick={() => { setOpen((value) => !value) }}
       >
         <span className="dsh-df-lv dsh-df-lv1">页面</span>
-        <span className="dsh-df-pn-name dsh-df-mono">{group.pageUrl}</span>
+        <span className="dsh-df-pn-names">
+          {title !== undefined && <span className="dsh-df-pn-title">{title}</span>}
+          <span className={title === undefined ? 'dsh-df-pn-name dsh-df-mono' : 'dsh-df-pn-url dsh-df-mono'}>{group.pageUrl}</span>
+        </span>
         <span className="dsh-df-pn-meta">
           {`${pageCards.length} 接口 · ${shapeSum} 形态`}
         </span>
@@ -275,9 +300,16 @@ function PageNode({ group }: { group: GroupedPage }): ReactNode {
       </button>
       {open && (
         <div className="dsh-df-pn-body">
-          {pageCards.map((entry) => (
+          {shown.map((entry) => (
             <IfaceCard key={entry.card.id} card={entry.card} relations={entry.relations} />
           ))}
+          <PagerBar
+            page={effectivePage}
+            totalPages={totalPages}
+            label={`第 ${first + 1}–${first + shown.length} / 共 ${pageCards.length} 接口`}
+            onGoto={setPage}
+            ariaLabel="接口分页"
+          />
         </div>
       )}
     </div>

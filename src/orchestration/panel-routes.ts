@@ -18,13 +18,14 @@
  * @module dsh-dataforge/orchestration/panel-routes
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { statSync } from 'node:fs'
-import { isAbsolute } from 'node:path'
+import { existsSync, statSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import {
   listChainVersionInfos, listChainVersions, listChains, loadChain, readCard, readChainText,
   renameChainDomain, renameChainFlow, saveChain,
 } from '../chains/store.js'
 import { listCards } from '../library/store.js'
+import { pageIdentityOf } from '../shared/page-url.js'
 import type { ChainDoc, ChainIssue, ChainKind, ChainSource } from '../chains/schema.js'
 
 export const ORCHESTRATION_API_PREFIX = '/orchestration'
@@ -44,6 +45,11 @@ export interface OrchestrationRouteRegistrar {
 export interface OrchestrationPanelDeps {
   /** 工作区根：链落在 `<root>/.dsh/dataforge/chains`。每次请求现取（面板可能切工作区）。 */
   resolveWorkspaceRoot: () => Promise<string>
+  /**
+   * 显式 workspace 没有任何 dataforge 数据时的兜底（例如面板拿全局最近工作区，
+   * 但该工作区从未用过 dataforge）。缺省不做兜底，保持显式路径语义。
+   */
+  fallbackWorkspaceRoot?: () => Promise<string | undefined>
 }
 
 /** 卡投影：画布显示用（方法/地址/名称）+ 连线绑定下拉用（字段路径表）。零凭证。 */
@@ -209,7 +215,15 @@ async function resolveRoot(deps: OrchestrationPanelDeps, url: URL): Promise<stri
   const raw = url.searchParams.get('workspace')?.trim()
   if (raw !== undefined && raw.length > 0 && isAbsolute(raw)) {
     try {
-      if (statSync(raw).isDirectory()) return raw
+      if (statSync(raw).isDirectory()) {
+        // 显式工作区从未用过 dataforge（没有 .dsh/dataforge）时允许兜底：
+        // 面板可能把“全局最近工作区”当成了当前工作区。
+        if (deps.fallbackWorkspaceRoot !== undefined && !existsSync(join(raw, '.dsh', 'dataforge'))) {
+          const fallback = await deps.fallbackWorkspaceRoot()
+          if (fallback !== undefined && fallback !== '') return fallback
+        }
+        return raw
+      }
     } catch {
       // 不存在的路径：当没给，回落
     }
@@ -325,7 +339,8 @@ async function handleGraph(deps: OrchestrationPanelDeps, url: URL, res: ServerRe
  * 画布左栏调色板：可拖进画布的卡（接口编排）与页面（页面编排）。
  *
  * 只给身份与字段计数——拖进去之后画布按 cardId 再取完整字段表（graph 的 cards）。
- * 页面清单来自卡的 `sources[].pages`（采集时记下的页面），去重后作为页面编排的拖拽源。
+ * 页面清单来自卡的 `sources[].pages`（采集时记下的页面），按页面身份去重后作为页面编排的拖拽源
+ * （同一 SPA 页面的 hash 路由/反缓存戳变体只出现一次，保留首次原始 URL）。
  */
 export type PaletteValue = {
   cards: Array<{
@@ -354,11 +369,15 @@ async function buildPalette(deps: OrchestrationPanelDeps, url: URL): Promise<Pal
     cards = []
   }
 
-  const pages = new Set<string>()
+  // 页面按身份去重（同一 SPA 页面的 hash/反缓存戳变体是一页），保留首次出现的原始 URL：
+  // 拖进画布的页面节点要一个可读、可打开的地址，不是归并键。
+  const pages = new Map<string, string>()
   for (const card of cards) {
     for (const source of card.sources ?? []) {
       for (const page of source.pages ?? []) {
-        if (page.length > 0) pages.add(page)
+        if (page.length === 0) continue
+        const key = pageIdentityOf(page)
+        if (!pages.has(key)) pages.set(key, page)
       }
     }
   }
@@ -376,7 +395,7 @@ async function buildPalette(deps: OrchestrationPanelDeps, url: URL): Promise<Pal
       inputCount: card.inputs.length,
       outputCount: card.outputs.length,
     })),
-    pages: [...pages].slice(0, MAX_PALETTE_PAGES),
+    pages: [...pages.values()].slice(0, MAX_PALETTE_PAGES),
     ...(truncated === undefined ? {} : { truncated }),
   }
 }

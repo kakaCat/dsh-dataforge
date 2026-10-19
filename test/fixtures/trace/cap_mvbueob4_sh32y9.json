@@ -1,0 +1,838 @@
+{
+  "captureId": "cap_mvbueob4_sh32y9",
+  "entryUrl": "https://finance.baidu.com/",
+  "status": "done",
+  "samples": [
+    {
+      "id": "sm_mvbueqb1_cq0gi8",
+      "seq": 1,
+      "ts": 1792208066220,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/sapi/v1/appinfo?finClientType=pc",
+      "path": "/sapi/v1/appinfo",
+      "query": {
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"13369676049307655722\",\"Result\":{\"basicinfo\":{\"description\":\"FinScope，汇聚全球金融市场的股票、基金、外汇、期货等实时行情，7*24小时覆盖专业财经资讯，提供客观、准确、及时、全面的沪深港美上市公司股价、财务、股东、分红等信息，让用户在复杂的金融市场，更简单的获取投资信息。\",\"version\":\"1.0.0\",\"name\":\"FinScope\",\"title\":\"FinScope-AI让投资更简单\"},\"logo\":{\"agent\":{\"interactiveType\":\"static\",\"default\":{\"url\":\"https://gips3.baidu.com/it/u=1239419892,2323868349\\u0026fm=3028\\u0026app=3028\\u0026f=PNG\\u0026fmt=auto\\u0026q=100\\u0026size=f285_72\"},\"hover\":{\"url\":\"https://gips3.baidu.com/it/u=1067638284,94819691\\u0"
+    },
+    {
+      "id": "sm_mvbueqb2_tul1jv",
+      "seq": 2,
+      "ts": 1792208066222,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/vapi/v1/userinfo?finClientType=pc",
+      "path": "/vapi/v1/userinfo",
+      "query": {
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"ResultCode\":0,\"ResultNum\":0,\"QueryID\":\"7607323296216002478\",\"Result\":{\"displayName\":\"\",\"avatar\":\"\",\"isLogin\":0}}"
+    },
+    {
+      "id": "sm_mvbueqbr_tshg6g",
+      "seq": 3,
+      "ts": 1792208066247,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/vapi/v2/blocks?style=heatmap&market=ab&typeCode=HY&sortKey=amount&sortType=desc&pn=0&rn=20&finClientType=pc",
+      "path": "/vapi/v2/blocks",
+      "query": {
+        "style": "heatmap",
+        "market": "ab",
+        "typeCode": "HY",
+        "sortKey": "amount",
+        "sortType": "desc",
+        "pn": "0",
+        "rn": "20",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"ResultCode\":0,\"ResultNum\":0,\"QueryID\":\"8044214494995630711\",\"Result\":{\"list\":{\"body\":[{\"amount\":\"1845亿\",\"code\":\"270100\",\"financeType\":\"block\",\"lastPx\":\"11726.36\",\"logo\":{\"type\":\"img\",\"logo\":\"https://baidu-finance.cdn.bcebos.com/imgs/logo/block/半导体_47896.png\"},\"market\":\"ab\",\"marketValue\":\"12.12万亿\",\"name\":\"半导体\",\"pxChange\":\"-89.37\",\"pxChangeRate\":\"-0.76%\",\"rawData\":{\"amount\":184475254000,\"lastPx\":11726.36,\"marketValue\":12121577099110,\"pxChange\":-89.37,\"pxChangeRate\":-0.76,\"volume\":25536828.19},\"volume\":\"2554"
+    },
+    {
+      "id": "sm_mvbueqca_u5qa8v",
+      "seq": 4,
+      "ts": 1792208066266,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/sapi/v1/marketquote?anomalyType=all&bizType=anomalySignal&market=ab&signalType=market&signalTarget=block&pn=0&rn=1&finClientType=pc",
+      "path": "/sapi/v1/marketquote",
+      "query": {
+        "anomalyType": "all",
+        "bizType": "anomalySignal",
+        "market": "ab",
+        "signalType": "market",
+        "signalTarget": "block",
+        "pn": "0",
+        "rn": "1",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"18045230997849351973\",\"Result\":{},\"ResultCode\":-1,\"ResultMsg\":\"internal server error\"}"
+    },
+    {
+      "id": "sm_mvbueqcb_71nxvp",
+      "seq": 5,
+      "ts": 1792208066267,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/sapi/v1/financelsegmacro/heatmap?from=home_page&finClientType=pc",
+      "path": "/sapi/v1/financelsegmacro/heatmap",
+      "query": {
+        "from": "home_page",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"\",\"Result\":{\"columns\":[{\"metricName\":\"GDP同比\",\"tabName\":\"国民经济核算\"},{\"metricName\":\"CPI同比\",\"tabName\":\"价格\"},{\"metricName\":\"失业率\",\"tabName\":\"就业与劳动力\"},{\"metricName\":\"基准利率\",\"tabName\":\"金融与货币\"},{\"metricName\":\"工业生产同比\",\"tabName\":\"工农业、能源\"}],\"rows\":[{\"cells\":[{\"change\":0,\"code\":\"\",\"priorValue\":\"\",\"priorValueRaw\":0,\"ratio\":\"\",\"rawRatio\":0,\"rawValue\":0,\"time\":\"\",\"unit\":\"\",\"value\":\"\"},{\"change\":1,\"code\":\"USCPNY=ECI\",\"priorValue\":\"3.40%\",\"priorValueRaw\":3.4,\"ratio\":\"0.30%\",\"rawRatio\":0.3,\"rawValue\":3.7,\"time\":\"202"
+    },
+    {
+      "id": "sm_mvbueqcc_sr8d4w",
+      "seq": 6,
+      "ts": 1792208066268,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/sapi/v1/financelsegmacro/hotmetrics?country=%E4%B8%96%E7%95%8C&finClientType=pc",
+      "path": "/sapi/v1/financelsegmacro/hotmetrics",
+      "query": {
+        "country": "世界",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"\",\"Result\":{\"list\":[{\"change\":1,\"code\":\"USJOB=ECI\",\"country\":\"美国\",\"countryIcon\":\"https://baidu-finance.cdn.bcebos.com/imgs/flag_circle/美国.png\",\"name\":\"初请失业金人数\",\"priorValue\":\"19.80万人\",\"priorValueRaw\":198000,\"ratio\":\"0.51%\",\"rawRatio\":0.505051,\"rawValue\":199000,\"rtrPoll\":\"20.00万人\",\"rtrPollRaw\":200000,\"time\":\"2026-10-10\",\"unit\":\"人\",\"value\":\"19.90万人\"},{\"change\":0,\"code\":\"INRREP=ECI\",\"country\":\"印度\",\"countryIcon\":\"https://baidu-finance.cdn.bcebos.com/imgs/flag_circle/印度.png\",\"name\":\"逆回购利率\",\"priorValue"
+    },
+    {
+      "id": "sm_mvbueqcc_id1s5m",
+      "seq": 7,
+      "ts": 1792208066268,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/api/getbanner?market=&finClientType=pc",
+      "path": "/api/getbanner",
+      "query": {
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"1635421110\",\"ResultCode\":\"0\",\"Result\":{\"list\":[{\"p\":\"3723.8,3722.3,3728.39,3728.46,3731.71,3728.19,3723.64,3723.41,3723.81,3727.28,3736.68,3731.02,3738.26,3732.95,3734.44,3735.75,3740.64,3747.96,3748.13,3746.68,3742.66,3731.21,3726.94,3724.32,3722.08,3716.45,3713.99,3713.11,3716.59,3717.75,3710.96,3706.62,3700.25,3699.69,3693.25,3694.09,3692.11,3682.45,3697.05,3711.89,3716.28,3710.34,3706.33,3711.89,3716.4,3714.11,3712.95,3713.15,3713.15,3716.28\",\"lastPrice\":\"3716.28\",\"preClosePx\":\"3707.48\",\"sta"
+    },
+    {
+      "id": "sm_mvbueqcq_wh0lpr",
+      "seq": 8,
+      "ts": 1792208066282,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/sapi/v1/ranks?bizType=stock_rank&category=&market=ab&pn=0&rn=12&fieldsType=base&finClientType=pc",
+      "path": "/sapi/v1/ranks",
+      "query": {
+        "bizType": "stock_rank",
+        "market": "ab",
+        "pn": "0",
+        "rn": "12",
+        "fieldsType": "base",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"16643062098712410638\",\"Result\":{\"list\":{\"headers\":[{\"canSort\":0,\"key\":\"codeName\",\"name\":\"名称/代码\"},{\"canSort\":1,\"key\":\"lastPx\",\"name\":\"最新价\"},{\"canSort\":1,\"key\":\"pxChangeRate\",\"name\":\"涨跌幅\"},{\"canSort\":0,\"key\":\"followStatus\",\"name\":\"加自选\"}],\"body\":[{\"amount\":\"8.46亿\",\"amplitude\":\"19.19%\",\"code\":\"300045\",\"exchange\":\"SZ\",\"financeType\":\"stock\",\"followStatus\":0,\"lastPx\":\"12.70\",\"logo\":{\"type\":\"normal\",\"logo\":\"https://baidu-finance.cdn.bcebos.com/imgs/logo/stocks/stock_ab_300045.svg\"},\"market\":\"ab\",\"market"
+    },
+    {
+      "id": "sm_mvbueqcu_8aifux",
+      "seq": 9,
+      "ts": 1792208066286,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/vapi/v1/userinfo?finClientType=pc",
+      "path": "/vapi/v1/userinfo",
+      "query": {
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"ResultCode\":0,\"ResultNum\":0,\"QueryID\":\"9073388614095887297\",\"Result\":{\"displayName\":\"\",\"avatar\":\"\",\"isLogin\":0}}"
+    },
+    {
+      "id": "sm_mvbueqd6_vrr6ri",
+      "seq": 10,
+      "ts": 1792208066298,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/sapi/v1/marketquote?bizType=chgdiagram&market=ab&finClientType=pc",
+      "path": "/sapi/v1/marketquote",
+      "query": {
+        "bizType": "chgdiagram",
+        "market": "ab",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"18210283657324813049\",\"Result\":{\"chgdiagram\":{\"total\":{\"title\":\"成交额\",\"price\":\"1.56万亿\"},\"ratio\":{\"up\":3061,\"down\":2023,\"balance\":141},\"diagram\":[{\"title\":\"涨停\",\"status\":\"up\",\"count\":59},{\"title\":\"涨停-5%\",\"status\":\"up\",\"count\":170},{\"title\":\"5%-1%\",\"status\":\"up\",\"count\":1730},{\"title\":\"1%-0%\",\"status\":\"up\",\"count\":1102},{\"title\":\"平盘\",\"status\":\"same\",\"count\":141},{\"title\":\"0%-1%\",\"status\":\"down\",\"count\":811},{\"title\":\"1%-5%\",\"status\":\"down\",\"count\":1072},{\"title\":\"5%-跌停\",\"status\":\"down\",\"count\":130},"
+    },
+    {
+      "id": "sm_mvbueqdl_ha852f",
+      "seq": 11,
+      "ts": 1792208066313,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/vapi/v1/follow/show?delay_num=20&delay_time=15&skip_login=1&finClientType=pc",
+      "path": "/vapi/v1/follow/show",
+      "query": {
+        "delay_num": "20",
+        "delay_time": "15",
+        "skip_login": "1",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"17724300444369601389\",\"Result\":{},\"ResultCode\":\"0\",\"ResultMsg\":\"internal server error\"}"
+    },
+    {
+      "id": "sm_mvbueqdl_oa7gl3",
+      "seq": 12,
+      "ts": 1792208066313,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/sapi/v1/financecalendar?cate=economic_data&from=home_page&pn=0&rn=6&finClientType=pc",
+      "path": "/sapi/v1/financecalendar",
+      "query": {
+        "cate": "economic_data",
+        "from": "home_page",
+        "pn": "0",
+        "rn": "6",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"16176529915480441142\",\"Result\":{\"calendarInfo\":[{\"capitalization\":\"0\",\"countryIcon\":\"https://baidu-finance.cdn.bcebos.com/imgs/flag_circle/美国.png\",\"date\":\"2026-10-17\",\"dateStr\":\"2026年10月17日 周六\",\"dbName\":\"calendar_economic_data\",\"formerVal\":\"6008.61\",\"hasMore\":\"\",\"isToday\":\"1\",\"marketValue\":\"0\",\"pubVal\":\"-508.35\",\"region\":\"美国\",\"star\":\"1\",\"time\":\"06:30\",\"title\":\"美国10月15日COMEX白银库存变动-每日(百盎司)\",\"total\":0},{\"capitalization\":\"0\",\"countryIcon\":\"https://baidu-finance.cdn.bcebos.com/imgs/flag_circle/美国.png"
+    },
+    {
+      "id": "sm_mvbueqdn_dpdphf",
+      "seq": 13,
+      "ts": 1792208066315,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/sapi/v1/marketquote?bizType=marketStatus&finClientType=pc",
+      "path": "/sapi/v1/marketquote",
+      "query": {
+        "bizType": "marketStatus",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"3817146776602042777\",\"Result\":{\"foreign\":{\"global\":{\"market\":\"global\",\"marketDate\":\"2026-10-16\",\"marketName\":\"全球\",\"tradeStatus\":\"ENDTR\",\"tradeStatusCN\":\"已收盘\",\"websocketEnabled\":\"1\"}},\"futures\":{\"ab\":{\"market\":\"ab\",\"marketDate\":\"2026-10-17\",\"marketName\":\"A股\",\"tradeStatus\":\"BREAK\",\"tradeStatusCN\":\"休市\",\"websocketEnabled\":\"1\"},\"us\":{\"market\":\"us\",\"marketDate\":\"2026-10-16\",\"marketName\":\"美股\",\"tradeStatus\":\"ENDTR\",\"tradeStatusCN\":\"已收盘\",\"websocketEnabled\":\"1\"}},\"index\":{\"ab\":{\"market\":\"ab\",\"marketDate\":"
+    },
+    {
+      "id": "sm_mvbueqdw_3ch5p4",
+      "seq": 14,
+      "ts": 1792208066324,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/selfselect/expressnews?rn=6&pn=0&tag=&finClientType=pc",
+      "path": "/selfselect/expressnews",
+      "query": {
+        "rn": "6",
+        "pn": "0",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"3074975396\",\"ResultCode\":\"0\",\"Result\":{\"title\":\"7x24\",\"type\":\"expressnews\",\"content\":{\"tag\":[{\"text\":\"A\\u80a1\"},{\"text\":\"\\u6e2f\\u80a1\"},{\"text\":\"\\u7f8e\\u80a1\"},{\"text\":\"\\u5f02\\u52a8\"}],\"list\":[{\"loc\":\"http:\\/\\/dps.baidu.com\\/data\\/finance_stock_express_news\\/83fc6cf943da6cd1135ae2549bc2478c_finance_stock_express_news_aladdin\",\"title\":\"\\u9a6c\\u65af\\u514b\\uff1a\\u6b63\\u5728\\u5f00\\u53d1\\u4e13\\u7528\\u8bae\\u4ef7\\u673a\\u5668\\u4eba\\uff0c\\u6bcf\\u5e74\\u53ef\\u4e3a\\u5168\\u7403\\u8282\\u77016\\u4e07\\u4ebf\\u7f8e"
+    },
+    {
+      "id": "sm_mvbueqe3_4vlsb9",
+      "seq": 15,
+      "ts": 1792208066331,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/vapi/v1/hotrank?tn=wisexmlnew&dsp=iphone&product=stock&style=tablelist&market=all&type=hour&day=20261017&hour=11&pn=0&rn=12&finClientType=pc",
+      "path": "/vapi/v1/hotrank",
+      "query": {
+        "tn": "wisexmlnew",
+        "dsp": "iphone",
+        "product": "stock",
+        "style": "tablelist",
+        "market": "all",
+        "type": "hour",
+        "day": "20261017",
+        "hour": "11",
+        "pn": "0",
+        "rn": "12",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"ResultCode\":0,\"ResultNum\":0,\"QueryID\":\"8583782236038350368\",\"Result\":{\"list\":{\"headers\":[{\"canSort\":0,\"key\":\"codeName\",\"name\":\"代码\"},{\"canSort\":0,\"key\":\"pxChangeRate\",\"name\":\"涨跌幅\"},{\"canSort\":0,\"key\":\"heat\",\"name\":\"热度\"}],\"body\":[{\"blockName\":\"媒体及娱乐\",\"code\":\"09888\",\"exchange\":\"HK\",\"financeType\":\"stock\",\"followStatus\":\"0\",\"heat\":\"55281\",\"lastPx\":\"79.450\",\"logo\":{\"type\":\"normal\",\"logo\":\"https://baidu-finance.cdn.bcebos.com/imgs/icons/bidu.svg\"},\"market\":\"hk\",\"name\":\"百度集团-W\",\"pxChangeRate\":\"+1.40%\",\"rankDiff\":"
+    },
+    {
+      "id": "sm_mvbueqea_0hu9c6",
+      "seq": 16,
+      "ts": 1792208066338,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/vapi/v1/hotrank?tn=wisexmlnew&dsp=iphone&product=stock&style=tablelist&type=hour&day=20261017&hour=11&pn=0&rn=10&finClientType=pc",
+      "path": "/vapi/v1/hotrank",
+      "query": {
+        "tn": "wisexmlnew",
+        "dsp": "iphone",
+        "product": "stock",
+        "style": "tablelist",
+        "type": "hour",
+        "day": "20261017",
+        "hour": "11",
+        "pn": "0",
+        "rn": "10",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"ResultCode\":0,\"ResultNum\":0,\"QueryID\":\"7022829290392681254\",\"Result\":{\"list\":{\"headers\":[{\"canSort\":0,\"key\":\"codeName\",\"name\":\"代码\"},{\"canSort\":0,\"key\":\"pxChangeRate\",\"name\":\"涨跌幅\"},{\"canSort\":0,\"key\":\"heat\",\"name\":\"热度\"}],\"body\":[{\"blockName\":\"媒体及娱乐\",\"code\":\"09888\",\"exchange\":\"HK\",\"financeType\":\"stock\",\"followStatus\":\"0\",\"heat\":\"55281\",\"lastPx\":\"79.450\",\"logo\":{\"type\":\"normal\",\"logo\":\"https://baidu-finance.cdn.bcebos.com/imgs/icons/bidu.svg\"},\"market\":\"hk\",\"name\":\"百度集团-W\",\"pxChangeRate\":\"+1.40%\",\"rankDiff\":"
+    },
+    {
+      "id": "sm_mvbueqeb_x7unmo",
+      "seq": 17,
+      "ts": 1792208066339,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/vapi/v1/userinfo?finClientType=pc",
+      "path": "/vapi/v1/userinfo",
+      "query": {
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"ResultCode\":0,\"ResultNum\":0,\"QueryID\":\"1888011092421358331\",\"Result\":{\"displayName\":\"\",\"avatar\":\"\",\"isLogin\":0}}"
+    },
+    {
+      "id": "sm_mvbueqi3_99sl32",
+      "seq": 18,
+      "ts": 1792208066475,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/vapi/v1/blocks/overview?hasTrend=1&market=ab&finClientType=pc",
+      "path": "/vapi/v1/blocks/overview",
+      "query": {
+        "hasTrend": "1",
+        "market": "ab",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "none",
+      "responseBodyTruncated": false,
+      "truncated": true
+    },
+    {
+      "id": "sm_mvbueqi5_5c67gq",
+      "seq": 19,
+      "ts": 1792208066477,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/sapi/v1/marketquote?bizType=fundflow&rn=12&market=ab&finClientType=pc",
+      "path": "/sapi/v1/marketquote",
+      "query": {
+        "bizType": "fundflow",
+        "rn": "12",
+        "market": "ab",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"18184761337172941855\",\"Result\":{\"fundflow\":[{\"blockType\":\"HY\",\"blockTypeName\":\"行业\",\"data\":[{\"code\":\"270100\",\"name\":\"半导体\",\"market\":\"ab\",\"financeType\":\"block\",\"mainNetTurnover\":\"+40.93亿\",\"rawData\":{\"mainNetTurnover\":4093301381}},{\"code\":\"270000\",\"name\":\"电子\",\"market\":\"ab\",\"financeType\":\"block\",\"mainNetTurnover\":\"+30.90亿\",\"rawData\":{\"mainNetTurnover\":3089810822}},{\"code\":\"280000\",\"name\":\"汽车\",\"market\":\"ab\",\"financeType\":\"block\",\"mainNetTurnover\":\"+27.61亿\",\"rawData\":{\"mainNetTurnover\":2761044374}},{\"c"
+    },
+    {
+      "id": "sm_mvbueqi6_3mn9pn",
+      "seq": 20,
+      "ts": 1792208066478,
+      "method": "GET",
+      "url": "https://finance.pae.baidu.com/sapi/v1/marketquote?bizType=marketStatus&finClientType=pc",
+      "path": "/sapi/v1/marketquote",
+      "query": {
+        "bizType": "marketStatus",
+        "finClientType": "pc"
+      },
+      "status": 200,
+      "pageUrl": "https://finance.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://finance.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "accept": "application/vnd.finance-web.v1+json",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": [
+          "acs-token"
+        ]
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"QueryID\":\"4199291237026730187\",\"Result\":{\"foreign\":{\"global\":{\"market\":\"global\",\"marketDate\":\"2026-10-16\",\"marketName\":\"全球\",\"tradeStatus\":\"ENDTR\",\"tradeStatusCN\":\"已收盘\",\"websocketEnabled\":\"1\"}},\"futures\":{\"ab\":{\"market\":\"ab\",\"marketDate\":\"2026-10-17\",\"marketName\":\"A股\",\"tradeStatus\":\"BREAK\",\"tradeStatusCN\":\"休市\",\"websocketEnabled\":\"1\"},\"us\":{\"market\":\"us\",\"marketDate\":\"2026-10-16\",\"marketName\":\"美股\",\"tradeStatus\":\"ENDTR\",\"tradeStatusCN\":\"已收盘\",\"websocketEnabled\":\"1\"}},\"index\":{\"ab\":{\"market\":\"ab\",\"marketDate\":"
+    }
+  ],
+  "stats": {
+    "totalSamples": 1000,
+    "returnedSamples": 20,
+    "interfaces": 13,
+    "writes": 0,
+    "pages": 1,
+    "truncatedBodies": 14
+  },
+  "warnings": [
+    {
+      "code": "trace-limit",
+      "message": "fixture: only first 20 / 1000 samples"
+    }
+  ]
+}

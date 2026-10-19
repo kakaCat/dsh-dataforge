@@ -37,6 +37,8 @@ declare const name = "dsh-dataforge/client";
 declare const inject: string[];
 interface ApplyContext {
   slots?: Parameters<typeof registerPagePanel>[0]['slots'];
+  /** cordis 的惰性服务查询（sidebarRight 等服务按需取，不扩大 inject 依赖）。 */
+  get?: (name: string) => unknown;
 }
 declare function apply(ctx: ApplyContext): void;
 //#endregion

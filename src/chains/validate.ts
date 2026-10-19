@@ -212,6 +212,43 @@ export function checkChain(doc: ChainDoc, resolveCard: CardResolver): ChainIssue
     checkInterfaceEdges(doc, nodeIds, cards, constantsOf, declaredSlots, referencedSlots, issues)
   }
 
+  // --- cleanup：只支持 interface-chain；禁止自引用（会递归）；入参必须是字符串
+  if (doc.cleanup !== undefined) {
+    const target = 'cleanup'
+    if (doc.kind !== 'interface-chain') {
+      issues.push({ target, code: 'invalid-chain', reason: 'cleanup 目前只支持 interface-chain' })
+    }
+    if (doc.cleanup.chain.site.trim() === '' || doc.cleanup.chain.flow.trim() === '') {
+      issues.push({ target, code: 'invalid-chain', reason: 'cleanup.chain 的 site/flow 不能为空' })
+    }
+    if (doc.cleanup.chain.site === doc.meta.site && doc.cleanup.chain.flow === doc.meta.flow) {
+      issues.push({ target, code: 'invalid-chain', reason: 'cleanup 不能指向当前链自身（会递归）' })
+    }
+    if (doc.cleanup.chain.version !== undefined && (!Number.isInteger(doc.cleanup.chain.version) || doc.cleanup.chain.version < 1)) {
+      issues.push({ target, code: 'invalid-chain', reason: 'cleanup.chain.version 必须是正整数' })
+    }
+    for (const [key, value] of Object.entries(doc.cleanup.inputs ?? {})) {
+      if (typeof value !== 'string') issues.push({ target, code: 'invalid-chain', reason: `cleanup.inputs.${key} 必须是字符串` })
+    }
+  }
+
+  // --- verify：只支持 interface-chain；UI 脚本引用必须明确
+  if (doc.verify !== undefined) {
+    const target = 'verify'
+    if (doc.kind !== 'interface-chain') {
+      issues.push({ target, code: 'invalid-chain', reason: 'verify 目前只支持 interface-chain' })
+    }
+    if (doc.verify.ui.site.trim() === '' || doc.verify.ui.flow.trim() === '') {
+      issues.push({ target, code: 'invalid-chain', reason: 'verify.ui 的 site/flow 不能为空' })
+    }
+    if (doc.verify.ui.version !== undefined && (!Number.isInteger(doc.verify.ui.version) || doc.verify.ui.version < 1)) {
+      issues.push({ target, code: 'invalid-chain', reason: 'verify.ui.version 必须是正整数' })
+    }
+    for (const [key, value] of Object.entries(doc.verify.inputs ?? {})) {
+      if (typeof value !== 'string') issues.push({ target, code: 'invalid-chain', reason: `verify.inputs.${key} 必须是字符串` })
+    }
+  }
+
   // --- 僵尸槽位：声明了但没有任何节点入参引用
   doc.inputs.forEach((input, index) => {
     if (!referencedSlots.has(input.name)) {

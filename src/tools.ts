@@ -10,7 +10,7 @@
  */
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { DataforgeDeps, FlowsValue, RunToolValue, StatusValue } from './application.js'
-import { listFlows, runFlow, runStatus } from './application.js'
+import { listFlows, ownerOf, runFlow, runStatus } from './application.js'
 import {
   startCapture, captureStatus, captureResult, captureCancel, cookiesFromCapture,
   type CaptureDeps, type CaptureToolValue, type StartCaptureArgs,
@@ -33,6 +33,20 @@ import { crystalForTool, crystalOutputOf, type CrystalToolArgs, type CrystalTool
 import { compareForTool, type ChainCompareToolValue } from './orchestration/compare.js'
 import { diagnoseForTool, diagnoseOutputOf, type DiagnoseToolOutput, type DiagnoseToolValue } from './orchestration/diagnose.js'
 import type { ProbeResult } from './execute/probe.js'
+import {
+  chainDraftForTool, traceAnalyzeForTool, traceGetForTool,
+  type ChainDraftDeps, type ChainDraftToolValue, type TraceAnalyzeToolValue, type TraceDeps,
+} from './trace/application.js'
+import type { TraceGetToolValue } from './trace/types.js'
+import { lookupForTool, type LookupDeps, type LookupToolValue } from './lookup/lookup.js'
+import { exportRunArtifacts, type DatasetExportToolValue } from './datasets/export.js'
+import {
+  batchRunForTool, closeRecordingForTool, getUiScriptForTool, openRecordingForTool, runsForTool,
+  runUiScriptForTool, startRecordingForTool, stopRecordingForTool, upsertUiScriptForTool,
+  type UiBatchToolValue, type UiRecordOpenToolValue, type UiRecordStartToolValue,
+  type UiRecordStopToolValue, type UiRunsToolValue, type UiRunToolValue, type UiScriptToolValue,
+  type UiScriptUpsertToolValue, type UiTestDeps,
+} from './uitest/application.js'
 
 /** 渲染边界单向收紧：进 render 的值已被 defineTool 按 schema 运行时校验，只是 TS 推断偏松。 */
 function tighten<T>(value: unknown): T {
@@ -722,6 +736,400 @@ function renderLibraryImport(value: ImportLibraryToolValue): string {
   return `${head}\n${body}${rest}${skipped}\n库：${value.libraryRoot ?? ''}`
 }
 
+
+
+function renderChainDraft(value: ChainDraftToolValue): string {
+  if (value.ok !== true) {
+    const hints = (value.hints ?? []).length === 0 ? '' : `\n${(value.hints ?? []).map((hint) => `- ${hint}`).join('\n')}`
+    return `❌ 链草稿生成失败（${value.code}）：${value.error}${hints}`
+  }
+  const head = `🧩 链草稿 ${value.site} / ${value.flow}${value.domain === undefined ? '' : `（${value.domain}）`}
+节点 ${value.chain.nodes.length} ｜ 边 ${value.chain.edges.length} ｜ 输入 ${value.chain.inputs.length} ｜ 输出候选 ${value.outputs.length} ｜ 绑定覆盖率 ${value.coverage.bindingCoverage} ｜ 校验 ${value.validation.ok ? '通过（未落盘）' : '未通过'}`
+  const nodes = value.chain.nodes.slice(0, 10).map((node) => `- ${node.id} → ${node.card ?? '?'}${Object.keys(node.constants).length === 0 ? '' : ` · 常量 ${Object.keys(node.constants).length}`}`)
+  const warnings = value.warnings.slice(0, 10).map((warning) => `- ${warning.message}`)
+  return `${head}\n节点：\n${nodes.join('\n')}${value.chain.nodes.length > 10 ? '\n…' : ''}\n草稿提示：\n${warnings.length === 0 ? '- 无' : warnings.join('\n')}\n\n未落盘：确认后用 dataforge_chain_upsert 保存；不要直接执行草稿。`
+}
+
+export function defineChainDraftTool(deps: ChainDraftDeps) {
+  return defineTool({
+    name: 'dataforge_chain_draft',
+    description: `从采集 trace 生成 interface-chain 草稿（S3）。
+
+流程：trace_get/analyze → 按 mergeKey 匹配接口库卡 → 节点/绑定边/输入/断言 → 现有链校验。
+- 草稿不执行、不落正式版本；确认后用 dataforge_chain_upsert 保存；
+- 卡不在接口库 → 该节点跳过并 warning（先 dataforge_library_import）；
+- 业务值不写死：未绑定字段变成 \$inputs.<name>，由 agent/用户填写；
+- 低置信度绑定、缺失必填入参、卡模板缺字段都进 warnings，不能静默当成功。
+
+失败码：no-workspace / no-cards / no-nodes / capture-*（同 trace_get）。`,
+    parameters: {
+      capture_id: { type: 'string', required: true, description: '采集 run id' },
+      site: { type: 'string', description: '链 meta.site（缺省取 entryUrl host）' },
+      flow: { type: 'string', description: '链 meta.flow（缺省 trace-<captureId>）' },
+      domain: { type: 'string', description: '业务域（可选）' },
+      note: { type: 'string', description: '版本说明（可选）' },
+      limit: { type: 'number', description: '最多分析样本数（1..2000，缺省 1000）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string' },
+          error: { type: 'string' },
+          hints: { type: 'array', items: { type: 'string' } },
+          captureId: { type: 'string' },
+          site: { type: 'string' },
+          flow: { type: 'string' },
+          domain: { type: 'string' },
+          yaml: { type: 'string' },
+          chain: { type: 'object', additionalProperties: true },
+          warnings: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                code: { type: 'string' },
+                message: { type: 'string' },
+                nodeId: { type: 'string' },
+                path: { type: 'string' },
+              },
+            },
+          },
+          validation: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean' },
+              issues: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            },
+          },
+          outputs: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          coverage: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              candidateLeaves: { type: 'number' },
+              boundLeaves: { type: 'number' },
+              bindingCoverage: { type: 'number' },
+              callCoverage: { type: 'number' },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderChainDraft(tighten<ChainDraftToolValue>(value)) }],
+    },
+    async execute(args: { capture_id: string; site?: string; flow?: string; domain?: string; note?: string; limit?: number }, exec: ToolRunContext) {
+      return lossless(await chainDraftForTool(deps, exec, args))
+    },
+  })
+}
+
+
+function renderLookup(value: LookupToolValue): string {
+  if (value.ok !== true) {
+    const hints = (value.hints ?? []).length === 0 ? '' : `\n${(value.hints ?? []).map((hint) => `- ${hint}`).join('\n')}`
+    return `❌ lookup 失败（${value.code}）：${value.error}${hints}`
+  }
+  const head = `🔎 lookup ${value.name}（${value.site}）｜ query=${value.query} ｜ cache=${value.cache} ｜ ${value.fetchedAt}`
+  const lines = value.candidates.slice(0, 10).map((candidate) => `- ${candidate.label}: ${Object.entries(candidate.values).map(([key, val]) => `${key}=${String(val)}`).join('  ')}`)
+  const more = value.candidates.length > 10 ? `\n… 还有 ${value.candidates.length - 10} 条` : ''
+  const warnings = value.warnings.length === 0 ? '' : `\n提示：\n${value.warnings.map((warning) => `- ${warning}`).join('\n')}`
+  return `${head}\n${lines.length === 0 ? '- 没有匹配项' : lines.join('\n')}${more}${warnings}\n来源：${value.source.description}`
+}
+
+export function defineLookupTool(deps: LookupDeps) {
+  return defineTool({
+    name: 'dataforge_lookup',
+    description: `运行时查业务映射（组织/供应商/物料等），不把映射写死。
+
+配置在 <workspace>/.dsh/dataforge/lookups/<name>.yaml：只声明源、匹配/映射字段，不存业务值。
+运行时取值 → 缓存 + TTL → 按 query 匹配 → 返回值 + source/fetchedAt。
+- api：GET/HEAD，items/match/map（JSON 路径）；
+- page：Playwright 只读选择器，items/label/map（text 或 attr:<name>）；不注入登录态；
+- 凭证用 \${ENV} 注入，不把 token/cookie 写进 YAML；
+- 缓存落 dataRoot/lookups/<site>/<name>.json；refresh=true 强制刷新。
+
+失败码：lookup-not-found / lookup-invalid / lookup-http-error / lookup-items-not-array / lookup-unusable / page-lookup-unavailable / no-workspace。`,
+    parameters: {
+      name: { type: 'string', required: true, description: 'lookup 名称（对应 lookups/<name>.yaml）' },
+      query: { type: 'string', required: true, description: '业务词，如生态链；与配置里的 match 字段比较' },
+      site: { type: 'string', description: '缓存/来源 site（缺省用配置 site 或 default）' },
+      refresh: { type: 'boolean', description: 'true = 跳过缓存强制刷新' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string' },
+          error: { type: 'string' },
+          hints: { type: 'array', items: { type: 'string' } },
+          name: { type: 'string' },
+          site: { type: 'string' },
+          query: { type: 'string' },
+          cache: { type: 'string' },
+          fetchedAt: { type: 'string' },
+          source: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { kind: { type: 'string' }, description: { type: 'string' } },
+          },
+          candidates: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                label: { type: 'string' },
+                values: { type: 'object', additionalProperties: true },
+              },
+            },
+          },
+          warnings: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderLookup(tighten<LookupToolValue>(value)) }],
+    },
+    async execute(args: { name: string; query: string; site?: string; refresh?: boolean }, exec: ToolRunContext) {
+      return lossless(await lookupForTool(deps, exec, args))
+    },
+  })
+}
+
+
+function renderDatasetExport(value: DatasetExportToolValue): string {
+  if (value.ok !== true) {
+    const hints = (value.hints ?? []).length === 0 ? '' : `\n${(value.hints ?? []).map((hint) => `- ${hint}`).join('\n')}`
+    return `❌ 导出失败（${value.code}）：${value.error}${hints}`
+  }
+  const fields = Object.keys(value.businessData).length
+  return `📦 ${value.runId}｜${value.kind}｜${value.status}｜businessData ${fields} 个字段
+dataset：${value.datasetPath}
+evidence：${value.reportPath}`
+}
+
+export function defineDatasetExportTool(dataRoot: string) {
+  return defineTool({
+    name: 'dataforge_dataset_export',
+    description: `把一次运行留痕导出为 dataset + evidence 报告（不重新执行）。
+
+- dataset：dataRoot/datasets/<runId>.json（链运行含 businessData/链身份；UI 运行含步骤/断言/截图）；
+- evidence：dataRoot/evidence/<runId>/report.html（业务数据或 UI 步骤 + 截图，不含请求头/凭证原文）；
+- 先 dataforge_chain_run 成功（或失败有留痕）再导出；失败也会导出已有摘要。
+
+失败码：run-not-found / run-unreadable。`,
+    parameters: {
+      run_id: { type: 'string', required: true, description: '运行 id（chain_run / ui_run 回执里的 runId）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string' },
+          error: { type: 'string' },
+          hints: { type: 'array', items: { type: 'string' } },
+          runId: { type: 'string' },
+          datasetPath: { type: 'string' },
+          reportPath: { type: 'string' },
+          kind: { type: 'string' },
+          status: { type: 'string' },
+          businessData: { type: 'object', additionalProperties: true },
+          chain: { type: 'object', additionalProperties: true },
+          ui: { type: 'object', additionalProperties: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderDatasetExport(tighten<DatasetExportToolValue>(value)) }],
+    },
+    async execute(args: { run_id: string }) {
+      return lossless(exportRunArtifacts(dataRoot, args.run_id))
+    },
+  })
+}
+
+// ────────────────────────────────────────────────
+// dataforge_trace_get / dataforge_trace_analyze
+// ────────────────────────────────────────────────
+
+function renderTraceGet(value: TraceGetToolValue): string {
+  if (value.ok !== true) {
+    const hints = (value.hints ?? []).length === 0 ? '' : `\n${(value.hints ?? []).map((hint) => `- ${hint}`).join('\n')}`
+    return `❌ trace 读取失败（${value.code}）：${value.error}${hints}`
+  }
+  const head = `🧭 trace ${value.captureId}｜${value.entryUrl}${value.status === undefined ? '' : ` · ${value.status}`}
+样本 ${value.stats.returnedSamples}/${value.stats.totalSamples} ｜ 接口 ${value.stats.interfaces} ｜ 写操作 ${value.stats.writes} ｜ 页面 ${value.stats.pages} ｜ 正文截断 ${value.stats.truncatedBodies}`
+  const lines = value.samples.slice(0, RECEIPT_MAX_LINES).map((sample) => {
+    const target = `${sample.method} ${sample.path}`
+    const status = sample.status === undefined ? '' : ` ${sample.status}`
+    const body = sample.responseBodySource === 'none' ? '' : ` · resp:${sample.responseBodySource}${sample.responseBodyTruncated ? '(截断)' : ''}`
+    return `- #${sample.seq} ${target}${status}${body}`
+  })
+  const more = value.samples.length > RECEIPT_MAX_LINES ? `\n… 还有 ${value.samples.length - RECEIPT_MAX_LINES} 条（samples 里有全量）` : ''
+  const warnings = value.warnings.length === 0 ? '' : `\n提示：\n${value.warnings.slice(0, 5).map((item) => `- ${item.message}`).join('\n')}`
+  return `${head}\n${lines.join('\n')}${more}${warnings}`
+}
+
+function renderTraceAnalyze(value: TraceAnalyzeToolValue): string {
+  if (value.ok !== true) {
+    const hints = (value.hints ?? []).length === 0 ? '' : `\n${(value.hints ?? []).map((hint) => `- ${hint}`).join('\n')}`
+    return `❌ trace 分析失败（${value.code}）：${value.error}${hints}`
+  }
+  const a = value.analysis
+  const head = `🧠 trace 分析 ${value.captureId}｜节点 ${a.stats.nodes} ｜ 绑定 ${a.bindings.length} ｜ 输入 ${a.inputs.length} ｜ 输出 ${a.outputs.length} ｜ 覆盖率 ${a.coverage.bindingCoverage}`
+  const nodes = a.nodes.slice(0, 12).map((node) => `- ${node.id} ${node.method} ${node.path}${node.write ? ' [写]' : ''}${node.polling ? ` [polling×${node.occurrences}]` : ''}`)
+  const bindings = a.bindings.slice(0, 12).map((binding) => `- ${binding.from.nodeId}.${binding.from.path} → ${binding.to.nodeId}.${binding.to.path}（${binding.confidence}）`)
+  const warnings = a.warnings.slice(0, 8).map((warning) => `- ${warning.message}`)
+  return `${head}\n节点：\n${nodes.join('\n')}${a.nodes.length > 12 ? '\n…' : ''}\n绑定：\n${bindings.length === 0 ? '- 无' : bindings.join('\n')}${a.bindings.length > 12 ? '\n…' : ''}\n提示：\n${warnings.length === 0 ? '- 无' : warnings.join('\n')}`
+}
+
+export function defineTraceGetTool(deps: TraceDeps) {
+  return defineTool({
+    name: 'dataforge_trace_get',
+    description: `读取一条采集 run 的 trace（有序请求/响应样本）。
+
+用途：在自动编排前看清真实操作产生了哪些接口调用。
+- 顺序以采集 seq 为准；正文来自落盘文件或 DB 预览，截断会标 truncated；
+- 敏感头（authorization/cookie/token 等）只返回名字，值永不返回；
+- 默认 limit=200、body_limit=8192；大 trace 请分页/提高 limit，不要一次拉全量。
+
+失败码：capture-not-found / capture-empty / capture-unreadable / bad-capture-id。`,
+    parameters: {
+      capture_id: { type: 'string', required: true, description: '采集 run id（dataforge_capture / 面板的 captureId）' },
+      limit: { type: 'number', description: '最多返回样本数（1..2000，缺省 200）' },
+      body_limit: { type: 'number', description: '单条正文最多返回字符数（256..65536，缺省 8192）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string' },
+          error: { type: 'string' },
+          hints: { type: 'array', items: { type: 'string' } },
+          captureId: { type: 'string' },
+          entryUrl: { type: 'string' },
+          status: { type: 'string' },
+          stats: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              totalSamples: { type: 'number' },
+              returnedSamples: { type: 'number' },
+              interfaces: { type: 'number' },
+              writes: { type: 'number' },
+              pages: { type: 'number' },
+              truncatedBodies: { type: 'number' },
+            },
+          },
+          samples: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string' },
+                seq: { type: 'number' },
+                ts: { type: 'number' },
+                method: { type: 'string' },
+                url: { type: 'string' },
+                path: { type: 'string' },
+                query: { type: 'object', additionalProperties: true },
+                status: { type: 'number' },
+                pageUrl: { type: 'string' },
+                requestHeaders: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    values: { type: 'object', additionalProperties: true },
+                    sensitive: { type: 'array', items: { type: 'string' } },
+                  },
+                },
+                requestBody: { type: 'string' },
+                requestBodySource: { type: 'string' },
+                requestBodyTruncated: { type: 'boolean' },
+                responseHeaders: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    values: { type: 'object', additionalProperties: true },
+                    sensitive: { type: 'array', items: { type: 'string' } },
+                  },
+                },
+                responseBody: { type: 'string' },
+                responseBodySource: { type: 'string' },
+                responseBodyTruncated: { type: 'boolean' },
+                truncated: { type: 'boolean' },
+                cardId: { type: 'string' },
+                mergeKey: { type: 'string' },
+                actionLabel: { type: 'string' },
+              },
+            },
+          },
+          warnings: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                code: { type: 'string' },
+                message: { type: 'string' },
+                sampleId: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderTraceGet(tighten<TraceGetToolValue>(value)) }],
+    },
+    async execute(args: { capture_id: string; limit?: number; body_limit?: number }) {
+      return lossless(traceGetForTool(deps, args))
+    },
+  })
+}
+
+export function defineTraceAnalyzeTool(deps: TraceDeps) {
+  return defineTool({
+    name: 'dataforge_trace_analyze',
+    description: `分析一条 trace：自动推断调用顺序、写操作、字段流转、输入/输出与覆盖率。
+
+规则只用 HTTP 方法 / 采集序号 / JSON 值匹配 / 路径提取，不含业务名称/URL/字段硬编码。
+产出是“草稿 + warning”：低置信度绑定、动态值、未解析正文都要 agent 审阅，不能直接当最终编排。
+- 连续重复调用会合并并标 polling；
+- 绑定 from/to 路径相对节点（如 body.data[0].id → body.orgId），供下一步生成 interface-chain。
+
+失败码同 dataforge_trace_get。`,
+    parameters: {
+      capture_id: { type: 'string', required: true, description: '采集 run id' },
+      limit: { type: 'number', description: '最多分析样本数（1..2000，缺省 1000）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string' },
+          error: { type: 'string' },
+          hints: { type: 'array', items: { type: 'string' } },
+          captureId: { type: 'string' },
+          entryUrl: { type: 'string' },
+          analysis: { type: 'object', additionalProperties: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderTraceAnalyze(tighten<TraceAnalyzeToolValue>(value)) }],
+    },
+    async execute(args: { capture_id: string; limit?: number }) {
+      return lossless(traceAnalyzeForTool(deps, args))
+    },
+  })
+}
+
 export function defineLibraryImportTool(deps: OrchestrationDeps) {
   return defineTool({
     name: 'dataforge_library_import',
@@ -1071,12 +1479,18 @@ function renderPlan(plan: ChainRunPlanValue | undefined): string {
     return `- ${node.nodeId}${write}：${node.method} ${node.url}${deps}`
   })
   const writes = plan.writeNodes.length === 0 ? '无（整链只读）' : `${plan.writeNodes.join('、')}（已发出无法撤销）`
+  const cleanup = plan.cleanup === undefined
+    ? ''
+    : `\n清理（主链后 ${plan.cleanup.when}）：${plan.cleanup.site} / ${plan.cleanup.flow}${plan.cleanup.version === undefined ? '' : ` v${plan.cleanup.version}`}（${plan.cleanup.nodeCount} 节点，写 ${plan.cleanup.writeCount} 个）`
+  const verify = plan.verify === undefined
+    ? ''
+    : `\n验收（主链后 ${plan.verify.when}）：${plan.verify.site} / ${plan.verify.flow}${plan.verify.version === undefined ? '' : ` v${plan.verify.version}`}`
   return [
     `🎯 目标：${plan.host}`,
     ...lines,
     `写类节点：${writes}`,
     ...(plan.notices.length === 0 ? [] : [`提醒：${plan.notices.join('；')}`]),
-  ].join('\n')
+  ].join('\n') + cleanup + verify
 }
 
 function renderChainRun(value: ChainRunToolValue): string {
@@ -1119,6 +1533,12 @@ function renderChainRun(value: ChainRunToolValue): string {
     `🏁 链已跑完（前台）：${value.summary?.status ?? 'unknown'} ${value.summary?.stepsDone ?? 0}/${value.summary?.totalSteps ?? 0} 步`,
     ...lines,
     ...(value.failedNode === undefined ? [] : [`断在：${value.failedNode}`]),
+    ...(value.verify === undefined
+      ? []
+      : [`验收 ${value.verify.site}/${value.verify.flow}：${value.verify.skipped ?? value.verify.status ?? (value.verify.success === true ? 'success' : value.verify.message ?? 'unknown')}${value.verify.runId === undefined ? '' : `（${value.verify.runId}）`}${value.verify.reportPath === undefined ? '' : `；证据 ${value.verify.reportPath}`}`]),
+    ...(value.cleanup === undefined
+      ? []
+      : [`清理 ${value.cleanup.site}/${value.cleanup.flow}：${value.cleanup.skipped ?? value.cleanup.status ?? value.cleanup.message ?? 'unknown'}${value.cleanup.runId === undefined ? '' : `（${value.cleanup.runId}）`}`]),
     degraded,
   ].join('\n')
 }
@@ -1134,6 +1554,9 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
 - 闸1 计划：首次调用不带 confirm 时返回**计划卡**（拓扑序 + 每节点方法/URL 骨架 + 写类节点 + 目标 host），不发任何请求、不建运行；
 - 闸2 确认：向用户转述计划卡，得到确认后带 confirm=true 重调才真跑；
 - 闸3 dry-run 优先：只想留档或先验证连接参数时用 dry_run=true——同一份计划、永不发请求，但会落一条 dryRun 留痕。
+
+链里声明 cleanup 时，清理链会出现在同一张计划卡里一起确认；主链结束后按 onFailure/always 执行，清理失败不覆盖主链结果。
+链里声明 verify 时，UI 验收会在主链后、cleanup 前执行（onSuccess/onFailure/always），失败不覆盖主链结果。
 
 缺参判据不看卡的 required：卡模板里出现的入参，只要有常量或绑定边覆盖就不缺，否则预检直接 missing-params（回执逐条「节点 · 字段 · 类型」），整链不执行。
 
@@ -1223,6 +1646,28 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
                 },
               },
               notices: { type: 'array', items: { type: 'string' } },
+              cleanup: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  site: { type: 'string' },
+                  flow: { type: 'string' },
+                  version: { type: 'number' },
+                  when: { type: 'string' },
+                  nodeCount: { type: 'number' },
+                  writeCount: { type: 'number' },
+                },
+              },
+              verify: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  site: { type: 'string' },
+                  flow: { type: 'string' },
+                  version: { type: 'number' },
+                  when: { type: 'string' },
+                },
+              },
             },
           },
           gaps: {
@@ -1281,6 +1726,40 @@ export function defineChainRunTool(deps: ChainRunToolDeps) {
           },
           failedNode: { type: 'string' },
           summary: { type: 'object', additionalProperties: true, description: '运行摘要（前台/dry-run）' },
+          cleanup: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              site: { type: 'string' },
+              flow: { type: 'string' },
+              version: { type: 'number' },
+              when: { type: 'string' },
+              nodeCount: { type: 'number' },
+              writeCount: { type: 'number' },
+              runId: { type: 'string' },
+              status: { type: 'string' },
+              message: { type: 'string' },
+              skipped: { type: 'string' },
+            },
+          },
+          verify: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              site: { type: 'string' },
+              flow: { type: 'string' },
+              version: { type: 'number' },
+              when: { type: 'string' },
+              runId: { type: 'string' },
+              success: { type: 'boolean' },
+              status: { type: 'string' },
+              screenshot: { type: 'string' },
+              datasetPath: { type: 'string' },
+              reportPath: { type: 'string' },
+              message: { type: 'string' },
+              skipped: { type: 'string' },
+            },
+          },
         },
       },
       render: (_args, value) => [{ type: 'text', text: renderChainRun(tighten<ChainRunToolValue>(value)) }],
@@ -1980,6 +2459,606 @@ export function defineChainRunsTool(deps: ChainRunToolDeps) {
         flow: args.flow,
         ...(args.version === undefined ? {} : { version: args.version }),
         ...(args.limit === undefined ? {} : { limit: args.limit }),
+      }))
+    },
+  })
+}
+
+// ────────────────────────────────────────────────
+// UI 测试（浏览器录制 + 回放）
+// ────────────────────────────────────────────────
+
+function renderUiScriptGet(value: UiScriptToolValue): string {
+  if (!value.ok) {
+    const versions = (value.availableVersions ?? []).map((n) => `v${n}`).join(' / ')
+    return `❌ 读 UI 脚本失败（${value.code ?? 'unknown'}）：${value.message ?? ''}${versions === '' ? '' : `\n可用版本：${versions}`}${renderChainIssues(value.issues?.map((item) => ({ ...item, code: item.code })))}`
+  }
+  const scripts = value.scripts ?? []
+  if (value.doc === undefined) {
+    if (scripts.length === 0) {
+      return '📂 还没有 UI 脚本。先 dataforge_ui_record_open → record_start 录制，或用 dataforge_ui_script_upsert 手写。'
+    }
+    const lines = scripts.map((script) => {
+      const versions = script.versions.map((n) => `v${n}`).join('/')
+      return `- ${script.site} / ${script.flow} ｜ ${versions} ｜ 最新 v${script.latest}${script.unreadable === undefined ? '' : ` ⚠ ${script.unreadable}`}`
+    })
+    return `🧪 UI 脚本 ${scripts.length} 个：\n${lines.join('\n')}`
+  }
+  const doc = value.doc
+  const steps = doc.steps.map((step, index) => {
+    const target = step.selector ?? step.url ?? step.key ?? ''
+    const expects = step.expect === undefined ? '' : ` ｜ 断言 ${step.expect.length}`
+    return `${index + 1}. ${step.kind}${step.value === undefined ? '' : ` = ${step.value}`}${target === '' ? '' : ` @ ${target}`}${expects}`
+  })
+  const header = `🧪 ${doc.meta.site} / ${doc.meta.flow} v${value.version ?? doc.meta.version} ｜ 起点 ${doc.meta.startUrl} ｜ ${doc.steps.length} 步`
+  const inputs = doc.inputs.length === 0
+    ? ''
+    : `\n入参：${doc.inputs.map((input) => `${input.name}(${input.type}${input.required ? ',必填' : ''})`).join('、')}`
+  return `${header}${inputs}\n${steps.join('\n')}\n\`\`\`yaml\n${value.yaml ?? ''}\`\`\``
+}
+
+export function defineUiScriptGetTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_script_get',
+    description: `读 UI 测试脚本（浏览器录制/回放用）：给 site+flow 回某版本的步骤 + YAML 原文；不给就列全部脚本。
+
+UI 脚本与接口链（interface-chain）是两条执行面：链发 HTTP、断言响应字段；UI 脚本开真浏览器、
+断言页面状态（元素/文本/URL）。脚本落在工作区 .dsh/dataforge/ui-tests/<site>/<flow>/vN.yaml。
+
+返回 false 的失败码：ui-script-not-found / invalid-ui-script（坏文件带 issues 与可用版本）。`,
+    parameters: {
+      site: { type: 'string', description: '站点名；与 flow 一起给才回详情' },
+      flow: { type: 'string', description: '流程名；与 site 一起给才回详情' },
+      version: { type: 'number', description: '脚本版本；缺省最新' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+          scripts: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                site: { type: 'string' },
+                flow: { type: 'string' },
+                latest: { type: 'number' },
+                versions: { type: 'array', items: { type: 'number' } },
+                domain: { type: 'string' },
+                updatedAt: { type: 'string' },
+                unreadable: { type: 'string' },
+              },
+            },
+          },
+          site: { type: 'string' },
+          flow: { type: 'string' },
+          version: { type: 'number' },
+          availableVersions: { type: 'array', items: { type: 'number' } },
+          yaml: { type: 'string' },
+          doc: { type: 'object', additionalProperties: true },
+          issues: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { target: { type: 'string' }, code: { type: 'string' }, reason: { type: 'string' } },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUiScriptGet(tighten<UiScriptToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<UiScriptToolValue> {
+      return lossless(await getUiScriptForTool(deps, exec, {
+        ...(args.site === undefined ? {} : { site: args.site }),
+        ...(args.flow === undefined ? {} : { flow: args.flow }),
+        ...(args.version === undefined ? {} : { version: args.version }),
+      }))
+    },
+  })
+}
+
+function renderUiScriptUpsert(value: UiScriptUpsertToolValue): string {
+  if (!value.ok) return `❌ 保存失败：${value.message ?? ''}${renderChainIssues(value.issues?.map((item) => ({ ...item, code: item.code })))}`
+  return `✅ 已保存 UI 脚本 ${value.site} / ${value.flow} → v${value.version}（${value.path ?? ''}）`
+}
+
+export function defineUiScriptUpsertTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_script_upsert',
+    description: `写入 UI 测试脚本（agent 手写/编辑的唯一入口）：YAML 全文进，校验全过才落**新版本**（vN+1，旧版本不覆盖）。
+
+YAML 形状（apiVersion: dataforge/v1）：
+\`\`\`yaml
+kind: ui-script
+meta: { site, flow, version: 1, created, startUrl, viewport? }
+inputs: [{ name, type: string|number|boolean, required, example? }]
+steps:
+  - id: s1
+    kind: goto | click | fill | press | select | submit | wait | upload
+    selector: '#kw'            # 或 candidates: [...]（有序候选，回放取第一个唯一命中）
+    value: '{{keyword}}'       # fill/select；{{input}} 是入参槽位
+    key: Enter                 # press
+    ms: 300                    # wait（0..60000）
+    url: 'https://…'           # goto
+    files: ['/tmp/a.txt']      # upload（回放机路径）
+    expect: [{ kind: visible|hidden|text|value|url|count, selector?, equals?, contains? }]
+\`\`\`
+校验不过一律不落盘（缺步骤/缺 selector/断言不完整/入参引用未声明/声明了没用都会拒）。
+
+**另存为新流程**：改 YAML 的 meta.site / meta.flow 再 upsert，就会在新站点/流程下写 v1（原流程不受影响）——
+适合「同一套操作、只改选择的类型/选项」的变体；同一流程多组值优先用入参槽位 {{name}}。
+
+失败码：invalid-ui-script（issues 逐条 target：reason）。`,
+    parameters: {
+      yaml: { type: 'string', required: true, description: 'ui-script 的完整 YAML 文本' },
+      source: { type: 'string', description: '版本来源标注（缺省 agent；可选 agent/canvas/record）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          site: { type: 'string' },
+          flow: { type: 'string' },
+          version: { type: 'number' },
+          path: { type: 'string' },
+          message: { type: 'string' },
+          issues: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { target: { type: 'string' }, code: { type: 'string' }, reason: { type: 'string' } },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUiScriptUpsert(tighten<UiScriptUpsertToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<UiScriptUpsertToolValue> {
+      const source = args.source === 'canvas' || args.source === 'record' ? args.source : 'agent'
+      return lossless(await upsertUiScriptForTool(deps, exec, { yaml: args.yaml, source }))
+    },
+  })
+}
+
+function renderUiRecordOpen(value: UiRecordOpenToolValue): string {
+  if (!value.ok) return `❌ 打开录制会话失败：${value.error ?? ''}`
+  return `🖥 已打开录制浏览器（sessionId ${value.sessionId ?? '?'}，当前页 ${value.pageUrl ?? ''}）。\n${value.notice ?? '先登录/导航，再 dataforge_ui_record_start 开始录制。'}`
+}
+
+export function defineUiRecordOpenTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_record_open',
+    description: `打开一个**可见** Chrome 窗口用于 UI 录制（此时还没开始录，登录动作不会进脚本）。
+
+用法：open → 用户在窗口里登录/导航 → dataforge_ui_record_start → 用户操作业务 → dataforge_ui_record_stop。
+录制时密码输入与文件选择会被跳过（凭证/本地路径不落脚本，回执如实计数）。
+**站点名/流程名留空会自动命名**：站点取 og:site_name 或域名，流程取页面标题（去站点后缀）；
+open 回执会带 suggestedSite/suggestedFlow，可用作预填。
+回放登录态靠录制结束时持久化的 cookie（dataRoot/credentials/cookies.json，0600）。
+
+失败：record-open-failed（Chrome 起不来/URL 非法）。`,
+    parameters: {
+      start_url: { type: 'string', required: true, description: '录制起点（http/https）' },
+      headless: { type: 'boolean', description: '谨慎使用：true = 无头（只适合无需登录的站点，缺省可见）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          sessionId: { type: 'string' },
+          pageUrl: { type: 'string' },
+          engine: { type: 'string' },
+          notice: { type: 'string' },
+          suggestedSite: { type: 'string' },
+          suggestedFlow: { type: 'string' },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUiRecordOpen(tighten<UiRecordOpenToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<UiRecordOpenToolValue> {
+      const owner = ownerOf(exec)
+      return lossless(await openRecordingForTool(deps, {
+        startUrl: args.start_url,
+        ...(args.headless === undefined ? {} : { headless: args.headless }),
+        ...(owner === undefined ? {} : { ownerSessionId: owner }),
+      }))
+    },
+  })
+}
+
+export function defineUiRecordStartTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_record_start',
+    description: `在已打开的录制会话上开始录制（注入事件监听，捕获 click/fill/select/submit/press）。
+开始前请让用户完成登录/导航；之后的业务操作才会进脚本。
+
+回放会沿用录制时的视口与起点 URL；录制结束用 dataforge_ui_record_stop 取步骤。`,
+    parameters: {
+      session_id: { type: 'string', required: true, description: 'dataforge_ui_record_open 返回的 sessionId' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          sessionId: { type: 'string' },
+          pageUrl: { type: 'string' },
+          alreadyRecording: { type: 'boolean' },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => {
+        const v = tighten<UiRecordStartToolValue>(value)
+        if (!v.ok) return [{ type: 'text', text: `❌ 开始录制失败：${v.error ?? ''}` }]
+        return [{ type: 'text', text: `🔴 已开始录制（sessionId ${v.sessionId ?? '?'}，页 ${v.pageUrl ?? ''}）。用户在浏览器里操作，完成后调 dataforge_ui_record_stop。${v.alreadyRecording === true ? '（此前已在录制）' : ''}` }]
+      },
+    },
+    async execute(args): Promise<UiRecordStartToolValue> {
+      return lossless(await startRecordingForTool(deps, { sessionId: args.session_id }))
+    },
+  })
+}
+
+function renderUiRecordStop(value: UiRecordStopToolValue): string {
+  if (!value.ok) return `❌ 停止录制失败：${value.error ?? ''}`
+  const steps = value.steps ?? []
+  const lines = steps.slice(0, 20).map((step, index) => {
+    const target = step.selector ?? step.url ?? step.key ?? ''
+    return `${index + 1}. ${step.kind}${step.value === undefined ? '' : ` = ${step.value}`}${target === '' ? '' : ` @ ${target}`}`
+  })
+  const saved = value.saved === undefined
+    ? '未保存为脚本（给 site/flow 再 stop 才会落新版本）'
+    : `已保存为 ${value.saved.site} / ${value.saved.flow} v${value.saved.version}`
+  const notice = value.notice === undefined ? '' : `\n⚠ ${value.notice}`
+  return `⏹ 录制结束：${value.stepCount ?? steps.length} 步 ｜ 跳过密码 ${value.skippedSecrets ?? 0} 次 / 上传 ${value.skippedUploads ?? 0} 次 ｜ cookie 持久化 ${value.persistedCookies ?? 0} 条\n${saved}${notice}\n${lines.join('\n')}${steps.length > 20 ? `\n… 还有 ${steps.length - 20} 步` : ''}`
+}
+
+export function defineUiRecordStopTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_record_stop',
+    description: `停止录制并取步骤；给了 site+flow 默认保存为新版本（save=false 可只看不存）。
+
+- 密码输入不录（凭证不入脚本）；文件选择不录（浏览器不给本地路径，upload 步骤请手写）；
+- **站点名/流程名留空会自动命名**（站点名/域名 + 页面标题；回执说明用了哪个）；
+- 录制会话保留，可继续录下一个流程；不用了调 dataforge_ui_record_close；
+- 会话 cookie 会持久化到本地凭证 jar（回执只有条数），回放直接带登录态。`,
+    parameters: {
+      session_id: { type: 'string', required: true },
+      site: { type: 'string', description: '站点名（与 flow 一起给才保存）' },
+      flow: { type: 'string', description: '流程名（与 site 一起给才保存）' },
+      domain: { type: 'string', description: '业务域（可选，列表分组用）' },
+      note: { type: 'string', description: '版本说明（可选）' },
+      save: { type: 'boolean', description: '缺省 true；false = 只回步骤不落盘' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          sessionId: { type: 'string' },
+          startUrl: { type: 'string' },
+          steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          stepCount: { type: 'number' },
+          skippedSecrets: { type: 'number' },
+          skippedUploads: { type: 'number' },
+          notice: { type: 'string' },
+          saved: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              site: { type: 'string' },
+              flow: { type: 'string' },
+              version: { type: 'number' },
+              path: { type: 'string' },
+            },
+          },
+          persistedCookies: { type: 'number' },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUiRecordStop(tighten<UiRecordStopToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<UiRecordStopToolValue> {
+      return lossless(await stopRecordingForTool(deps, exec, {
+        sessionId: args.session_id,
+        ...(args.site === undefined ? {} : { site: args.site }),
+        ...(args.flow === undefined ? {} : { flow: args.flow }),
+        ...(args.domain === undefined ? {} : { domain: args.domain }),
+        ...(args.note === undefined ? {} : { note: args.note }),
+        ...(args.save === undefined ? {} : { save: args.save }),
+      }))
+    },
+  })
+}
+
+export function defineUiRecordCloseTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_record_close',
+    description: `关闭录制会话（浏览器窗口）。未停止的录制会被取消，不产出步骤。`,
+    parameters: {
+      session_id: { type: 'string', required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { ok: { type: 'boolean' }, error: { type: 'string' } },
+      },
+      render: (_args, value) => {
+        const v = tighten<{ ok: boolean; error?: string }>(value)
+        return [{ type: 'text', text: v.ok ? '🖥 录制会话已关闭' : `❌ ${v.error ?? '关闭失败'}` }]
+      },
+    },
+    async execute(args): Promise<{ ok: boolean; error?: string }> {
+      return lossless(await closeRecordingForTool(deps, { sessionId: args.session_id }))
+    },
+  })
+}
+
+function renderUiRun(value: UiRunToolValue): string {
+  const plan = value.plan
+  if (!value.ok) {
+    const missing = value.missing === undefined ? '' : `\n缺：${value.missing.join('、')}`
+    const versions = value.availableVersions === undefined ? '' : `\n可用版本：${value.availableVersions.map((n) => `v${n}`).join(' / ')}`
+    return `❌ ${value.message ?? '回放未执行'}（${value.gate ?? value.code ?? 'unknown'}）${missing}${versions}`
+  }
+  if (value.gate === 'confirm-required' || value.gate === 'dry-run') {
+    return plan?.card ?? '🧪 回放计划（缺详情）'
+  }
+  const result = value.result
+  if (result === undefined) return plan?.card ?? '🧪 回放完成（缺结果）'
+  const head = result.success
+    ? `✅ UI 回放通过：${result.site} / ${result.flow} v${result.version}（${result.stepsDone}/${result.totalSteps} 步 ${result.elapsedMs}ms）`
+    : `❌ UI 回放失败：${result.site} / ${result.flow} v${result.version} ｜ 断在 ${result.failedStep?.id ?? '?'}（${result.stepsDone}/${result.totalSteps} 步）`
+  const lines = result.steps.map((step) => {
+    const mark = step.ok ? '✓' : '✗'
+    const asserts = step.assertions.length === 0 ? '' : ` ｜ 断言 ${step.assertions.filter((item) => item.ok).length}/${step.assertions.length}`
+    return `${mark} ${step.id} ${step.kind}${step.target === undefined ? '' : ` @ ${step.target}`}（${step.elapsedMs}ms）${asserts}${step.error === undefined ? '' : `\n   ${step.error}`}`
+  })
+  const evidence = result.screenshot === undefined ? '' : `\n📸 失败截图：${result.screenshot}${result.dom === undefined ? '' : `\n📄 现场 HTML：${result.dom}`}`
+  const cookies = result.cookiesApplied > 0 ? `\n🔐 已注入 ${result.cookiesApplied} 条会话 cookie（值不入回执）` : ''
+  return `${head}${evidence}${cookies}\n${lines.join('\n')}`
+}
+
+export function defineUiRunTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_run',
+    description: `回放一个 UI 测试脚本（浏览器操作 + 页面断言）。**唯一执行入口**。
+
+三道闸（与链路执行同款）：
+- 必填：脚本 required 入参缺一 → missing-inputs，浏览器都不起；
+- 确认：不带 confirm 只回计划卡（步骤 + 写操作数 + 起点），起浏览器前必须让用户确认；
+- 开关：uiTestEnabled=false → ui-test-disabled（脚本读写/历史回看照常）。
+
+执行：headless Chrome 打开 meta.startUrl → 逐步动作（选择器候选取第一个唯一命中）→ 每步断言
+（visible/hidden/text/value/url/count，轮询到步骤超时）→ 失败即停，截 failure.png + 存 failure.html。
+登录态：自动按起点域名从本地凭证 jar 注入 cookie（只报条数）。
+
+运行记录：dataRoot/ui-runs/<runId>/（run.json + events.ndjson），用 dataforge_ui_runs 回看。
+慢放：slow_mo_ms 给每步之间加延迟（0..10000），headless=false 可看窗口；两者不改变步超时预算。
+点击动画：highlight_clicks（缺省 true）在点击落点画脉冲光圈，便于人工观察；批量可关掉。
+幂等性：**不幂等**（真浏览器操作，click/submit 可能产生业务写入）。`,
+    parameters: {
+      site: { type: 'string', required: true },
+      flow: { type: 'string', required: true },
+      version: { type: 'number', description: '脚本版本；缺省最新' },
+      inputs: {
+        type: 'object',
+        additionalProperties: true,
+        description: '入参槽位运行值（键必须是脚本 inputs 声明过的）',
+      },
+      confirm: { type: 'boolean', description: '闸2：用户确认后才允许 true；缺省只出计划卡' },
+      dry_run: { type: 'boolean', description: '只出计划卡并落 dry-run 说明，不起浏览器' },
+      headless: { type: 'boolean', description: '缺省 true；false = 可见窗口（联调首跑用）' },
+      slow_mo_ms: { type: 'number', description: '每步之间的慢放延迟（毫秒，0..10000）；人工观察回放过程用' },
+      highlight_clicks: { type: 'boolean', description: '点击时在页面落点画脉冲光圈（缺省 true；批量可关）' },
+      hold_ms: { type: 'number', description: '回放结束后停留多久再关浏览器（毫秒，0..30000；缺省 1200）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          gate: { type: 'string' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+          missing: { type: 'array', items: { type: 'string' } },
+          availableVersions: { type: 'array', items: { type: 'number' } },
+          issues: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { target: { type: 'string' }, code: { type: 'string' }, reason: { type: 'string' } },
+            },
+          },
+          plan: { type: 'object', additionalProperties: true },
+          result: { type: 'object', additionalProperties: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUiRun(tighten<UiRunToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<UiRunToolValue> {
+      return lossless(await runUiScriptForTool(deps, exec, {
+        site: args.site,
+        flow: args.flow,
+        ...(args.version === undefined ? {} : { version: args.version }),
+        ...(args.inputs === undefined ? {} : { inputs: normalizeStringMap(args.inputs) }),
+        ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
+        ...(args.dry_run === undefined ? {} : { dryRun: args.dry_run }),
+        ...(args.headless === undefined ? {} : { headless: args.headless }),
+      }))
+    },
+  })
+}
+
+function normalizeStringMap(raw: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') out[key] = String(value)
+  }
+  return out
+}
+
+function renderUiRuns(value: UiRunsToolValue): string {
+  if (!value.ok) return `❌ ${value.message ?? '读取 UI 运行失败'}`
+  if (value.run !== undefined) {
+    const run = value.run
+    const events = value.events ?? []
+    const lines = events.flatMap((event) => {
+      if (event.event === 'step') {
+        const mark = event.status === 'done' ? '✓' : event.status === 'error' ? '✗' : '…'
+        return [`${mark} ${event.id ?? '?'} ${event.kind ?? ''}${event.elapsed === undefined ? '' : `（${event.elapsed}ms）`}${event.error === undefined ? '' : ` ｜ ${event.error}`}`]
+      }
+      if (event.event === 'assert') return [`  断言 ${event.kind ?? ''} ${event.status === 'ok' ? '✓' : '✗'}${event.error === undefined ? '' : ` ｜ ${event.error}`}`]
+      if (event.event === 'terminal') return [`终态：${event.success === true ? '成功' : '失败'}${event.message === undefined ? '' : ` · ${event.message}`}`]
+      return []
+    })
+    return `🧪 ${run.site} / ${run.flow} v${run.version} ｜ ${run.status} ｜ ${run.startedAt === undefined ? '' : new Date(run.startedAt).toLocaleString()}${run.screenshot === undefined ? '' : `\n📸 ${run.screenshot}`}\n${lines.join('\n')}`
+  }
+  const runs = value.runs ?? []
+  if (runs.length === 0) return '📭 还没有 UI 回放记录'
+  const lines = runs.map((run) => `- ${run.runId} ｜ ${run.site} / ${run.flow} v${run.version} ｜ ${run.status}${run.failedStep === undefined ? '' : ` ｜ 断在 ${run.failedStep}`}`)
+  return `🧪 UI 运行 ${runs.length} 条：\n${lines.join('\n')}`
+}
+
+export function defineUiRunsTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_runs',
+    description: `查 UI 回放运行记录：给 run_id 回详情（事件流：每步状态/断言/终态/失败证据）；不给列最近运行。
+
+状态以盘上为准（dataRoot/ui-runs/<runId>/run.json + events.ndjson），运行中途也能看到已完成步骤。`,
+    parameters: {
+      run_id: { type: 'string', description: '缺省 = 列最近运行' },
+      limit: { type: 'number', description: '列表条数（缺省 20，上限 200）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          message: { type: 'string' },
+          runs: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          run: { type: 'object', additionalProperties: true },
+          events: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUiRuns(tighten<UiRunsToolValue>(value)) }],
+    },
+    async execute(args): Promise<UiRunsToolValue> {
+      return lossless(runsForTool(deps, {
+        ...(args.run_id === undefined ? {} : { runId: args.run_id }),
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
+      }))
+    },
+  })
+}
+
+// ────────────────────────────────────────────────
+// 批量回归：dataforge_ui_batch_run（M3）
+// ────────────────────────────────────────────────
+
+function renderUiBatch(value: UiBatchToolValue): string {
+  if (!value.ok) return `❌ 批量回放未执行（${value.gate ?? value.code ?? 'unknown'}）：${value.message ?? ''}`
+  if (value.gate === 'confirm-required' || value.gate === 'dry-run') return value.plan?.card ?? '🧪 批量回放计划（缺详情）'
+  const result = value.result
+  if (result === undefined) return value.plan?.card ?? '🧪 批量回放完成（缺结果）'
+  const head = result.failed === 0 && result.skipped === 0
+    ? `✅ UI 批量回归通过：${result.total} 条（${Math.round(result.elapsedMs / 1000)}s）`
+    : `❌ UI 批量回归：${result.total} 条 ｜ 通过 ${result.passed} / 失败 ${result.failed} / 跳过 ${result.skipped}（${Math.round(result.elapsedMs / 1000)}s）`
+  const failed = result.items.filter((item) => item.success !== true)
+  const lines = failed.map((item) => {
+    const where = item.skipped === true ? '跳过' : item.failedStep === undefined ? '失败' : `断在 ${item.failedStep}`
+    return `- ${item.site} / ${item.flow}：${where}${item.error === undefined ? '' : ` ｜ ${item.error}`}${item.runId === undefined ? '' : ` ｜ run ${item.runId}`}${item.screenshot === undefined ? '' : ` ｜ 📸 ${item.screenshot}`}`
+  })
+  const reports = `\n📄 报告：${result.report}\n🧾 报告 JSON：${result.reportJson}`
+  return `${head}${reports}${lines.length === 0 ? '' : `\n${lines.join('\n')}`}`
+}
+
+export function defineUiBatchRunTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_batch_run',
+    description: `批量回放 UI 脚本（回归）：选一组脚本逐条跑，汇总通过/失败并落报告。
+
+选择方式（三选一，flows 优先）：
+- flows: ["站点/流程", "站点/流程@版本"]（显式列表）；
+- site: 某站点的全部脚本（取最新版本）；
+- 都不给：工作区全部 UI 脚本（最多 limit 条，缺省 20，上限 50）。
+
+三道闸：开关（ui-test-disabled）→ 计划（不带 confirm 只回计划卡，列出缺参保姆）→ confirm=true 执行。
+执行默认**串行**（UI 回归要稳不要快）；每条脚本复用单次回放（runId/断言/截图一致），
+缺必填入参的脚本记"跳过 + 原因"而不是悄悄消失；某条失败不中断整批。
+
+报告落 dataRoot/ui-batches/<batchId>/：report.md（人看）+ report.json（CI 消费）。
+幂等性：**不幂等**（真浏览器操作，click/submit/upload 可能产生业务写入）。`,
+    parameters: {
+      site: { type: 'string', description: '按站点选脚本（与 flows 互斥，flows 优先）' },
+      flows: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '显式流程列表：site/flow 或 site/flow@3',
+      },
+      inputs: {
+        type: 'object',
+        additionalProperties: true,
+        description: '所有脚本共用的入参槽位运行值',
+      },
+      limit: { type: 'number', description: '最多跑多少条（缺省 20，硬上限 50）' },
+      confirm: { type: 'boolean', description: '闸2：用户确认后才允许 true；缺省只出计划卡' },
+      dry_run: { type: 'boolean', description: '只出计划卡并落 dry-run 说明，不起浏览器' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          gate: { type: 'string' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+          plan: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              selection: { type: 'string' },
+              site: { type: 'string' },
+              total: { type: 'number' },
+              limit: { type: 'number' },
+              writeSteps: { type: 'number' },
+              missingInputs: { type: 'array', items: { type: 'string' } },
+              card: { type: 'string' },
+              items: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            },
+          },
+          result: { type: 'object', additionalProperties: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUiBatch(tighten<UiBatchToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<UiBatchToolValue> {
+      return lossless(await batchRunForTool(deps, exec, {
+        ...(args.site === undefined ? {} : { site: args.site }),
+        ...(args.flows === undefined ? {} : { flows: args.flows }),
+        ...(args.inputs === undefined ? {} : { inputs: normalizeStringMap(args.inputs) }),
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
+        ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
+        ...(args.dry_run === undefined ? {} : { dryRun: args.dry_run }),
       }))
     },
   })

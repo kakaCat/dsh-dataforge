@@ -18,6 +18,7 @@
 import Database from 'better-sqlite3'
 import { existsSync } from 'node:fs'
 import { mergeKeyOf, normalizeUrlForTemplate } from '../capture/normalizer.js'
+import { pageIdentityOf } from '../shared/page-url.js'
 import type { AuthType, Template, TemplateField } from '../shared/capture-types.js'
 import { lossless } from '../shared/json.js'
 import { createCard, libraryRoot, readCard, readIndex, upsertIndexEntry, writeCard, writeIndex } from './store.js'
@@ -107,6 +108,25 @@ function parseJson(text: string | null): unknown {
 function parseStringArray(text: string | null): string[] {
   const parsed = parseJson(text)
   return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+}
+
+/**
+ * 页面清单按页面身份去重（`shared/page-url` 口径），保留首次出现的原始 URL。
+ *
+ * 历史采集库里同一 SPA 页面有多个字面 URL（hash 路由 / `?_at_=` 反缓存戳），
+ * 卡文件不该把它们当多个页面来源；原始 URL 保留可打开性，去重只压掉同一身份。
+ */
+function unionPages(pages: string[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const page of pages) {
+    if (page === '') continue
+    const key = pageIdentityOf(page)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(page)
+  }
+  return out
 }
 
 /** 模板 JSON → Template；**存在但解析不出形状**返回 'broken'（调用方按坏卡跳过）。 */
@@ -333,9 +353,9 @@ function projectCard(card: RawCardRow, relations: RawRelationRow[]): Projection 
   const mergeKey = mergeKeyOf(card.method, urlTemplate)
   if (mergeKey === '') return { reason: '归并键为空' }
 
-  const pages = [...new Set([...parseStringArray(card.relatedPagesJson), ...relations.map((row) => row.pageUrl)])].filter(
-    (page) => page !== '',
-  )
+  // 页面按身份去重（同一 SPA 页面的 hash/反缓存戳变体是一页），保留首次观测到的原始 URL：
+  // 库里的 sources.pages 是「可打开的页面地址」，不是归并键，展示/溯源都用原始值。
+  const pages = unionPages([...parseStringArray(card.relatedPagesJson), ...relations.map((row) => row.pageUrl)])
   const relationIds = [...new Set(relations.map((row) => row.id))]
   const auth = parseAuthType(card.authJson ?? null)
 
@@ -363,7 +383,7 @@ function mergeSources(existing: LibrarySource[], incoming: LibrarySource[]): Lib
       out.push({ captureId: source.captureId, pages: [...source.pages], relationIds: [...source.relationIds] })
       continue
     }
-    hit.pages = [...new Set([...hit.pages, ...source.pages])]
+    hit.pages = unionPages([...hit.pages, ...source.pages])
     hit.relationIds = [...new Set([...hit.relationIds, ...source.relationIds])]
   }
   return out

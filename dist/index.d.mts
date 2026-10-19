@@ -344,6 +344,19 @@ interface Config {
    * （0600，按 origin 隔离），供后续运行/复跑直接用。缺省 true；关闭后换票只活一次运行。
    */
   chainCredentialPersistence?: boolean;
+  /** UI 回放开关：关闭后 dataforge_ui_run 直接 ui-test-disabled（录制/脚本读写与历史回看照常）。 */
+  uiTestEnabled: boolean;
+  /** UI 回放：单步动作 + 断言的超时（秒）；到点即该步失败并留截图。 */
+  uiStepTimeoutSeconds: number;
+  /**
+   * UI 测试的浏览器引擎：
+   *   - `auto`：有共享浏览器（dsh-builtin-browser 的 `ctx.browser` seam）就用它，否则独立 Chrome；
+   *   - `playwright`：dataforge 自己拉起的 Chrome（可见窗口录制 / 无头回放，CI 友好）；
+   *   - `shared`：共享浏览器插件的 seam（人机同页、可人工接管；上传步骤不支持）；
+   *   - `cdp`：预留给未来的 CDP 引擎（接入同一个 `UiBrowserEngine` 契约；未实现时回退 playwright）。
+   * 批量回归固定走 playwright 无头（见 UiTestDeps.batchEngine）。
+   */
+  uiTestBrowser: 'auto' | 'playwright' | 'shared' | 'cdp';
 }
 declare const Config: Schema<Config>;
 /** 归一化（相对路径 → 绝对；~ 展开）。 */

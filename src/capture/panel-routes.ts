@@ -4,17 +4,32 @@
  * 协议契约照抄 dsh-pmboard 路由层：
  *   - webServer.register({ kind:'prefix', path, handler })，handler = (req, res) => void，返回 disposer；
  *   - 信封：200 {success:true,data} / 4xx|500 {success:false,error,code?}；
- *   - GET 面只读，唯一写入口 POST /captures（发起单页采集），其余方法一律 405（方法显式，不静默兜底）。
+ *   - GET 面只读；写入口仅三处：POST /captures（发起单页采集）、POST /names（三级手工名覆盖）、
+ *     POST /retitle（旧页面标题补抓）。其余方法一律 405（方法显式，不静默兜底）。
+ *
+ * 名称数据面（本站契约）：/page-meta 给页面身份 + 标题/站点名；/names 给三级手工覆盖；
+ * /cards 与 /runs/:id 的卡片投影统一补 mergeKey / name / nameSource（manual 优先，
+ * 否则用改进后的 semanticName）——客户端不自行拼名字。
  *
  * 安全边界：凭据 value_json（cookie/storage 原文）**永不出壳**——路由层是出口闸，
- * 在这里剥字段而不是靠调用方自觉。
+ * 在这里剥字段而不是靠调用方自觉。补抓在服务端进程内跑，cookie 不经过任何响应体。
  *
  * @module dsh-dataforge/capture/panel-routes
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { SampleRow } from '../shared/capture-types.js'
+import type { CardRow, SampleRow } from '../shared/capture-types.js'
+import { mergeKeyOf, semanticName } from './normalizer.js'
 import type { CaptureStore } from './store.js'
 import type { CaptureToolValue } from './application.js'
+import {
+  cleanName,
+  isCaptureNameKind,
+  NAME_MAX_CHARS,
+  normalizeNameKey,
+  type CaptureNamesSnapshot,
+  type CaptureNamesStore,
+} from './names.js'
+import type { RetitleStatus, TitleBackfillService } from './retitle.js'
 
 export const PANEL_API_PREFIX = '/dashboard/api/dataforge'
 
@@ -22,8 +37,15 @@ const DEFAULT_LIST_LIMIT = 30
 const MAX_LIST_LIMIT = 500
 const RUN_DETAIL_CARDS_LIMIT = 200
 const RUN_DETAIL_RELATIONS_LIMIT = 500
-/** 写入口请求体上限：面板只需要 {taskType, entryUrl}，超过这个尺寸一律 413。 */
-const MAX_CAPTURE_BODY_BYTES = 8_192
+/** /page-meta 缺省与上限（面板一次要全量页面名；采集库页面规模就几百量级）。 */
+const PAGE_META_LIMIT = 500
+/** 写入口请求体上限（面板只需要小 JSON），超过这个尺寸一律 413。 */
+const MAX_WRITE_BODY_BYTES = 8_192
+
+/** retitle 未装配时的零状态（GET /retitle/status 不 5xx，如实显示「没在跑」）。 */
+const EMPTY_RETITLE_STATUS: RetitleStatus = {
+  running: false, targets: 0, tried: 0, updated: 0, failed: 0, skipped: 0,
+}
 
 /** 宿主 webServer 的最小投影（形状对齐 dsh-pmboard legacy-board-route 的 ExactRouteRegistrar）。 */
 export interface PanelRouteRegistrar {
@@ -38,6 +60,10 @@ export interface CapturePanelDeps {
   store: CaptureStore
   /** POST /captures 出口：单页采集的发起入口（FR-7.6：面板只开 single_page，写操作走 agent 会话）。 */
   startCapture?: (args: { taskType: 'single_page'; entryUrl: string }) => Promise<CaptureToolValue>
+  /** 三级手工名覆盖（site/page/interface）；未装配时 /names 写入口 503、读回空覆盖。 */
+  names?: CaptureNamesStore
+  /** 旧页面标题补抓；未装配时 POST /retitle 503、status 回零状态。 */
+  retitle?: TitleBackfillService
   /**
    * 编排子路由（同一前缀下的 `/orchestration/*`），由入口装配。
    *
@@ -47,6 +73,15 @@ export interface CapturePanelDeps {
    * 当 unknown-path 吃掉。所以前缀只注册一次，子路径在**我们自己的代码里**分派。
    */
   orchestration?: (req: IncomingMessage, res: ServerResponse) => void
+  /**
+   * UI 测试子路由（同一前缀下的 `/ui-tests/*`），由入口装配。
+   *
+   * 返回 true = 已接管，false = 不是它的路径（交回下一个分派）。
+   * 与 orchestration 同理：前缀只注册一次，避免赌宿主的 prefix 匹配语义。
+   */
+  uiTest?: (req: IncomingMessage, res: ServerResponse) => boolean
+  /** 运行产物子路由（同一前缀下的 `/artifacts/*`）；返回 true = 已接管。 */
+  artifacts?: (req: IncomingMessage, res: ServerResponse) => boolean
 }
 
 /**
@@ -65,7 +100,7 @@ export function isOrchestrationRequest(url: string | undefined): boolean {
  * 构造面板数据 handler。
  *
  * URL 两种形态都接受：宿主可能传完整路径（前缀含在 url 里）或剥好前缀的剩余路径。
- * GET 面只读；唯一的写入口 POST /captures（发起单页采集），其余方法一律 405。
+ * GET 面只读；写入口仅 POST /captures、/names、/retitle，其余方法一律 405。
  */
 export function createCapturePanelHandler(deps: CapturePanelDeps): (req: IncomingMessage, res: ServerResponse) => void {
   return (req, res) => {
@@ -81,11 +116,38 @@ export function createCapturePanelHandler(deps: CapturePanelDeps): (req: Incomin
           void handleStartCapture(deps, req, res)
           return
         }
-        fail(res, 405, `面板路由不支持 ${method} ${suffix}（写入口仅 POST /captures）`, 'method-not-allowed')
+        if (suffix === '/names') {
+          void handleSetName(deps, req, res)
+          return
+        }
+        if (suffix === '/retitle') {
+          handleRetitle(deps, res)
+          return
+        }
+        fail(res, 405, `面板路由不支持 ${method} ${suffix}（写入口仅 POST /captures、/names、/retitle）`, 'method-not-allowed')
         return
       }
       if (method !== 'GET') {
-        fail(res, 405, `面板路由只支持 GET/POST /captures，收到 ${method}`, 'method-not-allowed')
+        fail(res, 405, `面板路由只支持 GET 与 POST /captures、/names、/retitle，收到 ${method}`, 'method-not-allowed')
+        return
+      }
+
+      // 名称数据面：页面身份 + 采集时记录的标题/站点名（全库去重、最新访问者胜）
+      if (suffix === '/page-meta') {
+        const limit = clampLimit(url.searchParams.get('limit'), PAGE_META_LIMIT, PAGE_META_LIMIT)
+        ok(res, { generatedAt: Date.now(), pages: deps.store.listPageMeta(limit) })
+        return
+      }
+
+      // 三级手工名覆盖：只有手工名，缺省空对象（自动名由客户端按 card 投影自取，不在这里重复）
+      if (suffix === '/names') {
+        ok(res, deps.names?.snapshot() ?? { sites: {}, pages: {}, interfaces: {} })
+        return
+      }
+
+      // 旧页面补抓状态（异步动作的进度面；未装配时如实回零状态）
+      if (suffix === '/retitle/status') {
+        ok(res, deps.retitle?.status() ?? { ...EMPTY_RETITLE_STATUS })
         return
       }
 
@@ -115,19 +177,22 @@ export function createCapturePanelHandler(deps: CapturePanelDeps): (req: Incomin
           samples: deps.store.listSamples(id, MAX_LIST_LIMIT).map(sanitizeSample),
           // 出口闸：凭据原文（value_json）在路由层剥除，永不进响应体。
           credentials: deps.store.listCredentials(id, MAX_LIST_LIMIT).map(({ valueJson: _valueStaysInDb, ...rest }) => rest),
-          cards: deps.store.listCards(id, RUN_DETAIL_CARDS_LIMIT),
+          cards: deps.store.listCards(id, RUN_DETAIL_CARDS_LIMIT).map((card) => projectCard(card, deps.names?.snapshot())),
           relations: deps.store.listRelations(id, RUN_DETAIL_RELATIONS_LIMIT),
         })
         return
       }
 
       if (suffix === '/cards') {
+        const names = deps.names?.snapshot()
         ok(res, {
           generatedAt: Date.now(),
-          cards: deps.store.listAllCards(
-            clampLimit(url.searchParams.get('limit'), DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT),
-            clampOffset(url.searchParams.get('offset')),
-          ),
+          cards: deps.store
+            .listAllCards(
+              clampLimit(url.searchParams.get('limit'), DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT),
+              clampOffset(url.searchParams.get('offset')),
+            )
+            .map((card) => projectCard(card, names)),
           total: deps.store.countAllCards(),
         })
         return
@@ -140,14 +205,41 @@ export function createCapturePanelHandler(deps: CapturePanelDeps): (req: Incomin
   }
 }
 
+type PanelCard = CardRow & {
+  mergeKey: string
+  name: string
+  nameSource: 'auto' | 'manual'
+}
+
+/**
+ * 卡片出口投影：mergeKey / name / nameSource。
+ *
+ * name = 手工覆盖（按 mergeKey，来自 names.yaml）?? 改进后的 semanticName（方法+模板实时生成）。
+ * 注意**不用**卡行上落库的 name 字段：那是采集期旧口径（v1 语义名），会与改进后的规则长期不一致；
+ * 卡行 name 仍保留作审计，展示以本投影为准。
+ */
+function projectCard(card: CardRow, names: CaptureNamesSnapshot | undefined): PanelCard {
+  const mergeKey = card.mergeKey !== undefined && card.mergeKey !== ''
+    ? card.mergeKey
+    : mergeKeyOf(card.method, card.urlTemplate)
+  const manual: string | undefined = names?.interfaces[mergeKey]
+  const manualName = manual !== undefined && manual !== '' ? manual : undefined
+  return {
+    ...card,
+    mergeKey,
+    name: manualName ?? semanticName(card.method, card.urlTemplate),
+    nameSource: manualName === undefined ? 'auto' : 'manual',
+  }
+}
+
 /** POST /captures：发起单页采集。FR-7.6 边界在闸内：body 里 taskType 只认 single_page，其余 400。 */
 async function handleStartCapture(deps: CapturePanelDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
   let body: unknown
   try {
-    body = JSON.parse((await readBody(req, MAX_CAPTURE_BODY_BYTES)) || '{}')
+    body = JSON.parse((await readBody(req, MAX_WRITE_BODY_BYTES)) || '{}')
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
-      fail(res, 413, `请求体超过 ${MAX_CAPTURE_BODY_BYTES} 字节`, 'body-too-large')
+      fail(res, 413, `请求体超过 ${MAX_WRITE_BODY_BYTES} 字节`, 'body-too-large')
       return
     }
     fail(res, 400, '请求体不是合法 JSON', 'bad-json')
@@ -210,6 +302,82 @@ async function handleStartCapture(deps: CapturePanelDeps, req: IncomingMessage, 
   })
 }
 
+/**
+ * POST /names：写一条三级手工名覆盖。
+ *
+ * body `{kind:'site'|'page'|'interface', key:string, name:string}`；name trim 后空串 = 删除该条覆盖。
+ * 校验：kind 合法、key 非空字符串、name 字符串且 ≤80 字符，否则 400 信封错误。
+ * 回执 data `{kind,key,name?}`：key 是**归一后**的键（site 小写 / page 身份 / interface trim）。
+ */
+async function handleSetName(deps: CapturePanelDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: unknown
+  try {
+    body = JSON.parse((await readBody(req, MAX_WRITE_BODY_BYTES)) || '{}')
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      fail(res, 413, `请求体超过 ${MAX_WRITE_BODY_BYTES} 字节`, 'body-too-large')
+      return
+    }
+    fail(res, 400, '请求体不是合法 JSON', 'bad-json')
+    return
+  }
+  const record = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>
+  const kindRaw = record['kind']
+  if (!isCaptureNameKind(kindRaw)) {
+    fail(res, 400, `kind 非法：${String(kindRaw)}（可选 site/page/interface）`, 'bad-name-kind')
+    return
+  }
+  const keyRaw = record['key']
+  if (typeof keyRaw !== 'string' || keyRaw.trim() === '') {
+    fail(res, 400, '缺少 key（非空字符串）', 'bad-name-key')
+    return
+  }
+  const nameRaw = record['name']
+  if (typeof nameRaw !== 'string') {
+    fail(res, 400, 'name 必须是字符串（空串 = 删除该条覆盖）', 'bad-name-value')
+    return
+  }
+  const name = cleanName(nameRaw)
+  if (name.length > NAME_MAX_CHARS) {
+    fail(res, 400, `name 超过 ${NAME_MAX_CHARS} 字符`, 'name-too-long')
+    return
+  }
+  const normalizedKey = normalizeNameKey(kindRaw, keyRaw)
+  if (normalizedKey === '') {
+    fail(res, 400, `key 归一后为空：${keyRaw.slice(0, 200)}`, 'bad-name-key')
+    return
+  }
+  if (deps.names === undefined) {
+    fail(res, 503, '名称覆盖存储未装配（names 未注入）', 'names-not-wired')
+    return
+  }
+  try {
+    deps.names.set(kindRaw, keyRaw, name)
+  } catch (err) {
+    fail(res, 500, `名称覆盖写入失败：${String((err as Error)?.message ?? err)}`, 'names-write-failed')
+    return
+  }
+  ok(res, name === '' ? { kind: kindRaw, key: normalizedKey } : { kind: kindRaw, key: normalizedKey, name })
+}
+
+/**
+ * POST /retitle：启动旧页面标题补抓。
+ *
+ * 操作反馈用 200 信封表达（accepted=false + reason='busy'|'no-targets'|'capture-running'），
+ * 不用 4xx/5xx —— 这些不是请求错误，而是「现在不能跑」。未装配属装配问题，才回 503。
+ */
+function handleRetitle(deps: CapturePanelDeps, res: ServerResponse): void {
+  if (deps.retitle === undefined) {
+    fail(res, 503, '标题补抓未装配（retitle 未注入）', 'retitle-not-wired')
+    return
+  }
+  try {
+    ok(res, deps.retitle.start())
+  } catch (err) {
+    fail(res, 500, `标题补抓启动失败：${String((err as Error)?.message ?? err)}`, 'retitle-start-failed')
+  }
+}
+
 /** 本机 / 链路本地 / 云元数据地址：面板写入口不接受（agent 工具面不受此限，便于本地调试）。 */
 function blockedTargetReason(hostname: string): string | undefined {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
@@ -262,10 +430,15 @@ export function registerCapturePanelRoutes(
 ): () => void {
   const captureHandler = createCapturePanelHandler(deps)
   const orchestration = deps.orchestration
-  const handler = orchestration === undefined
+  const uiTest = deps.uiTest
+  const artifacts = deps.artifacts
+  const handler = orchestration === undefined && uiTest === undefined && artifacts === undefined
     ? captureHandler
     : (req: IncomingMessage, res: ServerResponse): void => {
-        if (isOrchestrationRequest(req.url)) orchestration(req, res)
+        // 产物 → UI 测试 → 编排 → 采集：各子路由路径互不重叠，返回 false 表示不是它。
+        if (artifacts !== undefined && artifacts(req, res) === true) return
+        if (uiTest !== undefined && uiTest(req, res) === true) return
+        if (orchestration !== undefined && isOrchestrationRequest(req.url)) orchestration(req, res)
         else captureHandler(req, res)
       }
   const dispose = webServer.register({

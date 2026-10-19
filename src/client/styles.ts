@@ -35,6 +35,17 @@ const CSS = `
   background: var(--background); color: var(--foreground);
   font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
+  /* 宿主 main 插槽是「高度确定 + overflow:hidden」的 flex 列（见 dsh-client-ui-layout
+     的 centerCol）：占位者不自己撑满并内滚，内容超出视口就会被宿主直接裁掉、连滚动条都没有。
+     所以根节点吃满高度并作为唯一纵向滚动容器，顶栏用 sticky 留在原地。
+     max-height:100dvh 是兜底：slot 边界包裹层高度若不是定高（height:100% 会退化成 auto），
+     根节点仍被视口高封顶 → overflow 生效，内容一定能滚到。 */
+  height: 100%;
+  max-height: 100dvh;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }
 
 /* ── 顶栏（brand + tabs，原型 .topbar） ── */
@@ -59,7 +70,10 @@ const CSS = `
   display: grid; grid-template-columns: 360px 1fr; gap: 20px; align-items: start; }
 @media (max-width: 980px) { .dsh-df-page-spl { grid-template-columns: 1fr; } }
 .dsh-df-page-spl > aside { min-width: 0; }
-.dsh-df-page-spl > main { min-width: 0; }
+/* 采集结果可能极长（一页几百个接口）：结果列自成滚动区，不依赖根节点/宿主的滚动链，
+   左列「发起采集 / 本次进度 / 边界说明」保持可见。视口高按顶栏 + 页面上下留白扣减。 */
+.dsh-df-page-spl > main { min-width: 0; max-height: calc(100dvh - 140px);
+  overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
 
 /* ── 通用卡 / 头部 / 状态 ── */
 .dsh-df-card { background: var(--dsh-df-card); border: 1px solid var(--dsh-df-line);
@@ -283,6 +297,12 @@ const CSS = `
 .dsh-df-pg[aria-current="true"] { background: var(--dsh-df-accent); border-color: var(--dsh-df-accent);
   color: #fff; cursor: default; }
 .dsh-df-pg[disabled] { opacity: .4; cursor: default; }
+/* 页码窗口里的省略号占位（不可点） */
+.dsh-df-pg-gap { display: inline-flex; align-items: center; padding: 0 2px; font-size: 12px;
+  color: var(--dsh-df-ink-3); }
+/* 页面节点里的接口分页条：与上方接口卡之间加一条虚线分隔 */
+.dsh-df-pn-body > .dsh-df-pagerbar { margin-top: 4px; padding-top: 10px;
+  border-top: 1px dashed var(--dsh-df-line); }
 
 /* ── 右下角图例（原型 .legend, position fixed） ── */
 .dsh-df-legend { position: fixed; right: 16px; bottom: 16px; z-index: 20;
@@ -544,6 +564,38 @@ const CSS = `
 .dsh-df-errline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   background: var(--dsh-df-err-soft); color: var(--dsh-df-err); border: 1px solid #f3c2c2;
   border-radius: 8px; padding: 8px 12px; font-size: 12px; margin-bottom: 12px; }
+
+/* ── 三级名称（网站 / 页面 / 接口）+ 补抓名称 ── */
+/* 网站卡：名称主行 + host 次行（原型 .site-card .title/.host；host 只在有名称时出现） */
+.dsh-df-site-card-title b { font-size: 14.5px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.dsh-df-site-card-title .dsh-df-auto-tag { flex-shrink: 0; }
+.dsh-df-site-card .dsh-df-host { display: block; margin-top: 3px; }
+
+/* 站点横幅：名称 + 自动标签 + host 竖排两行，统计/操作仍靠右 */
+.dsh-df-site-banner-names { display: flex; flex-direction: column; align-items: flex-start;
+  gap: 1px; min-width: 0; }
+.dsh-df-site-banner-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dsh-df-site-banner .dsh-df-stats { margin-left: auto; }
+
+/* 页面节点：名称主行 + URL 小字；无名称时 URL 就是主行（沿用 .dsh-df-pn-name） */
+.dsh-df-pn-names { display: flex; flex-direction: column; align-items: flex-start;
+  min-width: 0; flex: 1; gap: 1px; }
+.dsh-df-pn-title { font-weight: 600; font-size: 13px; word-break: break-all; }
+.dsh-df-pn-url { font: 11px var(--dsh-df-mono); color: var(--dsh-df-ink-3); word-break: break-all; }
+
+/* 采集网站页：页面卡名称行（URL 仍是可点击主体） */
+.dsh-df-pg-main > .dsh-df-pname { display: block; margin-bottom: 2px; }
+
+/* 补抓名称状态行：结果/进度，或「名称接口未就绪」提示 */
+.dsh-df-backfill-line { font-size: 11.5px; color: var(--dsh-df-ink-3); margin: -4px 0 12px;
+  word-break: break-all; }
+.dsh-df-backfill-off { color: var(--dsh-df-warn); }
+
+/* 接口卡改名：✎ 只在悬停/聚焦时露出（与编排页改名同款交互） */
+.dsh-df-iface-title-row { display: flex; align-items: center; gap: 6px; }
+.dsh-df-iface-title-row .dsh-df-iface-head { flex: 1; min-width: 0; }
+.dsh-df-iface-card:hover .dsh-df-edit-btn, .dsh-df-iface-card:focus-within .dsh-df-edit-btn { opacity: 1; }
+.dsh-df-iface-card .dsh-df-errline { margin: 6px 0 0; padding: 4px 8px; }
 `
 
 /**

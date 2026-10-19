@@ -530,6 +530,7 @@ export async function executeChainRun(
 
   const roots = new Map<string, BindingRoot>()
   const results = new Map<string, NodeResult>()
+  const emittedByNode = new Map<string, Record<string, unknown>>()
   let failure: { nodeId: string; code: ChainRunErrorCode; message: string } | undefined
   let cancelled = false
   let cancelledMessage: string | undefined
@@ -917,7 +918,7 @@ export async function executeChainRun(
     }
 
     // 5.5) 业务码校验：HTTP 200 不等于业务成功（如网盘 create 返回 errno:404）。
-    const expectation = checkNodeExpect(node, response.json === undefined ? undefined : { body: response.json })
+    const expectation = checkNodeExpects(node, response.json === undefined ? undefined : { body: response.json })
     if (!expectation.ok) {
       result.errorCode = 'node-business-error'
       result.error = expectation.message
@@ -938,7 +939,8 @@ export async function executeChainRun(
     // 敏感运行（登录链）不落出参：登录响应里可能有 access_token。
     const emitted = sensitive
       ? {}
-      : redactRecord(collectEmitted(doc, cards, nodeId, roots.get(nodeId) as BindingRoot), secrets)
+      : redactRecord({ ...collectEmitted(doc, cards, nodeId, roots.get(nodeId) as BindingRoot), ...collectCardOutputs(doc, cards, nodeId, roots.get(nodeId) as BindingRoot) }, secrets)
+    emittedByNode.set(nodeId, emitted)
     result.status = 'done'
     results.set(nodeId, result)
     emit({
@@ -1042,7 +1044,7 @@ export async function executeChainRun(
   emit({
     event: 'result',
     success,
-    businessData: businessDataOf(doc, ordered, { failedNode, cancelled }),
+    businessData: businessDataOf(doc, ordered, { failedNode, cancelled, outputs: Object.fromEntries(emittedByNode) }),
   })
 
   input.signal?.removeEventListener('abort', onAbort)
@@ -1065,7 +1067,7 @@ export async function executeChainRun(
 function businessDataOf(
   doc: ChainDoc,
   nodes: NodeResult[],
-  extra: { failedNode?: string; cancelled?: boolean } = {},
+  extra: { failedNode?: string; cancelled?: boolean; outputs?: Record<string, unknown> } = {},
 ): Record<string, unknown> {
   const completed = nodes.filter((node) => node.status === 'done').map((node) => node.nodeId)
   return {
@@ -1073,6 +1075,7 @@ function businessDataOf(
     ...(extra.failedNode === undefined ? {} : { failedNode: extra.failedNode }),
     ...(extra.cancelled === true ? { cancelled: true } : {}),
     completed,
+    ...(extra.outputs === undefined || Object.keys(extra.outputs).length === 0 ? {} : { outputs: extra.outputs }),
     nodes: nodes.map((node) => ({
       nodeId: node.nodeId,
       status: node.status,
@@ -1108,17 +1111,20 @@ function terminalMessage(
 /* ================================================================== 小工具 */
 
 /** 业务码校验：expect 缺省 = 不检查。 */
-function checkNodeExpect(node: ChainNode, json: unknown): { ok: true } | { ok: false; message: string } {
-  if (node.expect === undefined) return { ok: true }
+function checkNodeExpects(node: ChainNode, json: unknown): { ok: true } | { ok: false; message: string } {
+  const expectations = [...(node.expect === undefined ? [] : [node.expect]), ...(node.expects ?? [])]
+  if (expectations.length === 0) return { ok: true }
   if (json === undefined) {
-    return { ok: false, message: `业务码校验失败：响应不是 JSON，取不到 ${node.expect.path}` }
+    return { ok: false, message: `业务码校验失败：响应不是 JSON，取不到 ${expectations[0]?.path ?? ''}` }
   }
-  const actual = fieldValueOf(json, node.expect.path)
-  if (actual === undefined) {
-    return { ok: false, message: `业务码校验失败：响应里没有 ${node.expect.path}` }
-  }
-  if (String(actual) !== String(node.expect.equals)) {
-    return { ok: false, message: `业务码不符：${node.expect.path} 期望 ${String(node.expect.equals)}，实际 ${String(actual)}` }
+  for (const expectation of expectations) {
+    const actual = fieldValueOf(json, expectation.path)
+    if (actual === undefined) {
+      return { ok: false, message: `业务码校验失败：响应里没有 ${expectation.path}` }
+    }
+    if (String(actual) !== String(expectation.equals)) {
+      return { ok: false, message: `业务码不符：${expectation.path} 期望 ${String(expectation.equals)}，实际 ${String(actual)}` }
+    }
   }
   return { ok: true }
 }
@@ -1281,6 +1287,23 @@ function collectEmitted(
       }
       emitted[edge.from] = edge.transform === undefined ? value : applyEdgeTransform(value, edge.transform)
     }
+  }
+  return emitted
+}
+
+/** 卡片声明的全部出参（不依赖 downstream edge），供 businessData/cleanup 结果绑定使用。 */
+function collectCardOutputs(
+  doc: ChainDoc,
+  cards: Map<string, InterfaceCardDoc>,
+  nodeId: string,
+  root: BindingRoot,
+): Record<string, unknown> {
+  const card = cards.get(cardOfNode(doc, nodeId))
+  if (card === undefined) return {}
+  const emitted: Record<string, unknown> = {}
+  for (const field of card.outputs) {
+    const bound = resolveBinding(root, field.path)
+    if (bound.ok) emitted[field.path] = bound.value
   }
   return emitted
 }

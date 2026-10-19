@@ -277,6 +277,30 @@ describe('POST /orchestration/graph（画布保存）', () => {
   })
 })
 
+describe('工作区兜底', () => {
+  it('显式 workspace 没有 .dsh/dataforge 时回退到有 dataforge 数据的 workspace', async () => {
+    seedChain()
+    const empty = mkdtempSync(join(tmpdir(), 'df-empty-workspace-'))
+    const captured: FakeResponse = { status: 0, body: '' }
+    const res = {
+      writeHead: (status: number) => { captured.status = status },
+      end: (payload: string) => { captured.body = payload },
+    }
+    const req = { method: 'GET', url: `/orchestration/overview?workspace=${encodeURIComponent(empty)}`, on: () => undefined }
+    createOrchestrationPanelHandler({
+      resolveWorkspaceRoot: async () => workspace(),
+      fallbackWorkspaceRoot: async () => workspace(),
+    })(req as unknown as IncomingMessage, res as unknown as ServerResponse)
+    for (let i = 0; i < 50 && captured.status === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    const body = JSON.parse(captured.body) as { success: boolean; data?: { flows?: unknown[] } }
+    expect(captured.status).toBe(200)
+    expect(body.data?.flows?.length).toBeGreaterThan(0)
+    rmSync(empty, { recursive: true, force: true })
+  })
+})
+
 describe('同一前缀内的分派（不赌宿主 prefix 匹配语义）', () => {
   it('编排路径交给编排 handler，其余仍归采集 handler', async () => {
     const { registerCapturePanelRoutes, isOrchestrationRequest } = await import('../../src/capture/panel-routes.js')
@@ -354,6 +378,36 @@ describe('GET /orchestration/palette（画布左栏拖拽源）', () => {
     expect(data.pages).toEqual([
       'https://scm.example.com/materials',
       'https://scm.example.com/materials/detail',
+    ])
+  })
+
+  it('页面按身份去重：同一 SPA 页面的 hash/反缓存戳变体只列一次（保留首次原始 URL）', async () => {
+    const { writeCard } = await import('../../src/library/store.js')
+    writeCard(workspace(), {
+      cardId: 'card_000321',
+      kind: 'interface-card',
+      identity: { mergeKey: 'GET /disk/main:list', method: 'GET', urlTemplate: '/disk/main?category={category}' },
+      inputs: [],
+      outputs: [],
+      auth: 'none',
+      sources: [{
+        captureId: 'cap_x',
+        pages: [
+          'https://pan.baidu.com/disk/main#/index?category=all',
+          'https://pan.baidu.com/disk/main#/index',
+          'https://pan.baidu.com/disk/main?_at_=1792240465584#/index?category=all',
+          'https://pan.baidu.com/disk/main#/share',
+        ],
+        relationIds: [],
+      }],
+    })
+
+    const response = await serveAsync('GET', '/dashboard/api/dataforge/orchestration/palette')
+    expect(response.status).toBe(200)
+    const data = json(response).data as Record<string, unknown>
+    expect(data.pages).toEqual([
+      'https://pan.baidu.com/disk/main#/index?category=all',
+      'https://pan.baidu.com/disk/main#/share',
     ])
   })
 

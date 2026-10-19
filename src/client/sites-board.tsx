@@ -1,6 +1,9 @@
 /**
- * 采集网站页（原型 docs/prototypes/sites.html）—— 站点级档案：搜索/排序工具条 +
- * site 文章级展开（时间行 + 页面 rail 的 pgcard：接口 → / 重采）+ 空态 + 分页条 + 图例。
+ * 采集网站页（原型 docs/prototypes/sites.html）—— 站点级档案：搜索/排序/补抓名称工具条 +
+ * site 文章级展开（时间行 + 页面 rail 的 pgcard：页面名 + 地址 → 接口 / 重采）+ 空态 + 分页条 + 图例。
+ *
+ * 名称：站点名由 page-meta + names 解析（手工 > 自动 > 无），自动名显示「自动取名」小标；
+ * 页面卡显示页面名 + 原始 URL；无名称时退回 host / URL。名称接口不可用只是没有名称，不是取数失败。
  *
  * 数据面：无站点聚合端点 —— /cards 拉满（上限内）+ /runs → groupSites（site-data.ts）。
  * 呈现纪律：诚实三态、用户数据只进 JSX 文本节点、零 dangerouslySetInnerHTML。
@@ -11,9 +14,11 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Legend } from './card-parts.js'
 import { SITES_MAX_AGGREGATE_CARDS } from './dom.js'
 import { fmtShort } from './el.js'
-import { UNKNOWN_SITE, type SiteGroup } from './grouping.js'
+import { UNKNOWN_SITE, cardsOnPage, type ResolvedName, type SiteGroup } from './grouping.js'
+import {
+  backfillStatusText, useAggregateSites, useTitleBackfill, type TitleBackfill,
+} from './sites-data.js'
 import type { CardRow } from './types.js'
-import { useAggregateSites } from './sites-data.js'
 
 export interface SitesBoardPageProps {
   visible: boolean
@@ -34,32 +39,45 @@ const SORT_OPTIONS: ReadonlyArray<{ key: SortKey; label: string }> = [
 const SITES_PER_PAGE = 10
 
 export function SitesBoardPage({ visible, onRecapture, onOpenInLibrary }: SitesBoardPageProps): ReactNode {
-  const { aggregate, cardsByPage, error, lastSync, reload } = useAggregateSites(visible)
+  const {
+    aggregate, cardsByPage, error, lastSync, reload, siteNames, pageNames, namesAvailable,
+  } = useAggregateSites(visible)
+  const backfill = useTitleBackfill(reload, namesAvailable)
   const [query, setQuery] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('recent')
   const [expandAll, setExpandAll] = useState(false)
   const [expandedHosts, setExpandedHosts] = useState<ReadonlySet<string>>(new Set())
   const [page, setPage] = useState(0)
 
+  const siteLabel = (host: string): string => siteNames.get(host)?.name ?? host
+
   const shownSites = useMemo(() => {
     const needle = query.trim().toLowerCase()
     const matched = (aggregate?.sites ?? []).filter((site) => {
       if (needle.length === 0) return true
-      return site.host.toLowerCase().includes(needle)
-        || site.pageUrls.some((pageUrl) => pageUrl.toLowerCase().includes(needle))
+      // 搜索同时匹配站点名 / host / 页面名 / 页面 URL（名称是用户可见的检索面）。
+      if ((siteNames.get(site.host)?.name ?? site.host).toLowerCase().includes(needle)) return true
+      if (site.host.toLowerCase().includes(needle)) return true
+      return site.pageUrls.some((pageUrl) =>
+        pageUrl.toLowerCase().includes(needle)
+        || (pageNames.get(pageUrl)?.name.toLowerCase().includes(needle) ?? false),
+      )
     })
     if (sortKey === 'recent') return matched
     const sorted = [...matched].sort((left, right) => {
       if (sortKey === 'cards') return right.stats.cards - left.stats.cards
-      return left.host.localeCompare(right.host)
+      // 「站点名」排序：解析出的名称优先，没有名称退回 host 比较。
+      return siteLabel(left.host).localeCompare(siteLabel(right.host), 'zh-Hans-CN')
     })
     const unknown = sorted.find((site) => site.host === UNKNOWN_SITE)
     return unknown === undefined ? sorted : [...sorted.filter((site) => site.host !== UNKNOWN_SITE), unknown]
-  }, [aggregate, query, sortKey])
+  }, [aggregate, query, sortKey, siteNames, pageNames])
 
   const totalPages = Math.max(1, Math.ceil(shownSites.length / SITES_PER_PAGE))
   const effectivePage = Math.min(page, totalPages - 1)
   const pageSites = shownSites.slice(effectivePage * SITES_PER_PAGE, (effectivePage + 1) * SITES_PER_PAGE)
+
+  const backfillText = backfillStatusText(backfill, namesAvailable)
 
   const toggleSite = (host: string): void => {
     setExpandedHosts((prev) => {
@@ -86,7 +104,7 @@ export function SitesBoardPage({ visible, onRecapture, onOpenInLibrary }: SitesB
         <input
           className="dsh-df-search"
           type="search"
-          placeholder="搜索站点或页面 URL"
+          placeholder="搜索站点名、host、页面名或页面 URL"
           spellCheck={false}
           value={query}
           onChange={(event) => { setQuery(event.target.value) }}
@@ -104,7 +122,21 @@ export function SitesBoardPage({ visible, onRecapture, onOpenInLibrary }: SitesB
         >
           {expandAll === false ? '全部展开' : '全部收起'}
         </button>
+        <button
+          className="dsh-df-btn-ghost"
+          type="button"
+          disabled={backfill.busy || !namesAvailable}
+          title={namesAvailable
+            ? '让服务端重访缺名称的已采页面，补抓页面标题 / 站点名'
+            : '服务端未更新：重启宿主服务后可用'}
+          onClick={backfill.start}
+        >
+          {backfill.busy ? '补抓中…' : '补抓名称'}
+        </button>
       </div>
+      {backfillText !== undefined && (
+        <div className={`dsh-df-backfill-line${namesAvailable ? '' : ' dsh-df-backfill-off'}`}>{backfillText}</div>
+      )}
       {aggregate?.truncated === true && (
         <div className="dsh-df-note" style={{ marginBottom: 12 }}>
           {`接口卡超过 ${SITES_MAX_AGGREGATE_CARDS} 张：本页仅按最近 ${SITES_MAX_AGGREGATE_CARDS} 张卡聚合，站点清单可能不全。`}
@@ -125,7 +157,9 @@ export function SitesBoardPage({ visible, onRecapture, onOpenInLibrary }: SitesB
         <SiteItem
           key={site.host}
           site={site}
+          siteName={siteNames.get(site.host)}
           byPage={cardsByPage}
+          pageNames={pageNames}
           shown={expandAll || expandedHosts.has(site.host)}
           onRecapture={onRecapture}
           onOpenInLibrary={onOpenInLibrary}
@@ -179,9 +213,11 @@ export function SitesBoardPage({ visible, onRecapture, onOpenInLibrary }: SitesB
   )
 }
 
-function SiteItem({ site, byPage, shown, onRecapture, onOpenInLibrary, onToggle }: {
+function SiteItem({ site, siteName, byPage, pageNames, shown, onRecapture, onOpenInLibrary, onToggle }: {
   site: SiteGroup
+  siteName: ResolvedName | undefined
   byPage: Map<string, CardRow[]> | undefined
+  pageNames: Map<string, ResolvedName>
   shown: boolean
   onRecapture?: (url: string) => void
   onOpenInLibrary?: (host: string) => void
@@ -192,7 +228,9 @@ function SiteItem({ site, byPage, shown, onRecapture, onOpenInLibrary, onToggle 
     <article className={`dsh-df-site${shown ? '' : ' dsh-df-collapsed'}`}>
       <button className="dsh-df-site-header" type="button" onClick={onToggle}>
         <span className="dsh-df-lv dsh-df-lv1">网站</span>
-        <span className="dsh-df-site-name">{site.host}</span>
+        <span className="dsh-df-site-name">{siteName?.name ?? site.host}</span>
+        {siteName?.source === 'auto' && <span className="dsh-df-auto-tag">自动取名</span>}
+        {siteName !== undefined && <span className="dsh-df-host">{site.host}</span>}
         <span className="dsh-df-stats">
           <span>页面 <b>{stats.pages}</b></span>
           <span>接口 <b>{stats.cards}</b></span>
@@ -223,7 +261,8 @@ function SiteItem({ site, byPage, shown, onRecapture, onOpenInLibrary, onToggle 
                     key={pageUrl}
                     siteHost={site.host}
                     pageUrl={pageUrl}
-                    cards={byPage?.get(pageUrl) ?? []}
+                    pageName={pageNames.get(pageUrl)}
+                    cards={byPage === undefined ? [] : cardsOnPage(byPage, pageUrl)}
                     onRecapture={onRecapture}
                     onOpenInLibrary={onOpenInLibrary}
                   />
@@ -237,9 +276,10 @@ function SiteItem({ site, byPage, shown, onRecapture, onOpenInLibrary, onToggle 
   )
 }
 
-function PageCardRow({ siteHost, pageUrl, cards, onRecapture, onOpenInLibrary }: {
+function PageCardRow({ siteHost, pageUrl, pageName, cards, onRecapture, onOpenInLibrary }: {
   siteHost: string
   pageUrl: string
+  pageName: ResolvedName | undefined
   cards: CardRow[]
   onRecapture?: (url: string) => void
   onOpenInLibrary?: (host: string) => void
@@ -250,6 +290,7 @@ function PageCardRow({ siteHost, pageUrl, cards, onRecapture, onOpenInLibrary }:
     <div className="dsh-df-pgcard">
       <span className="dsh-df-lv dsh-df-lv2">页面</span>
       <div className="dsh-df-pg-main">
+        {pageName !== undefined && <span className="dsh-df-pname">{pageName.name}</span>}
         <a className="dsh-df-purl" href={pageUrl} target="_blank" rel="noreferrer">{pageUrl}</a>
         <div className="dsh-df-pg-chips">
           <span><b>{cards.length}</b> 接口</span>

@@ -126,11 +126,24 @@ describe('paramsFingerprintOf / queryPairsOf / semanticName（A7/A8）', () => {
     ])
   })
 
-  it('semanticName：method + 最后具名段（{p} 占位段跳过）；全部抽象才退回 host', () => {
-    expect(semanticName('GET', '/mrp/pr/ordinary/171000031?q=1')).toBe('GET ordinary')
-    expect(semanticName('GET', '/mrp/pr/{p}/{p}')).toBe('GET pr')
+  it('semanticName v2：去噪后取最后两段 humanize，不带方法前缀', () => {
+    // 契约示例：接口前缀 / 版本段 / 纯数字段都被剥掉
+    expect(semanticName('POST', '/aichat/api/messages/list')).toBe('messages · list')
+    expect(semanticName('GET', '/sapi/v1/financelsegmacro/hotmetrics')).toBe('financelsegmacro · hotmetrics')
+    expect(semanticName('GET', '/mrp/pr/ordinary/171000031?q=1')).toBe('pr · ordinary')
+    // 什么都没有可读段：退回 method + host（没有 host 用 capture.local）
     expect(semanticName('GET', '/{p}')).toBe('GET capture.local')
-    expect(semanticName('POST', 'https://api.x.test/v2/orders')).toBe('POST orders')
+    // 驼峰/下划线/连字符拆词 + 小写化；版本段 v2 剥掉后只剩 orders
+    expect(semanticName('GET', '/api/getUserList')).toBe('get user list')
+    expect(semanticName('POST', 'https://api.x.test/v2/orders')).toBe('orders')
+    expect(semanticName('GET', '/rest/api/order_detail/DETAIL-1')).toBe('order detail · detail 1')
+    // 只有一段可读时就是那一段（不是空串）
+    expect(semanticName('DELETE', '/api/v1/sessions/{id}')).toBe('sessions')
+  })
+
+  it('semanticName v2：纯噪声路径（api/rest/index.html…）不参与命名', () => {
+    expect(semanticName('GET', '/api/rest/index.html')).toBe('GET capture.local')
+    expect(semanticName('GET', '/web/assets/app.js')).toBe('app js')
   })
 
   it('pathSegmentsOf：照实保留原始段', () => {

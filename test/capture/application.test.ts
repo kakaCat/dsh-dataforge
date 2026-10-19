@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { CaptureStore } from '../../src/capture/store.js'
 import { startCapture, captureStatus, captureResult, captureCancel, cookiesFromCapture } from '../../src/capture/application.js'
 import type { CaptureDeps } from '../../src/capture/application.js'
-import type { WireSample } from '../../src/capture/browser.js'
+import type { PagePageMeta, WireSample } from '../../src/capture/browser.js'
 import type { Config } from '../../src/config.js'
 
 const WIRE: WireSample = {
@@ -21,10 +21,13 @@ const WIRE: WireSample = {
   ts: 42,
 }
 
+type FakeSink = { onSample: (w: WireSample) => void; onPageMeta?: (meta: PagePageMeta) => void }
+
 function fixture(): {
   deps: CaptureDeps
   jobs: { start: ReturnType<typeof vi.fn>; dones: Promise<unknown>[] }
-  lastBoundSink(): ((w: WireSample) => void) | undefined
+  lastBoundSink(): FakeSink | undefined
+  lastBrowserOptions(): Record<string, unknown> | undefined
 } {
   const dir = mkdtempSync(join(tmpdir(), 'cap-app-'))
   const store = new CaptureStore(join(dir, 'c.sqlite'), join(dir, 'samples'), join(dir, 'events.ndjson'))
@@ -39,7 +42,7 @@ function fixture(): {
     captureStabilityWindowMs: 1500,
     captureBodyLimitBytes: 262_144,
     captureChromeChannel: 'chrome',
-    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true,
+    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true, uiTestEnabled: true, uiStepTimeoutSeconds: 15, uiTestBrowser: 'playwright',
   }
   const dones: Promise<unknown>[] = []
   const jobs = {
@@ -50,20 +53,35 @@ function fixture(): {
     }),
     dones,
   }
-  let lastBoundSink: ((w: WireSample) => void) | undefined
+  let lastBoundSink: FakeSink | undefined
+  let lastBrowserOptions: Record<string, unknown> | undefined
   const fakeRegistry = {
     open: vi.fn().mockResolvedValue({ sessionId: 'bs_x', pageUrl: 'https://x.test/' }),
-    bindSink: vi.fn((id: string, sink: (w: WireSample) => void) => { lastBoundSink = sink }),
+    bindSink: vi.fn((_id: string, sink: FakeSink | ((w: WireSample) => void)) => {
+      lastBoundSink = typeof sink === 'function' ? { onSample: sink } : sink
+    }),
   }
-  const maker = async (_channel: string, onWire: (w: WireSample) => void) => ({
-    page: {
-      goto: async () => { onWire(WIRE) },
-      waitForLoadState: async () => undefined,
-      content: async () => '<a href="/next"></a>',
-    } as never,
-    browser: { close: async () => undefined } as never,
-    context: { cookies: async () => [{ domain: 'x.test', name: 'UID', value: 'v' }] as never } as never,
-  })
+  const maker = async (_channel: string, onWire: (w: WireSample) => void, options?: Record<string, unknown>) => {
+    lastBrowserOptions = options
+    return {
+      page: {
+        goto: async (target: string) => {
+          onWire(WIRE)
+          // 模拟真实 browser 层：导航后按页面标题上报（单页/爬取的 onPageMeta 通路）
+          const onPageMeta = options?.['onPageMeta'] as ((meta: PagePageMeta) => void) | undefined
+          onPageMeta?.({
+            url: String(target),
+            title: '示例站点 · 页面标题',
+            siteName: '示例站点',
+          })
+        },
+        waitForLoadState: async () => undefined,
+        content: async () => '<a href="/next"></a>',
+      } as never,
+      browser: { close: async () => undefined } as never,
+      context: { cookies: async () => [{ domain: 'x.test', name: 'UID', value: 'v' }] as never } as never,
+    }
+  }
   const deps: CaptureDeps = {
     config,
     resolveJobs: () => jobs,
@@ -71,7 +89,12 @@ function fixture(): {
     registry: fakeRegistry as never,
     openCapturingPage: maker as never,
   }
-  return { deps, jobs, lastBoundSink: () => lastBoundSink }
+  return {
+    deps,
+    jobs,
+    lastBoundSink: () => lastBoundSink,
+    lastBrowserOptions: () => lastBrowserOptions,
+  }
 }
 
 it('single_page：闸放行 → job 跑完 → 样本/卡/cookie 落库，run=done', async () => {
@@ -91,12 +114,35 @@ it('single_page：闸放行 → job 跑完 → 样本/卡/cookie 落库，run=do
   expect(f.deps.store.listCredentials(a.captureId as string)).toHaveLength(1)
 })
 
+it('single_page：导航后 onPageMeta 落页面标题/站点名（名称数据面）', async () => {
+  const f = fixture()
+  const a = await startCapture(f.deps, { taskType: 'single_page', entryUrl: 'https://x.test/' })
+  await Promise.all(f.jobs.dones)
+  const entry = f.deps.store.listPages(a.captureId as string).find((p) => p.url === 'https://x.test/')
+  expect(entry).toMatchObject({ title: '示例站点 · 页面标题', siteName: '示例站点' })
+})
+
+it('action：sink.onPageMeta 落页面标题（url 归一到 pageIdentityOf 后再写）', async () => {
+  const f = fixture()
+  const a = await startCapture(f.deps, { taskType: 'action', entryUrl: 'https://pan.baidu.com/disk/main', confirm: true })
+  f.lastBoundSink()?.onPageMeta?.({
+    url: 'https://pan.baidu.com/disk/main?_at_=1#/index?category=all',
+    title: '百度网盘',
+    siteName: '百度网盘',
+  })
+  const entry = f.deps.store.listPages(a.captureId as string)[0]
+  expect(entry).toMatchObject({ url: 'https://pan.baidu.com/disk/main#/index', title: '百度网盘', siteName: '百度网盘' })
+})
+
 it('site_crawl：BFS 发现页入 pages，run=done', async () => {
   const f = fixture()
   const a = await startCapture(f.deps, { taskType: 'site_crawl', entryUrl: 'https://x.test/' })
   await Promise.all(f.jobs.dones)
-  expect(f.deps.store.getRun(a.captureId as string)?.status).toBe('done')
-  expect(f.deps.store.listPages(a.captureId as string).map((p) => p.url)).toContain('https://x.test/next')
+  const id = a.captureId as string
+  expect(f.deps.store.getRun(id)?.status).toBe('done')
+  expect(f.deps.store.listPages(id).map((p) => p.url)).toContain('https://x.test/next')
+  // 入口页：请求先到 + 爬行 page 事件后到，同一页面身份只计一页（stats.pages 不虚高）
+  expect(f.deps.store.getRun(id)?.stats.pages).toBe(2)
 })
 
 it('action：未 confirm → gate=action-confirm-required 不启动；confirm=true → 会话化', async () => {
@@ -144,9 +190,11 @@ it('action：headless=false 透传到 registry.open（可见 Chrome，用户手�
 it('action：open 后绑 sink，wire 样本经桥落库成卡（回归：会话样本曾静默丢弃）', async () => {
   const f = fixture()
   const c = await startCapture(f.deps, { taskType: 'action', entryUrl: 'https://x.test/', confirm: true })
-  expect(f.deps.registry.bindSink).toHaveBeenCalledWith('bs_x', expect.any(Function))
+  expect(f.deps.registry.bindSink).toHaveBeenCalledWith('bs_x', expect.objectContaining({
+    onSample: expect.any(Function), onPageMeta: expect.any(Function),
+  }))
   expect((c.captureId as string | undefined) !== undefined).toBe(true)
-  f.lastBoundSink()?.(WIRE)
+  f.lastBoundSink()?.onSample(WIRE)
   const cards = f.deps.store.listCards(c.captureId as string)
   expect(cards).toHaveLength(1)
   expect(cards[0]?.method).toBe('GET')
@@ -191,17 +239,48 @@ it('A7：wire 样本落关系行（page×card×入参指纹），pageId 关联�
   expect(f.deps.store.listRelationsByCard(rels[0]?.cardId ?? 'x').map((r) => r.id)).toContain(rels[0]?.id)
 })
 
+it('A7+：同一 SPA 页面的 hash/反缓存戳变体落成一页（页面/关系归一到身份；卡引用与样本留原始 URL）', async () => {
+  const f = fixture()
+  const bound = startCapture(f.deps, {
+    taskType: 'action', entryUrl: 'https://pan.baidu.com/disk/main', confirm: true,
+  })
+  const a: Awaited<typeof bound> = await bound
+  const id = a.captureId as string
+  const sink = f.lastBoundSink()?.onSample
+  expect(sink).toBeDefined()
+  const pageVariants = [
+    'https://pan.baidu.com/disk/main#/index?category=all',
+    'https://pan.baidu.com/disk/main#/index',
+    'https://pan.baidu.com/disk/main?_at_=1792240465584#/index?category=all',
+  ]
+  for (const pageUrl of pageVariants) sink?.({ ...WIRE, pageUrl })
+
+  // 页面表：三变体 = 一页（page.url 就是页面身份）
+  expect(f.deps.store.listPages(id).map((p) => p.url)).toEqual(['https://pan.baidu.com/disk/main#/index'])
+  // 关系表：同卡同页同指纹 → 幂等聚一行，样本计数累加
+  const rels = f.deps.store.listRelations(id)
+  expect(rels).toHaveLength(1)
+  expect(rels[0]?.pageUrl).toBe('https://pan.baidu.com/disk/main#/index')
+  expect(rels[0]?.sampleCount).toBe(3)
+  // 卡上的页面引用保留首次观测到的原始 URL（展示/打开/重采要真实可打开的地址）
+  const cards = f.deps.store.listCards(id)
+  expect(cards).toHaveLength(1)
+  expect(cards[0]?.relatedPageUrls).toEqual([pageVariants[0]])
+  // 原始 pageUrl 仍是逐请求证据，保留在样本行
+  expect(f.deps.store.listSamples(id).map((s) => s.pageUrl)).toEqual(pageVariants)
+})
+
 it('A8：卡带语义名 + 位置标注模板 + 鉴权标志（token 头探测到，值不入卡）', async () => {
   const f = fixture()
   const bound = startCapture(f.deps, { taskType: 'action', entryUrl: 'https://x.test/', confirm: true })
   const a: Awaited<typeof bound> = await bound
-  f.lastBoundSink()?.({
+  f.lastBoundSink()?.onSample({
     ...WIRE,
     requestHeaders: { authorization: 'Bearer sk-secret', 'content-type': 'application/json' },
     requestPostData: '{"sku":"A1","ts":9}',
     responseText: '{"err_no":0}',
   })
-  f.lastBoundSink()?.({
+  f.lastBoundSink()?.onSample({
     ...WIRE,
     url: 'https://x.test/api/list?page=2',
     requestHeaders: { authorization: 'Bearer sk-secret', 'content-type': 'application/json' },
@@ -210,7 +289,7 @@ it('A8：卡带语义名 + 位置标注模板 + 鉴权标志（token 头探测�
   const cards = f.deps.store.listCards(a.captureId as string)
   expect(cards).toHaveLength(1)
   const card = cards[0]
-  expect(card?.name).toBe('GET list')
+  expect(card?.name).toBe('list')
   expect(card?.authType).toBe('token-header')
   expect(card?.authEvidence).toBe('header:authorization')
   expect(JSON.stringify(card)).not.toContain('sk-secret')
@@ -231,7 +310,7 @@ it('A9：样本超上限如实弃采并在 run 上附 notice', async () => {
   const { SAMPLE_LIMIT_PER_RUN } = await import('../../src/capture/application.js')
   const bound = startCapture(f.deps, { taskType: 'action', entryUrl: 'https://x.test/', confirm: true })
   const a: Awaited<typeof bound> = await bound
-  const sink = f.lastBoundSink()
+  const sink = f.lastBoundSink()?.onSample
   expect(sink).toBeDefined()
   for (let i = 0; i < SAMPLE_LIMIT_PER_RUN + 5; i += 1) sink?.({ ...WIRE, url: `https://x.test/api/list?page=${i}` })
   expect(f.deps.store.countSamples(a.captureId as string)).toBe(SAMPLE_LIMIT_PER_RUN)

@@ -39,7 +39,10 @@ export type AuthType = 'none' | 'token-header' | 'token-param' | 'cookie-session
 export type CardRow = {
   id: string
   captureId: string
+  /** 采集期落的语义名（旧口径 = method + 末段；面板展示以投影的 name 为准）。 */
   name?: string
+  /** 归并键（同一接口跨采集/跨参数值的稳定身份；面板手工名的持久化键）。 */
+  mergeKey?: string
   urlTemplate: string
   method: string
   requestTemplate?: Template
@@ -100,6 +103,18 @@ export type PageRow = {
   url: string
   depth: number
   status: 'ok' | 'error' | 'skipped-external'
+  /** 采集时记录的 document.title（旧库/补抓前缺省）。 */
+  title?: string
+  /** 采集时记录的站点名（og:site_name 等；旧库/补抓前缺省）。 */
+  siteName?: string
+}
+
+/** 页面元信息投影（/page-meta 契约：url 是 pageIdentityOf 归一后的页面身份）。 */
+export type PageMetaRow = {
+  url: string
+  title?: string
+  siteName?: string
+  visitedAt: number
 }
 
 export type CaptureRunRow = {

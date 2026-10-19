@@ -24,8 +24,21 @@ export type UsePanelInfo = <S>(selector: (info: PanelInfoLike) => S) => S
 
 /** 工作区注册表快照的最小投影（本插件只用到路径）。 */
 export interface WorkspaceSnapshotLike {
-  readonly items?: ReadonlyArray<{ readonly path?: string; readonly updatedAt?: string }>
+  readonly items?: ReadonlyArray<{
+    readonly workspaceId?: string
+    readonly path?: string
+    readonly updatedAt?: string
+    readonly sessionIds?: ReadonlyArray<string>
+  }>
 }
+
+/** 当前会话列表/选中会话的快照（本插件只用 `current` 做面板请求的对话身份）。 */
+export interface SessionsStateLike {
+  readonly current?: string
+}
+
+/** useSessions 选择器 hook 的最小契约（由 main 插槽运行时注入）。 */
+export type UseSessions = <S>(selector: (state: SessionsStateLike) => S) => S
 
 /** useWorkspaces 选择器 hook 的最小契约（由 main 插槽运行时注入）。 */
 export type UseWorkspaces = <S>(selector: (snapshot: WorkspaceSnapshotLike) => S) => S
@@ -34,6 +47,7 @@ export type UseWorkspaces = <S>(selector: (snapshot: WorkspaceSnapshotLike) => S
 export interface PanelHostProps {
   usePanelInfo?: UsePanelInfo
   useWorkspaces?: UseWorkspaces
+  useSessions?: UseSessions
 }
 
 /** 装配一个面板宿主组件（每页一个实例；panelId 与插槽 key 同源）。 */

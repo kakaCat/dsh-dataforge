@@ -1,0 +1,58 @@
+{
+  "apiVersion": "dataforge/v1",
+  "kind": "run-dataset",
+  "runId": "chain-真实只读闭环-1792334117371",
+  "createdAt": "2026-10-18T14:35:21.342Z",
+  "status": "completed",
+  "site": "JsonPlaceholder",
+  "flow": "真实只读闭环",
+  "version": 1,
+  "businessData": {
+    "chain": {
+      "site": "JsonPlaceholder",
+      "flow": "真实只读闭环",
+      "version": 1
+    },
+    "completed": [
+      "n1",
+      "n2"
+    ],
+    "outputs": {
+      "n1": {
+        "n1.body.email": "Sincere@april.biz",
+        "body.email": "Sincere@april.biz",
+        "body.username": "Bret"
+      },
+      "n2": {}
+    },
+    "nodes": [
+      {
+        "nodeId": "n1",
+        "status": "done",
+        "attempts": 1,
+        "elapsedMs": 1656,
+        "httpStatus": 200
+      },
+      {
+        "nodeId": "n2",
+        "status": "done",
+        "attempts": 1,
+        "elapsedMs": 331,
+        "httpStatus": 200
+      }
+    ]
+  },
+  "chain": {
+    "site": "JsonPlaceholder",
+    "flow": "真实只读闭环",
+    "version": 1,
+    "path": ".dsh/dataforge/chains/jsonplaceholder/真实只读闭环/v1.yaml",
+    "apiVersion": "dataforge/v1"
+  },
+  "run": {
+    "startedAt": 1792334117373,
+    "updatedAt": 1792334119362,
+    "stepsDone": 2,
+    "totalSteps": 2
+  }
+}

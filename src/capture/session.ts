@@ -8,10 +8,17 @@
  */
 import type { Browser, BrowserContext, Cookie, Page } from 'playwright-core'
 import type { JsonLike } from '../shared/types.js'
-import { openCapturingPage, type WireSample } from './browser.js'
+import { openCapturingPage, type PagePageMeta, type WireSample } from './browser.js'
 
-/** 得到一个会话的静默事件侧；页面采集样本经 sink 输出（调用方消费）。 */
-export type Sink = { onSample: (w: WireSample) => void }
+/**
+ * 得到一个会话的静默事件侧：页面采集样本与页面标题/站点名经 sink 输出（调用方消费）。
+ *
+ * `onPageMeta` 可缺省：只有需要名称数据面的调用方（application 采集桥）才关心它。
+ */
+export type Sink = {
+  onSample: (w: WireSample) => void
+  onPageMeta?: (meta: PagePageMeta) => void
+}
 
 type OpenOptions = { entryUrl?: string; captureId?: string; headless?: boolean; cookies?: Cookie[] }
 
@@ -30,7 +37,14 @@ interface SessionRecord {
   page: Page
   browser: Browser
   context: BrowserContext
-  sink?: Sink['onSample']
+  sink?: Sink
+  /**
+   * sink 尚未绑定时收到的最近一次页面元信息。
+   *
+   * open 内的 entry goto 会先触发 load/标题上报，而 action 路径要等 open 返回后才 bindSink：
+   * 不暂存这一次，入口页标题就永久丢了。只留最新一条（同一页的重复上报无需排队）。
+   */
+  pendingMeta?: PagePageMeta
   captureId?: string
 }
 
@@ -41,19 +55,34 @@ export class SessionRegistry {
   async open(o: OpenOptions): Promise<{ sessionId: string; pageUrl: string }> {
     const sessionId = `bs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
     const { browser, context, page } = await this.io.openCapturingPage('chrome', (w) => {
-      this.sessions.get(sessionId)?.sink?.(w)
+      this.sessions.get(sessionId)?.sink?.onSample(w)
     }, {
       ...(o.headless === undefined ? {} : { headless: o.headless }),
       ...(o.cookies === undefined ? {} : { cookies: o.cookies }),
+      // 标题上报路由到「当前 sink」；sink 未绑定则暂存最新一条，bindSink 时补发（见 SessionRecord.pendingMeta）。
+      onPageMeta: (meta) => {
+        const s = this.sessions.get(sessionId)
+        if (s === undefined) return
+        if (s.sink?.onPageMeta !== undefined) s.sink.onPageMeta(meta)
+        else s.pendingMeta = meta
+      },
     })
     this.sessions.set(sessionId, o.captureId === undefined ? { page, browser, context } : { page, browser, context, captureId: o.captureId })
     if (o.entryUrl !== undefined) await page.goto(o.entryUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => undefined)
     return { sessionId, pageUrl: page.url() }
   }
 
-  bindSink(sessionId: string, sink: Sink['onSample']): void {
+  /** 绑定事件侧；兼容旧调用形态（只给 onSample 函数）与新形态（Sink 对象，含 onPageMeta）。 */
+  bindSink(sessionId: string, sink: Sink['onSample'] | Sink): void {
     const s = this.sessions.get(sessionId)
-    if (s !== undefined) s.sink = sink
+    if (s === undefined) return
+    const normalized: Sink = typeof sink === 'function' ? { onSample: sink } : sink
+    s.sink = normalized
+    if (s.pendingMeta !== undefined) {
+      const meta = s.pendingMeta
+      s.pendingMeta = undefined
+      normalized.onPageMeta?.(meta)
+    }
   }
 
   async act(sessionId: string, spec: ActSpec): Promise<{ ok: boolean; pageUrl?: string; error?: string; value?: JsonLike }> {

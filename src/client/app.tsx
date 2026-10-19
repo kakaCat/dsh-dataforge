@@ -14,16 +14,21 @@ import { CardsLibraryPage } from './board-cards.js'
 import { QuickCapturePage } from './page-capture.js'
 import { OrchestrationPage } from './page-orchestration.js'
 import {
+  ARTIFACTS_TAB_ID, ARTIFACTS_TAB_LABEL,
   CAPTURE_TAB_ID, CAPTURE_TAB_LABEL,
   CARDS_TAB_ID, CARDS_TAB_LABEL,
   ORCH_TAB_ID, ORCH_TAB_LABEL,
   PANEL_ID,
   SITES_TAB_ID, SITES_TAB_LABEL,
+  UITEST_TAB_ID, UITEST_TAB_LABEL,
 } from './dom.js'
-import { PanelHostProps, UsePanelInfo, UseWorkspaces, WorkspaceSnapshotLike } from './host.js'
+import { PanelHostProps, UsePanelInfo, UseSessions, UseWorkspaces, WorkspaceSnapshotLike } from './host.js'
 import { injectStyles } from './styles.js'
 import { SitesBoardPage } from './sites-board.js'
-import { setPanelWorkspace } from './api.js'
+import { UiTestPage } from './page-uitest.js'
+import { ArtifactsPage } from './page-artifacts.js'
+import { setPanelSession, setPanelWorkspace } from './api.js'
+import { pickWorkspacePath } from './workspace.js'
 import type { RecaptureSeed } from './types.js'
 
 export interface DataforgePanelAppProps extends PanelHostProps {}
@@ -38,7 +43,12 @@ const TABS: readonly TabEntry[] = [
   { id: CARDS_TAB_ID, label: CARDS_TAB_LABEL },
   { id: SITES_TAB_ID, label: SITES_TAB_LABEL },
   { id: ORCH_TAB_ID, label: ORCH_TAB_LABEL },
+  { id: UITEST_TAB_ID, label: UITEST_TAB_LABEL },
+  { id: ARTIFACTS_TAB_ID, label: ARTIFACTS_TAB_LABEL },
 ]
+
+/** 兜底 hook：槽位未注入 useSessions 时返回无选中会话（不写 ?session=）。 */
+const NO_SESSIONS: UseSessions = <S,>(selector: (state: { current?: string }) => S): S => selector({})
 
 /** 兜底 hook：槽位未注入 useWorkspaces 时返回空工作区（不写 ?workspace=，交服务端回落）。 */
 const NO_WORKSPACE: UseWorkspaces = <S,>(selector: (snapshot: WorkspaceSnapshotLike) => S): S =>
@@ -60,17 +70,15 @@ export function DataforgePanelApp(props: DataforgePanelAppProps): ReactNode {
   // 很久没用的工作区——面板会显示空数据（用户看到的就是「编排白板」）。当前会话所在
   // 的工作区通常就是最近有写入的那个；服务端也有同一套兜底（src/index.ts latestWorkspacePath）。
   const useWorkspaces: UseWorkspaces = typeof props.useWorkspaces === 'function' ? props.useWorkspaces : NO_WORKSPACE
-  const workspacePath = useWorkspaces((snapshot) => {
-    const items = snapshot.items ?? []
-    const latest = [...items].sort(
-      (left, right) => String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')),
-    )[0]
-    return latest?.path
-  })
+  const useSessions: UseSessions = typeof props.useSessions === 'function' ? props.useSessions : NO_SESSIONS
+  const sessionId = useSessions((state) => state.current)
+  const workspacePath = useWorkspaces((snapshot) => pickWorkspacePath(snapshot.items, sessionId))
   setPanelWorkspace(typeof workspacePath === 'string' ? workspacePath : undefined)
   const usePanelInfo: UsePanelInfo = typeof props.usePanelInfo === 'function' ? props.usePanelInfo : ALWAYS_ACTIVE
   const activePanelId = usePanelInfo((info) => info.activePanelId)
   const visible = activePanelId === PANEL_ID
+  // 共享浏览器按「对话」挂侧栏面板：把当前会话 id 一并带给服务端（工具口径是 exec.agent.id）。
+  setPanelSession(typeof sessionId === 'string' ? sessionId : undefined)
   const [activeTab, setActiveTab] = useState<string>(CAPTURE_TAB_ID)
   const [seed, setSeed] = useState<RecaptureSeed | undefined>()
   const [libSeed, setLibSeed] = useState<LibSeed | undefined>()
@@ -121,6 +129,8 @@ export function DataforgePanelApp(props: DataforgePanelAppProps): ReactNode {
         <SitesBoardPage visible={visible} onRecapture={recapture} onOpenInLibrary={openInLibrary} />
       )}
       {activeTab === ORCH_TAB_ID && <OrchestrationPage visible={visible} />}
+      {activeTab === UITEST_TAB_ID && <UiTestPage visible={visible} />}
+      {activeTab === ARTIFACTS_TAB_ID && <ArtifactsPage visible={visible} />}
     </div>
   )
 }

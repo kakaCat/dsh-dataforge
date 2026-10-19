@@ -12,7 +12,11 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
   └─ dataforge_status  按留痕查进度 / 业务单号链
 
 采集 → 编排（编排是本次新增的一段，见「编排」节）
-  └─ dataforge_capture* / dataforge_browser_*   浏览器只活在采集期：页面上的 XHR 成卡
+  └─ dataforge_capture* / dataforge_browser_*   采集期浏览器：页面上的 XHR 成卡（UI 测试另起浏览器，见「UI 测试」节）
+  └─ dataforge_trace_get / dataforge_trace_analyze  采集 trace → 顺序/字段流转/覆盖率分析（PRJ-0004 S1/S2）
+  └─ dataforge_chain_draft                        trace → interface-chain 草稿（S3；不落盘、不执行，agent 审阅后 upsert）
+  └─ dataforge_lookup                             运行时业务映射（接口取值 + 缓存 + 来源，不写死）
+  └─ dataforge_dataset_export                     运行留痕 → dataset + evidence/report.html
   └─ dataforge_library_import                   采集卡 → 项目接口库（稳定 cardId、跨 run 归并）
   └─ dataforge_chain_upsert / dataforge_chain_get  接口链：版本快照、绑定即拓扑依赖
   └─ dataforge_chain_bind                         绑定回写：probe 发现的边 → 新版本（不手抄 YAML）
@@ -21,8 +25,10 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
   └─ dataforge_chain_crystallize                  结晶：三分类草案 + 用户确认 + 入参槽位写回
   └─ dataforge_chain_diagnose                     复跑诊断：失败节点 / 绑定边 / 上游状态 / 下一步
   └─ dataforge_chain_compare                      复跑对照：两次 run 的入参/出参/节点差异
+  └─ dataforge_ui_*                               UI 测试（第三条执行面）：真浏览器录制/回放 + 页面断言
         │
-        ▼  编排/执行/复跑一律走「接口卡模板 + 凭证卡」＋纯 HTTP，不再开浏览器
+        ▼  编排/执行/复跑一律走「接口卡模板 + 凭证卡」＋纯 HTTP，不再开浏览器；
+          UI 回放是另一条执行面（浏览器），与 src/execute/* 依赖图互不相交
 ```
 
 分层职责（与 DSH 家族插件同款约定）：
@@ -44,6 +50,29 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | 复跑诊断 | `src/orchestration/diagnose.ts` | 失败节点 / 入边 / 上游状态 / 按错误码给建议（R-6 M2） |
 | 复跑对照 | `src/orchestration/compare.ts` | 两次 `chain-run` 的入参 / 节点出参 / 状态差异投影（R-6 M2） |
 | 编排应用层 | `src/orchestration/application.ts` | 链读写、执行闸门与 IF-1/2 的错误码折叠与回执值 |
+| UI 脚本契约 | `src/uitest/{schema,store}.ts` | ui-script YAML / 版本快照 / 入参槽位 / 选择器候选 |
+| UI 录制 | `src/uitest/{recorder,sessions}.ts` | DOM 事件→步骤 / 密码脱敏 / 可见 Chrome 会话 |
+| UI 回放 | `src/uitest/{run,run-store}.ts` | 候选解析 / 动作执行 / 页面断言 / 截图 / `dataRoot/ui-runs` 留痕 |
+| UI 应用层 | `src/uitest/application.ts` | UI 三道闸、cookie jar、录制保存；工具与面板共用 |
+| 浏览器引擎 | `src/uitest/engines*.ts`、`src/uitest/engines/` | `UiBrowserEngine` 契约 + `playwright` / `shared` 两实现（`cdp` 预留）；`RecorderCore` 语义共用 |
+
+## 可选依赖：共享真实浏览器（dsh-builtin-browser）
+
+UI 测试的默认引擎是 `auto`：**装了** [`dsh-builtin-browser`](https://github.com/wqty123/dsh-browser)（npm `dsh-builtin-browser@0.4.13`，MIT）就用它的 `ctx.browser` seam（人机同页/可接管）；**没装**就自动退回插件自己拉起的系统 Chrome（`playwright` 引擎），功能不受影响——这也是为什么它是 **optional peer dependency**（`>=0.4.13 <0.5.0`）。
+DSH 的 bundle 选择是 profile 级、不随 npm 依赖传递，所以想用共享浏览器时请**两个 bundle 一起装**：
+
+```bash
+# Desktop（推荐；侧栏浏览器需要额外装 bridge，见下文）
+dsh plugin --profile desktop add dsh-dataforge dsh-builtin-browser@0.4.13
+
+# Web（不需要 bridge，浏览器是插件自托管的独立窗口）
+dsh plugin --profile web add dsh-dataforge dsh-builtin-browser@0.4.13
+```
+
+- 安装后**完整重启** DSH；桌面端若要让浏览器落在官方侧栏（而不是独立窗口），还需在 `dsh-builtin-browser` 包目录执行一次 `node desktop-bridge/install.mjs`（会改已安装桌面端 `main.js`，首次备份、可 `--revert`，**DSH 升级后要重跑**）；
+- 不装 bridge 或桌面端版本不支持时，它会自动退回自托管窗口，功能不中断；
+- 该插件的权限边界（agent 可读侧栏页面与 Cookie、34 个 `dsh_browser_*` 工具）见其 README，装之前请确认接受；
+- 想显式选择引擎：`uiTestBrowser: auto|playwright|shared|cdp`（见「浏览器引擎」）；`shared` 下 `upload` 步骤不支持，需要上传的脚本切回 `playwright`。
 
 ## 三道闸（调用纪律，写进 dataforge_run 工具描述）
 
@@ -67,6 +96,9 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
     chainConcurrency: 4            # 硬上限 16
     chainResponseLimitBytes: 2097152
     chainCredentialPersistence: true  # 换票 cookie 落 dataRoot/credentials（0600）
+    uiTestEnabled: true            # UI 回放开关：关掉只拒跑，录制/脚本读写照常
+    uiStepTimeoutSeconds: 15       # UI 单步动作/断言超时（秒）
+    uiTestBrowser: auto            # auto | playwright | shared | cdp（见「浏览器引擎」）
 ```
 
 | 字段 | 说明 | 缺省 |
@@ -81,6 +113,9 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 | `chainConcurrency` | 执行：默认并发（就绪节点同时发出数），硬上限 16 | `4` |
 | `chainResponseLimitBytes` | 执行：单响应正文读取上限（字节），超过标 `truncated` | `2097152` |
 | `chainCredentialPersistence` | 换票结果持久化到 `dataRoot/credentials/cookies.json`（0600、按 origin）；关闭后只活一次运行 | `true` |
+| `uiTestEnabled` | UI 回放开关；关闭后 `dataforge_ui_run` 一律 `ui-test-disabled`（录制/脚本读写/历史回看照常） | `true` |
+| `uiStepTimeoutSeconds` | UI 回放：单步动作 + 断言超时（秒）；到点该步失败并留截图 | `15` |
+| `uiTestBrowser` | UI 测试浏览器引擎：`auto`（有共享浏览器就用 shared，否则 playwright）/ `playwright` / `shared` / `cdp`（预留，未实现时回退 playwright） | `auto` |
 
 ## 流程包发现（后写赢）
 
@@ -112,7 +147,7 @@ DataForge Loop（供应链造数引擎）是第一个内置流程包，但插件
 |---|---|---|
 | `dataforge_capture(task_type=action)` + `dataforge_browser_*` | agent 驱动真实交互（搜索/翻页/提交） | 写操作先经用户确认；会话期间遇到的 XHR 全部成卡；`headless:false` 可开可见 Chrome 供用户手动登录 |
 | `dataforge_capture(task_type=single_page)` | 单页静止期采集 | 走后台 job；jobs 不可用时**前台降级**执行（回执带 `degradedNotice`） |
-| 侧栏「数据采集」面板 | 单入口四标签：快速采集 / 接口库 / 采集网站 / 编排（与原型页一致；原「采集运行」页已移除，运行进度在快速采集页内联展示、历史在采集网站页聚合） | 快速采集只发起 single_page（FR-7.6），2 秒轮询进度，收口后按「页面 → 接口 → 形态」出文档 |
+| 侧栏「数据采集」面板 | 单入口五标签：快速采集 / 接口库 / 采集网站 / 编排 / UI 测试（原「采集运行」页已移除，运行进度在快速采集页内联展示、历史在采集网站页聚合） | 快速采集只发起 single_page（FR-7.6），2 秒轮询进度，收口后按「页面 → 接口 → 形态」出文档 |
 
 **手动登录（可见 Chrome）**：需要用户亲自登录（验证码/扫码/双因素）时，用可见模式开会话：
 
@@ -130,11 +165,38 @@ dataforge_capture(task_type=action, entry_url="https://目标站/", confirm=true
 
 - `interface_cards`：接口卡，身份 `(capture_id, merge_key)`——跨 run 同接口各留各的卡，同 run 内归并；
 - `page_card_relations`：`(card_id, page_url, params_fingerprint)` 幂等，同接口不同入参形态各一行，样本回指 `request_samples.relation_id`；
+- **页面身份口径**（「同一个页面」怎么判，`src/shared/page-url.ts`）：`pages.url` 与关系行 `page_url` 存**页面身份** = 协议 + host + 端口 + 路径 + hash 路由段；query（外层与 `#` 内）一律不参与——SPA 同路由的 `#/index?category=all`、`?_at_=…` 变体因此是一页。卡上的页面引用与 `request_samples.page_url` 保留真实访问过的原始 URL（面板展示/打开/重采与逐请求证据；无样本的静态页只剩页面身份）。历史库存的字面 URL 在面板与工具出口按同一口径归并展示（不改历史行）；面板站点页的 SPA 外壳入口（entryUrl 无 hash、同 run 采集页是它的 hash 路由页）不单独成页（`pages` 表/工具回执仍按访问记录列出）；
 - 入参指纹吃 **query + JSON 体 + 表单体**，数组保序、易变键（`_t`/`ts`/`sid`/token…）剔除——物料清单不同即不同形态；
 - 鉴权标志只记来源名（`header:authorization` / `header:cookie:JSESSIONID`），**凭证值永不入卡、永不出路由**；
 - 老库自动迁移：`merge_key` 全库唯一 → `(capture_id, merge_key)`；补 `notice` / `relation_id` 列；历史卡按 `related_pages_json` 补 `legacy` 关系行。
 
-**面板写入口纪律**：只收 `http/https`，拒本机回环与链路本地/云元数据地址；同 host 已有进行中采集 → `409 host-busy`；body 上限 8 KB（`413`）；响应一律剥除凭据原文与 `sessionId`。
+**三级名称（网站 / 页面 / 接口）**：
+
+- `pages.title` / `pages.site_name`：采集时从浏览器读 `document.title` 与 `og:site_name` / `application-name`（旧库缺列由启动迁移补齐、历史行留空）；
+- 旧数据补抓：面板「补抓名称」调 `POST /retitle`，用 `credential_events` 里的 cookie 无头重访缺标题页面；**最终页面身份必须等于目标身份才回写**（登录墙重定向只记 failed），正在采集的 host 本轮跳过；
+- 手工改名：`<dataRoot>/capture/names.yaml` 三级覆盖（site = 小写 host、page = 页面身份、interface = `merge_key`，跨重采稳定），`GET/POST /names` 读写；展示优先级 **手工名 > 编排名 > 自动名 > host/URL**——编排里已有的站点名（链 `meta.site`，经 overview 的 `site × hosts` 映射）在采集网站/接口库同样生效，网站自动名（标题推断）在面板带「自动取名」标；
+- 接口自动名：`semanticName` v2（路径去噪段 + 末两段 humanize、不带方法前缀）；`/cards` 与 `/runs/:id` 的卡片投影统一给 `mergeKey` / `name` / `nameSource`（`auto`|`manual`），客户端不自行拼名字；
+- 名称数据面路由：`GET /page-meta`（页面身份 → 标题/站点名投影）、`GET /names`、`POST /names`、`POST /retitle`、`GET /retitle/status`。
+
+**面板写入口纪律**：只收 `http/https`，拒本机回环与链路本地/云元数据地址；同 host 已有进行中采集 → `409 host-busy`；body 上限 8 KB（`413`）；响应一律剥除凭据原文与 `sessionId`；写入口仅 `POST /captures`、`/names`、`/retitle`，其余方法 405。
+
+## Trace 读取与自动编排分析（PRJ-0004 S1/S2）
+
+采集库里的 `request_samples` 已经是按 `seq` 排序的真实操作 trace。新增两个只读工具：
+
+| 工具 | 作用 | 纪律 |
+|---|---|---|
+| `dataforge_trace_get` | 读一条 capture 的有序请求/响应样本 | 敏感头只返回名字；正文区分 file/preview/缺失并标截断；默认 limit=200 / body_limit=8192 |
+| `dataforge_trace_analyze` | 通用分析：序列合并/polling、写操作、字段流转绑定、输入/输出、断言候选、覆盖率与 warning | 只用 HTTP 方法/序号/JSON 值匹配/JSONPath；无业务名称/URL/字段硬编码 |
+| `dataforge_chain_draft` | 按 `mergeKey` 匹配接口库卡，生成 `interface-chain` 草稿（节点/边/`$inputs`/expect）并跑现有链校验 | 不落正式版本、不执行；缺卡/缺必填入参/模板缺字段全部 warning；业务值不写进 YAML |
+| `dataforge_lookup` | 运行时从接口/页面查组织/供应商/物料等映射，带缓存/TTL/source | api 只读（GET/HEAD）；page 走 Playwright 只读选择器，不注入登录态；凭证用 `${ENV}` |
+| `dataforge_dataset_export` | 把链/UI run 留痕导出 `datasets/<runId>.json` + `evidence/<runId>/report.html` | 不重新执行；UI 运行会复制 success/failure 截图；不含请求头/凭证原文 |
+
+- 连续同接口同请求体的调用合并为一个节点（标 `polling`）；写操作请求体不同不合并；
+- 字段流转给 `from.{nodeId,path}` → `to.{nodeId,path}` + confidence；低置信度进 warning；
+- 动态值（UUID/长 hex/时间戳）不进 input，标 `unresolved-dynamic`；截断/非 JSON 正文也进 warning；
+- 真实 capture fixture 在 `test/fixtures/trace/`（公开页面、脱敏）；合成 fixture 用来测 precision/recall；
+- 需求与后续 S3 草稿生成见 [PRJ-0004 需求](docs/projects/PRJ-0004/requirement/auto-dataforge-loop.md)。
 
 ## 编排（接口库 → 接口链）
 
@@ -445,12 +507,177 @@ edges:                       # from 可为「节点.出参」或 $inputs.槽位�
 
 **⚠️ 常量里不要写凭证**：`constants` 会进版本文件，落盘时 `scanCredentialConstants` 会告警；凭证注入是执行期的事（R-4）。
 
+## UI 测试（浏览器录制 + 回放）
+
+面向「按键精灵式」页面自动化：录制一遍真实操作，回放时在无头 Chrome 里重现，并用页面断言判定通过/失败。
+它是**第三条执行面**——与接口链（纯 HTTP）分开：链断言响应字段，UI 脚本断言页面状态；两条线共享的只有项目资产目录与凭证纪律。
+
+### 工具（九个）
+
+| 工具 | 用途 |
+|---|---|
+| `dataforge_ui_record_open` | 打开可见 Chrome（不开始录；先登录/导航）；URL 只收 http/https |
+| `dataforge_ui_record_start` | 开始录制（注入 click/fill/select/submit/press 监听） |
+| `dataforge_ui_record_stop` | 停止录制：回步骤 + 持久化会话 cookie +（给了 site/flow 时）落新版本 |
+| `dataforge_ui_record_close` | 关闭录制浏览器 |
+| `dataforge_ui_script_get` | 列脚本 / 读某版本（doc + YAML 原文 + 可用版本） |
+| `dataforge_ui_script_upsert` | agent 手写/编辑脚本（YAML 进，校验全过才落 vN+1） |
+| `dataforge_ui_run` | 回放（三道闸：入参必填 → confirm 计划卡 → headless 执行 + 断言） |
+| `dataforge_ui_runs` | 运行列表 / 详情（事件流、失败步骤、证据路径） |
+| `dataforge_ui_batch_run` | 批量回归：选脚本（flows / site / 全部）→ 计划 → 串行回放 → 报告（`report.md` + `report.json`） |
+
+### 脚本文件（工作区项目资产）
+
+`.dsh/dataforge/ui-tests/<siteSlug>/<flowSlug>/vN.yaml`
+
+```yaml
+apiVersion: dataforge/v1
+kind: ui-script
+meta:
+  site: 百度网盘
+  flow: 文件列表探测
+  version: 1
+  created: 2026-10-17T21:00:00+08:00
+  source: record            # record | agent | canvas
+  startUrl: https://pan.baidu.com/disk/main
+  viewport: { width: 1280, height: 720 }
+inputs:                     # 回放时替换 {{name}}
+  - { name: keyword, type: string, required: true }
+steps:
+  - id: s1
+    kind: fill              # goto/click/fill/press/select/submit/wait/upload
+    selector: '#kw'
+    candidates: ['[data-testid="kw"]', '#kw']   # 有序候选：取第一个唯一命中
+    value: '{{keyword}}'
+  - id: s2
+    kind: click
+    selector: 'button:has-text("搜索")'
+    expect:
+      - { kind: visible, selector: '#result' }
+      - { kind: text, selector: '#echo', equals: '{{keyword}}' }
+      - { kind: url, contains: '/result' }
+```
+
+- **断言**（`expect`，步骤后校验，轮询到步骤超时）：`visible` / `hidden` / `text` / `value` / `url` / `count`；
+- **selector 容错**：录制器按 testid → id → name → aria-label → 文本 → CSS 路径生成候选，停止录制时用 Playwright 引擎校验唯一性；回放按序取第一个唯一命中，全失效则该步失败；
+- **入参槽位**：声明 `inputs` 并用 `{{name}}` 引用（url/value/key/files/断言文本）；引用了没声明、声明了没人用都会被校验拒绝；
+- **版本不可变**：写入永远分配 max+1；读时重新校验，坏文件如实报 `invalid-ui-script` + 可用版本。
+
+### 录制 → 回放闭环
+
+```text
+dataforge_ui_record_open(start_url, headless=false)   ← 可见 Chrome，用户登录/导航
+  → 用户完成登录
+dataforge_ui_record_start(session_id)                 ← 从这里开始进脚本
+  → 用户在浏览器里操作业务
+dataforge_ui_record_stop(session_id, site, flow)      ← 记录步骤 + cookie + 落 vN
+dataforge_ui_run(site, flow, inputs)                  ← 不带 confirm：计划卡
+  → 用户确认
+dataforge_ui_run(..., confirm=true)                   ← headless 回放 + 断言 + 失败截图
+```
+
+回放失败即停（fail-fast），**不自动重试**（重试 click/submit 可能重复写入）；先看
+`dataforge_ui_runs(run_id)` 的断点/断言/截图，再决定修脚本还是重录。
+
+### 边界与纪律（M1 如实标注）
+
+- **密码输入不录**：`input[type=password]` 直接跳过（凭证不入脚本），回执报跳过次数；回放登录态靠 cookie jar；
+- **文件选择不录**：浏览器不暴露用户选中的本地路径，`upload` 步骤请手写（路径可参数化）；
+- **录制只录动作**：断言由面板/agent 补（M2 起面板可编辑步骤与断言）；
+- **cookie**：录制结束写 `dataRoot/credentials/cookies.json`（0600、按 origin），回放按起点域名注入，回执只有条数；
+- **失败证据**：`dataRoot/ui-runs/<runId>/failure.png` + `failure.html`；运行记录与之同目录；
+- **不幂等**：回放会真点真提交；写操作确认闸沿用链路执行纪律（计划卡里如实给 click/submit/upload 步数）；
+- **仍未做**：坐标级点击（canvas/非 DOM 控件）、多标签页跟随、iframe 切换显式建模、定时调度/CI 集成、截图对比断言、网络断言联动。
+
+### 面板
+
+侧栏「数据采集」→ 第 5 个页签「UI 测试」：左列脚本列表 + 录制表单（打开浏览器 / 开始录制 / 停止并保存 / 关闭浏览器），右列步骤表（含断言）、回放计划与确认、每步/断言结果、失败截图、运行记录。面板不重复实现闸门，全部走与 agent 工具同一套应用层。
+
+**clickPoint 的控件名**：`clickPoint.name` 记录被点击控件的可读名字（aria-label → 可见文本/按钮 value → title/placeholder/alt → name 属性），便于诊断；候选链全失败时也会用这个名字做 `text=` 兜底。
+
+**录制语义特征（跨布局兜底）**：新录的脚本会额外保存目标的 `features`（tag/id/testid/name/aria-label/placeholder/role/文本/title/alt/href/关联 label/canvas 序号）；回放的候选链（testid → id → name → aria → placeholder/title/href/role/text → CSS 路径）全失败时，再用这些特征生成备用定位（含 `text=` / `:has-text`）重试。旧脚本没有 `features` 时行为不变；要获得这层兜底需要**重录**。
+
+**canvas 图表 / 坐标点击（回放重算）**：图表类目标只有 canvas，没有稳定选择器；录制器把真实落点存成**元素内比例** `fx/fy`（视口坐标只作最后兜底）。回放按三级策略：
+1. 原元素还在、且 rect 与录制时一致（±1.5px）→ **直接用录制坐标**；
+2. 原元素还在但移动/缩放了 → 用当前 rect 重算 `rect.x + fx * rect.width`；
+3. 原元素找不到 → 用 `features` 重新找回元素，再按新 rect 重算；都找不到才退回录制视口坐标按比例缩放。
+普通元素仍优先语义点击（元素中心由浏览器算），canvas 才走坐标。旧脚本没有 `clickPoint`，需要重录；另外若某步在当前页找不到目标、但录了 `at`（该步所在页面），回放会导航到 `at` 再重试一次（兼容旧脚本/点击未跳转的流程）。
+
+**回放速度（慢放）**：步骤表旁可选「正常 / 0.5s / 1s / 2s 每步」；慢放只影响步骤之间的观察节奏，不改变单步超时预算。Playwright 引擎可勾选「显示浏览器窗口」（慢放建议勾选；共享浏览器本来就在右侧栏可见）。另有「点击动画」开关（缺省开）：每次点击前在落点画脉冲光圈+圆点，`pointer-events:none` 不拦截操作，慢放时能看清点了哪里。**「末尾停留」**（缺省停 2s）让最后一步/动画在关闭浏览器前可见；选「结束即关闭」则不等待。速度/开关会随面板状态持久化；agent 侧用 `dataforge_ui_run(slow_mo_ms=…, highlight_clicks=true/false, headless=false)`。
+
+#### 批量回归与报告（M3）
+
+```text
+dataforge_ui_batch_run(site="百度网盘")              ← 不带 confirm：计划卡（选中的脚本/缺参/写操作数）
+  → 用户确认
+dataforge_ui_batch_run(site="百度网盘", confirm=true) ← 串行回放，逐条复用单次执行
+  → result: total/passed/failed/skipped + report.md / report.json 路径
+```
+
+- **选择口径**：`flows: ["站点/流程", "站点/流程@版本"]` > `site` 过滤 > 全部脚本（缺省 `limit` 20，上限 50）；
+- **缺参脚本**：计划卡列出缺哪些入参，执行时记为 `skipped + 原因`，不从总数里消失；
+- **单条失败不中断整批**；每条脚本的 runId / 断言 / 截图与单次回放完全一致；
+- **报告**：`dataRoot/ui-batches/<batchId>/` 下的 `report.md`（人看）与 `report.json`（CI 消费），面板「批量回归」卡片可点开。
+
+#### 自动命名（站点/流程留空也能落盘）
+
+- 站点名：优先页面 `og:site_name` / `application-name`，否则取域名（去 `www.`/端口）；
+- 流程名：优先页面标题（去掉站点名与 ` - / | / ·` 等分隔符），否则取 URL 最后一个有意义的路径段，再兜底 `录制-MMDD-HHmm`；
+- 打开浏览器时回执带 `suggestedSite/suggestedFlow` 供面板预填；停止保存时仍为空就按**当时的真实页面**自动命名，并写进 `meta.site/meta.flow`（回执会说明“已自动命名”，之后可改 YAML）。
+
+#### 浏览器引擎（可切换，seam / Playwright 同一契约）
+
+录制与单条回放都走 `UiBrowserEngine` 契约（`src/uitest/engines.ts`），按 `config.uiTestBrowser` 选择实现：
+
+| 引擎 | 承载 | 适合 | 边界 |
+|---|---|---|---|
+| `playwright` | dataforge 自己拉起系统 Chrome（可见窗录制 / 无头回放） | CI、批量、需要上传/特殊按键的脚本 | 独立窗口，人不在同一页 |
+| `shared` | `dsh-builtin-browser` 的 `ctx.browser` seam（桌面侧栏/自托管窗口，人机同页） | 人工登录/接管、边看边录 | **upload 不支持**（seam 无文件选择通道）；登录态由共享浏览器自己的 profile 管理 |
+| `cdp` | 预留：未来给 `dsh-builtin-browser` 暴露 CDP 端点后，用 `connectOverCDP` 复用 Playwright 引擎 | — | 尚未实现，当前回退 playwright |
+| `auto` | 有共享浏览器用 `shared`，否则 `playwright` | 默认 | — |
+
+- 共享引擎的录制：页面注入录制脚本 → 事件进 `__dfUiSeamQueue` → 宿主轮询 drain，**去重/脱敏/步骤生成与 Playwright 引擎共用 `RecorderCore`**；
+- 共享引擎打开页面时会把**当前对话 id**（`ctx.agents.list()[0].id`）作为 owner 传给插件，页面才会落在该对话自己的右侧栏面板；拿不到对话 id 时如实报错（不会假装打开成功）；
+- 共享引擎的回放：navigate/click/setValue/key/execute/screenshot，断言在页面内求值，run 留痕/失败截图与 Playwright 引擎同构；
+- **批量回归固定走 Playwright 无头**（共享浏览器一次只适合一条、会抢窗口）；
+- 切换只需改 `uiTestBrowser` 并重启宿主；`UiTestDeps.resolveEngine()` 是唯一选择点，未来接入 CDP 引擎不改 application/tools/panel。
+
+#### 为什么不用右侧 Sidebar 浏览器（DSH 内置）
+
+DSH 桌面端自带右侧 Sidebar「浏览器」tab（`dsh-client-ui-sidebar-browser`：Desktop 是 Electron `<webview>`，Web 是 sandbox iframe）。它**只能当查看面**，不能当 UI 测试的执行面：
+
+- 官方明确**不向被访问页面注入 Electron/Node 能力**，也不暴露 DOM / 事件 / CDP 自动化接口；
+- Web 版是跨域 sandbox iframe，拿不到目标页 DOM；Electron webview 同样没有给插件的注入通道；
+- 因此「录制点击/输入」与「驱动回放/断言」都做不到——那不是配置问题，是这条通道的能力边界。
+
+本插件与它的集成只有一件事：脚本详情页的 **「在侧栏浏览器打开」**（调 client 服务 `sidebarRight.openResource(url)`），用于人工盯着起点页核对；自动化录制/回放仍用插件自己拉起的系统 Chrome（录制可见窗、回放无头）。回放实时画面（CDP screencast 推流到侧栏/面板）是后续方向，不是现状。
+
+**右侧栏「录制控制」tab**：共享浏览器打开在右侧栏时，录制按钮在 dataforge 面板里会“隔一层”。面板打开浏览器后会顺手在右侧栏注册/打开一个「录制控制」tab（尽量与浏览器并排分格；分格不可用就作为同格第二个 tab）：开始录制 / 停止并保存 / 关闭浏览器，停止时站点/流程留空也会自动命名。浏览器 tab 仍然保留，可随时切过去登录/操作。
+
+**录制脚本升级**：页面内的录制器/选择器脚本带版本号，宿主升级后会替换旧脚本（旧监听器先失活），不会出现“重启了但录出来还是旧格式”。**脚本列表自动刷新**（5s）+ 手动「刷新」；从侧栏「录制控制」保存后会直接切到新保存的版本。
+
+**切走再回来不丢状态**：面板按需挂载（离开会卸载 React 树），但录制表单、选中的脚本、浏览器会话 id、回放入参会写入 `sessionStorage`，回来时恢复；同时每 2.5s 轮询服务端会话对齐录制状态——浏览器被关掉或宿主重启后，失效的会话会被清掉，不会对着一个不存在的 session 点开始录制。
+
+#### 面板内编辑（M2）
+
+脚本详情页的「编辑脚本」进入编辑态（保存只落新版本 vN+1，`source: canvas`，旧版本保留）：
+
+- **步骤**：改 kind / selector / value / url / key / ms，增删、上下移动，任意步骤后插入「等待」；
+- **断言**：每步内增删 `visible / hidden / text / value / url / count`，填 `equals` / `contains`；
+- **点选元素**：selector 旁的「从页面点选」把已打开的可见浏览器切到点选模式——捕获阶段吞掉点击（不会误触业务、也不会进录制步骤），点中元素后自动回填候选 `selector` + `candidates`；需要会话已打开且不在录制中；
+- **保存**：客户端回传整份 doc，服务端 `parseUiScriptDoc` 校验全过才落盘；校验不过返回逐条 `target：reason`；
+- **另存为新流程**：复制当前步骤到新的站点/流程（v1），原流程不受影响——适合「同一套操作、只改选择的类型/选项」的变体；改完值保存后回到面板直接对**新流程**点回放即可。同一流程只想换几组值，优先用入参槽位 `{{name}}`（录制后手工把值改成槽位，回放前填值）。
+
 ## 验证
 
 ```bash
 pnpm typecheck   # tsc --noEmit
 pnpm test        # vitest：全量用例（含真引擎 dry-run 集成；python3 + engineRoot 存在时自动启用）
-pnpm build       # tsdown → dist/ + lib/client.js（含画布，约 331 KB）
+pnpm build       # tsdown → dist/ + lib/client.js（含画布与 UI 测试页，约 369 KB）
+# 真 Chrome 的 UI 录制→回放/点选端到端（默认跳过；需要本机 Chrome）：
+UI_E2E=1 pnpm exec vitest run test/uitest/e2e-local.test.ts
+# 共享浏览器引擎（seam）用假 seam 单测（不依赖 dsh-builtin-browser）：
+pnpm exec vitest run test/uitest/shared-engine.test.ts
 ```
 
 直接 CLI 冒烟：

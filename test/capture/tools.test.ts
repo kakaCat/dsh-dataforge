@@ -29,7 +29,7 @@ function buildCloseTool(): { tool: { execute: (a: { session_id: string }) => Pro
     captureStabilityWindowMs: 1500,
     captureBodyLimitBytes: 262_144,
     captureChromeChannel: 'chrome',
-    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true,
+    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true, uiTestEnabled: true, uiStepTimeoutSeconds: 15, uiTestBrowser: 'playwright',
   }
   const deps: CaptureDeps = {
     config,
@@ -68,7 +68,7 @@ it('browser_close：raw cookie 逐条入库，工具输出只有 name/domain 摘
     engineRoot: dir, pythonBin: 'python3', dataRoot: join(dir, 'data'), timeoutSeconds: 600,
     injectPolicy: false, captureMaxDepth: 3, captureMaxPages: 50,
     captureStabilityWindowMs: 1500, captureBodyLimitBytes: 262_144, captureChromeChannel: 'chrome',
-    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true,
+    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true, uiTestEnabled: true, uiStepTimeoutSeconds: 15, uiTestBrowser: 'playwright',
   }
   store.upsertRun({
     id: 'cap_c', taskType: 'action', entryUrl: 'https://x.test/', status: 'running', startedAt: Date.now(),
@@ -123,7 +123,7 @@ function buildDeps(): { deps: CaptureDeps; store: CaptureStore } {
     engineRoot: dir, pythonBin: 'python3', dataRoot: join(dir, 'data'), timeoutSeconds: 600,
     injectPolicy: false, captureMaxDepth: 3, captureMaxPages: 50,
     captureStabilityWindowMs: 1500, captureBodyLimitBytes: 262_144, captureChromeChannel: 'chrome',
-    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true,
+    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true, uiTestEnabled: true, uiStepTimeoutSeconds: 15, uiTestBrowser: 'playwright',
   }
   const deps: CaptureDeps = {
     config,

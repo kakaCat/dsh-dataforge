@@ -314,3 +314,165 @@ it('notice 列迁移：无 notice 列的旧库打开后 ALTER 补齐，数据不
   store.close()
 })
 
+
+it('listPages：历史字面 URL 变体按页面身份归并（只影响投影；最近访问为准）', () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_pages', taskType: 'action', entryUrl: 'https://pan.baidu.com/disk/main',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  // 关系模型引入前的历史库存的是字面 page.url()：同一 SPA 页面会有多行
+  store.upsertPage('cap_pages', 'https://pan.baidu.com/disk/main#/index', 0, 'ok')
+  store.upsertPage('cap_pages', 'https://pan.baidu.com/disk/main#/index?category=all', 0, 'ok')
+  store.upsertPage('cap_pages', 'https://pan.baidu.com/disk/main?_at_=1792240465584#/index?category=all', 0, 'ok')
+  store.upsertPage('cap_pages', 'https://pan.baidu.com/', 0, 'ok')
+
+  const urls = store.listPages('cap_pages').map((p) => p.url)
+  expect(urls).toHaveLength(2)
+  expect(new Set(urls)).toEqual(new Set(['https://pan.baidu.com/', 'https://pan.baidu.com/disk/main#/index']))
+  store.close()
+})
+
+it('listPages：先按身份归并再截断（历史多变体不会把后面的页面挤出 limit）', async () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_lim', taskType: 'action', entryUrl: 'https://x.test/',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  store.upsertPage('cap_lim', 'https://x.test/older', 0, 'ok')
+  await new Promise((resolve) => setTimeout(resolve, 3))
+  store.upsertPage('cap_lim', 'https://x.test/dup#/a?x=1', 0, 'ok')
+  await new Promise((resolve) => setTimeout(resolve, 3))
+  store.upsertPage('cap_lim', 'https://x.test/dup#/a', 0, 'ok')
+
+  // 最新两行是同一身份：先 LIMIT 2 再归并的旧实现只会返回 1 条、漏掉 older
+  const pages = store.listPages('cap_lim', 2)
+  expect(pages.map((p) => p.url)).toEqual(['https://x.test/dup#/a', 'https://x.test/older'])
+  store.close()
+})
+
+it('pages 幂等：同 (capture_id,url) 重复写入只留一行、页数不重复计；非空 meta 增量补，空值不覆盖', () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_page_meta', taskType: 'single_page', entryUrl: 'https://x.test/',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  const first = store.upsertPage('cap_page_meta', 'https://x.test/a', 0, 'ok', { title: '首页标题' })
+  const again = store.upsertPage('cap_page_meta', 'https://x.test/a', 0, 'ok', { siteName: '示例站点' })
+  expect(again).toBe(first)
+  expect(store.getRun('cap_page_meta')?.stats.pages).toBe(1)
+  expect(store.listPages('cap_page_meta')).toEqual([
+    expect.objectContaining({ id: first, url: 'https://x.test/a', title: '首页标题', siteName: '示例站点' }),
+  ])
+
+  // 空串/未给 meta 不覆盖已有值（补抓只补缺）
+  store.upsertPage('cap_page_meta', 'https://x.test/a', 0, 'ok', { title: '   ', siteName: '' })
+  expect(store.listPages('cap_page_meta')[0]).toMatchObject({ title: '首页标题', siteName: '示例站点' })
+  store.close()
+})
+
+it('listPageMeta：按页面身份去重（最新访问者胜）、跳过非 http(s)、空标题不造字段', async () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_meta', taskType: 'action', entryUrl: 'https://x.test/',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  store.upsertPage('cap_meta', 'https://x.test/a#/list?tab=1', 0, 'ok', { title: '列表页' })
+  await new Promise((resolve) => setTimeout(resolve, 3))
+  store.upsertPage('cap_meta', 'https://x.test/a#/list', 0, 'ok', { siteName: '示例站点' })
+  await new Promise((resolve) => setTimeout(resolve, 3))
+  store.upsertPage('cap_meta', 'https://x.test/b', 0, 'ok')
+  store.upsertPage('cap_meta', 'about:blank', 0, 'ok')
+
+  // 最新访问者在前：b（最后一次访问）在 a#/list（同一身份的第二次访问）之前。
+  // 之前没有等时间片，visited_at 同毫秒时排序退化成行顺序，并行跑测试会随机翻转。
+  const rows = store.listPageMeta()
+  expect(rows.map((row) => row.url)).toEqual(['https://x.test/b', 'https://x.test/a#/list'])
+  const listPage = rows.find((row) => row.url === 'https://x.test/a#/list')
+  expect(listPage).toMatchObject({ title: '列表页', siteName: '示例站点' })
+  expect(typeof listPage?.visitedAt).toBe('number')
+  // 无标题的页面：只缺该键，不出现空串字段
+  expect(rows.find((row) => row.url === 'https://x.test/b')).not.toHaveProperty('title')
+})
+
+it('applyPageMeta：按页面身份匹配所有历史行、空值不覆盖、返回更新行数', () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_apply', taskType: 'action', entryUrl: 'https://x.test/',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  // 历史字面 URL 变体两行，同一身份
+  store.upsertPage('cap_apply', 'https://x.test/a#/list', 0, 'ok')
+  store.upsertPage('cap_apply', 'https://x.test/a?_at_=1#/list?tab=1', 0, 'ok')
+  store.upsertPage('cap_apply', 'https://x.test/other', 0, 'ok', { title: '别的页' })
+
+  expect(store.applyPageMeta('https://x.test/a?_at_=2#/list', '补抓标题', '站点名')).toBe(2)
+  const listPages = store.listPages('cap_apply').filter((page) => page.url === 'https://x.test/a#/list')
+  expect(listPages).toHaveLength(1)
+  expect(listPages[0]).toMatchObject({ title: '补抓标题', siteName: '站点名' })
+  expect(store.listPages('cap_apply').find((page) => page.url === 'https://x.test/other')?.title).toBe('别的页')
+
+  // 空值不覆盖旧值；无可用值时不更新任何行
+  expect(store.applyPageMeta('https://x.test/a#/list', '', '')).toBe(0)
+  store.applyPageMeta('https://x.test/a#/list', '  ', undefined)
+  expect(store.listPages('cap_apply').find((page) => page.url === 'https://x.test/a#/list')?.title).toBe('补抓标题')
+  // 不存在的身份：0 行
+  expect(store.applyPageMeta('https://x.test/absent', '标题')).toBe(0)
+})
+
+it('pages.title/site_name 列迁移：旧库打开后 ALTER 补齐，历史行原样保留', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'capture-legacy-pages-'))
+  const dbPath = join(dir, 'capture.sqlite')
+  const legacy = new Database(dbPath)
+  legacy.exec(`
+    CREATE TABLE capture_runs (
+      id TEXT PRIMARY KEY, task_type TEXT NOT NULL, entry_url TEXT NOT NULL,
+      status TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER,
+      stats_json TEXT NOT NULL DEFAULT '{}', error TEXT
+    );
+    CREATE TABLE pages (
+      id TEXT PRIMARY KEY, capture_id TEXT REFERENCES capture_runs(id), url TEXT NOT NULL,
+      depth INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ok', visited_at INTEGER NOT NULL
+    );
+    INSERT INTO capture_runs(id,task_type,entry_url,status,started_at,stats_json)
+      VALUES('cap_old','single_page','https://old.test/','done',1,'{"pages":1,"requests":0,"cards":0,"credentials":0}');
+    INSERT INTO pages(id,capture_id,url,depth,status,visited_at)
+      VALUES('pg_old','cap_old','https://old.test/a',0,'ok',1);
+  `)
+  legacy.close()
+
+  const store = new CaptureStore(dbPath, join(dir, 'samples'))
+  // 历史行保留（标题列新加，值为 NULL）；补抓可回写
+  expect(store.listPageMeta()).toEqual([
+    { url: 'https://old.test/a', visitedAt: 1 },
+  ])
+  expect(store.applyPageMeta('https://old.test/a', '补抓标题')).toBe(1)
+  expect(store.listPageMeta()[0]).toMatchObject({ title: '补抓标题' })
+  store.close()
+})
+
+it('listCookieJson：只回 kind=cookie 的 value_json 原文（补抓复用登录态）', () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_cookie', taskType: 'single_page', entryUrl: 'https://x.test/',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  const cookieJson = JSON.stringify({ name: 'SID', value: 'v', domain: '.x.test', path: '/' })
+  store.upsertCredential('cap_cookie', 'cookie', 'https://x.test/', 'SID', 1, JSON.parse(cookieJson))
+  store.upsertCredential('cap_cookie', 'token', 'https://x.test/api', 'header:authorization', 2, { value: 'secret' })
+  expect(store.listCookieJson()).toEqual([cookieJson])
+})
+
+it('卡片投影带 mergeKey（面板手工名的持久化键）', () => {
+  const { store } = newStore()
+  store.upsertRun({
+    id: 'cap_mk', taskType: 'single_page', entryUrl: 'https://x.test/',
+    status: 'running', startedAt: 1, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
+  })
+  const mergeKey = mergeKeyOf('GET', '/api/list?page=1')
+  const id = store.upsertCard('cap_mk', {
+    mergeKey, method: 'GET', urlTemplate: '/api/list?page=1', relatedPageUrls: [],
+  })
+  expect(store.getCard(id)?.mergeKey).toBe(mergeKey)
+  expect(store.listAllCards()[0]?.mergeKey).toBe(mergeKey)
+})

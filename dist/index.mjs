@@ -1,11 +1,12 @@
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { spawn } from "node:child_process";
 import yaml from "js-yaml";
 import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
+import { chromium } from "playwright-core";
 
 //#region node_modules/.pnpm/@deepseek-ai+cosmokit@1.8.5/node_modules/@deepseek-ai/cosmokit/lib/index.js
 /** Return true when a value is `null` or `undefined`. */
@@ -922,7 +923,15 @@ const Config = Schema.object({
 	chainNodeTimeoutSeconds: Schema.number().default(30),
 	chainConcurrency: Schema.number().default(4),
 	chainResponseLimitBytes: Schema.number().default(2097152),
-	chainCredentialPersistence: Schema.boolean().default(true)
+	chainCredentialPersistence: Schema.boolean().default(true),
+	uiTestEnabled: Schema.boolean().default(true),
+	uiStepTimeoutSeconds: Schema.number().default(15),
+	uiTestBrowser: Schema.union([
+		"auto",
+		"playwright",
+		"shared",
+		"cdp"
+	]).default("auto")
 });
 /** 归一化（相对路径 → 绝对；~ 展开）。 */
 function normalizeConfig(raw) {
@@ -942,7 +951,10 @@ function normalizeConfig(raw) {
 		chainNodeTimeoutSeconds: raw.chainNodeTimeoutSeconds,
 		chainConcurrency: raw.chainConcurrency,
 		chainResponseLimitBytes: raw.chainResponseLimitBytes,
-		chainCredentialPersistence: raw.chainCredentialPersistence ?? true
+		chainCredentialPersistence: raw.chainCredentialPersistence ?? true,
+		uiTestEnabled: raw.uiTestEnabled,
+		uiStepTimeoutSeconds: raw.uiStepTimeoutSeconds,
+		uiTestBrowser: raw.uiTestBrowser
 	};
 }
 
@@ -1817,18 +1829,75 @@ function paramsFingerprintOf(rawUrl, requestBody) {
 function sha256(input) {
 	return createHash("sha256").update(input).digest("hex").slice(0, 16);
 }
-/** 语义化名称（§6.3 六要素之一）：method + 最后一个具名路径段（先过 {@link normalizeUrlForTemplate} 抽 {p}），全抽象时退回 host。 */
+/**
+* 接口名的噪声路径段：接口前缀 / 客户端壳层 / 静态资源，不含业务语义。
+*
+* 与「版本段（v1 / v1.2 / 1.2）、纯数字段、`{p}` 占位段」一起剥掉，剩下的末两段才是名字来源。
+* 全小写比较（`API`、`Rest` 同样算噪声）。
+*/
+const SEMANTIC_NOISE_SEGMENTS = /* @__PURE__ */ new Set([
+	"api",
+	"apis",
+	"sapi",
+	"vapi",
+	"rest",
+	"restapi",
+	"openapi",
+	"ajax",
+	"cgi-bin",
+	"web",
+	"www",
+	"index",
+	"index.html",
+	"service",
+	"services",
+	"controller",
+	"internal",
+	"pub",
+	"public",
+	"static",
+	"assets",
+	"pc",
+	"h5",
+	"app"
+]);
+/** 占位段（`{p}` / `{id}`）：匿名参数不构成名字。 */
+const PLACEHOLDER_SEGMENT_RE = /^\{[^}]*\}$/;
+/** 纯数字段（路径 id）：不是名字。 */
+const PURE_NUMBER_SEGMENT_RE = /^\d+$/;
+/** 版本段：v1 / V2 / v1.2 / 1.2（纯数字段会先被更早的规则剥掉，这里只兜版本形态）。 */
+const VERSION_SEGMENT_RE = /^v?\d+(?:\.\d+)*$/i;
+/** 单段 humanize：驼峰拆词、`_-.` 变空格、压空白、小写化。 */
+function humanizePathSegment(segment) {
+	return segment.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").replace(/[_\-.\s]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+}
+function isNoisePathSegment(segment) {
+	if (segment === "") return true;
+	if (PLACEHOLDER_SEGMENT_RE.test(segment)) return true;
+	if (PURE_NUMBER_SEGMENT_RE.test(segment)) return true;
+	if (VERSION_SEGMENT_RE.test(segment)) return true;
+	return SEMANTIC_NOISE_SEGMENTS.has(segment.toLowerCase());
+}
+/**
+* 语义化名称 v2（§6.3 六要素之一）：路径去噪后取**最后两段** humanize，用 ` · ` 连接。
+*
+* 与 v1 的差别：
+*   - 名字**不带方法前缀**（方法在界面上另有徽标，名字只描述接口语义）；
+*   - 不只看最后一段：`aichat/api/messages/list` 也读得出 `messages · list`；
+*   - 剥掉接口前缀（api/sapi/rest…）、版本段、纯数字 id 与 `{p}` 占位段；
+*   - 什么都剥没了才退回 `${method} ${host}`（没有 host 用 capture.local）。
+*/
 function semanticName(method, urlTemplate) {
 	const pathOnly = normalizeUrlForTemplate(urlTemplate).urlTemplate.split("?")[0];
+	const picked = pathSegmentsOf(pathOnly).filter((segment) => !isNoisePathSegment(segment)).slice(-2).map(humanizePathSegment).filter((segment) => segment !== "");
+	if (picked.length > 0) return picked.join(" · ");
 	let host = "";
 	try {
 		host = new URL(pathOnly, "http://capture.local").host;
 	} catch {
 		host = "";
 	}
-	const named = pathSegmentsOf(pathOnly).filter((s) => s !== "{p}");
-	const last = named[named.length - 1] ?? "";
-	return last === "" ? `${method} ${host}` : `${method} ${last}`;
+	return `${method} ${host === "" ? "capture.local" : host}`;
 }
 const TOKEN_HEADERS$1 = /* @__PURE__ */ new Set(["authorization", "proxy-authorization"]);
 const TOKEN_PARAM_KEYS = /* @__PURE__ */ new Set([
@@ -2097,6 +2166,70 @@ function responseToRawSample(wire, bodyLimit) {
 		truncated: responseOversized || requestOversized
 	};
 }
+const PAGE_TITLE_MAX = 300;
+const PAGE_SITE_NAME_MAX = 80;
+/** 页面内取标题/站点名的表达式（字符串形式：本 tsconfig 不含 DOM lib，且与 session.eval 同风格）。 */
+const PAGE_META_SCRIPT = `(() => {
+  const contentOf = (selector) => {
+    try {
+      const el = document.querySelector(selector)
+      return el === null ? '' : (el.getAttribute('content') || '')
+    } catch (err) {
+      return ''
+    }
+  }
+  return {
+    title: typeof document.title === 'string' ? document.title : '',
+    siteTags: [
+      contentOf('meta[property="og:site_name"]'),
+      contentOf('meta[name="application-name"]'),
+      contentOf('meta[name="apple-mobile-web-app-title"]')
+    ]
+  }
+})()`;
+/** 空白压缩：换行/连续空格压成单空格并去首尾（标题里常见「站点 \\n | 页面」）。 */
+function cleanMetaText$1(value) {
+	if (typeof value !== "string") return "";
+	return value.replace(/\s+/g, " ").trim();
+}
+/**
+* 读当前页面的标题与站点名。
+*
+* - title 来自 `document.title`（≤300 字符）；
+* - siteName 依次取 `og:site_name` → `application-name` → `apple-mobile-web-app-title`（≤80 字符）；
+* - 读不到/页面已销毁 → 只回 `{ url }`，绝不抛错（采集旁路不因元信息失败中断）。
+*/
+async function readPageMeta(page) {
+	let url = "";
+	try {
+		url = page.url();
+	} catch {
+		url = "";
+	}
+	try {
+		const raw = await page.evaluate(PAGE_META_SCRIPT);
+		const record = raw !== null && typeof raw === "object" ? raw : {};
+		const title = cleanMetaText$1(record.title).slice(0, 300);
+		let siteName = "";
+		const candidates = Array.isArray(record.siteTags) ? record.siteTags : [];
+		for (const candidate of candidates) {
+			const cleaned = cleanMetaText$1(candidate);
+			if (cleaned !== "") {
+				siteName = cleaned.slice(0, 80);
+				break;
+			}
+		}
+		return {
+			url,
+			...title === "" ? {} : { title },
+			...siteName === "" ? {} : { siteName }
+		};
+	} catch {
+		return { url };
+	}
+}
+/** 标题上报防抖窗口：SPA 一次导航常连发 load/framenavigated，150ms 内合并成一次读页面。 */
+const PAGE_META_DEBOUNCE_MS = 150;
 /**
 * 起一次会话：无头 chrome（channel: 'chrome' 系统浏览器）
 * + 旁路 CDP response 流（只收 xhr/fetch，静态资源全滤）。
@@ -2152,6 +2285,21 @@ async function openCapturingPage(channel, onWireSample, options = {}) {
 			} catch {}
 		})().catch(() => void 0);
 	});
+	if (options.onPageMeta !== void 0) {
+		const onPageMeta = options.onPageMeta;
+		let timer;
+		const report = () => {
+			if (timer !== void 0) clearTimeout(timer);
+			timer = setTimeout(() => {
+				timer = void 0;
+				readPageMeta(page).then((meta) => onPageMeta(meta)).catch(() => void 0);
+			}, PAGE_META_DEBOUNCE_MS);
+		};
+		page.on("load", report);
+		page.on("framenavigated", (frame) => {
+			if (frame === page.mainFrame()) report();
+		});
+	}
 	return {
 		browser,
 		context,
@@ -2356,8 +2504,77 @@ function harvestTokenCredentials(store, captureId) {
 }
 
 //#endregion
+//#region src/shared/page-url.ts
+/**
+* 页面身份归一（采集域「同一个页面」的唯一判定口径，纯函数、零 I/O）。
+*
+* 背景：旁路采集记的是每个请求发生时的 `page.url()`，而 SPA（百度网盘这类 hash 路由）
+* 会在同一个页面上产出多个字面 URL：
+*
+*   https://pan.baidu.com/disk/main#/index?category=all
+*   https://pan.baidu.com/disk/main#/index
+*   https://pan.baidu.com/disk/main?_at_=1792240465584#/index?category=all
+*
+* 三者是同一个页面（同一路由、同一批接口），按字面 URL 分组会把它们拆成三行。
+*
+* 口径：**页面身份 = 协议 + host + 端口 + 路径 + hash 路由段**。
+*
+* - 外层 query 与 hash 内 query **都不参与身份**：它们是页面状态/筛选条件（`_at_` 这类
+*   反缓存戳、`category=all` 这类筛选），同一页面换状态不该换身份；
+* - hash 只有形如 `#/route` / `#!/route` 时才当路由保留（SPA 的页面路由就在 hash 里；
+*   hashbang 归一成 `#/route`）；普通锚点（`#section`）不构成另一个页面，丢弃；
+* - 路径空 → `/`，非根路径去掉结尾 `/`（`/a/` 与 `/a` 是同一页）；host 大小写与默认端口由 URL 归一；
+* - 非 http(s) / 非法 URL 去首尾空白后**原样返回**：采集旁路不允许因为归一化失败丢样本
+*   （与指纹口径一致）；
+* - 百分号编码不做解码/重编码（`/%7Eu` 与 `/~u`、`%2f` 与 `%2F` 视为不同）：这些差异在
+*   真实站点上可能是业务语义，宁可不并也不误并；同一字面写法下函数幂等（`f(f(x)) === f(x)`）。
+*
+* 落库口径：`pages.url` / 关系行 `page_url` 存身份串；卡上的页面引用与
+* `request_samples.page_url` 保留真实访问过的原始 URL（展示/打开/重采与逐请求证据），
+* 分组时各消费方再归一一遍。
+*
+* @module dsh-dataforge/shared/page-url
+*/
+const HTTP_PROTOCOLS = /* @__PURE__ */ new Set(["http:", "https:"]);
+/** 原始页面 URL → 页面身份（可用作 Map key / 落库的 page_url）。 */
+function pageIdentityOf(rawUrl) {
+	const raw = rawUrl.trim();
+	if (raw === "") return "";
+	let parsed;
+	try {
+		parsed = new URL(raw);
+	} catch {
+		return raw;
+	}
+	if (!HTTP_PROTOCOLS.has(parsed.protocol)) return raw;
+	return `${parsed.origin}${normalizePath$1(parsed.pathname)}${hashRouteOf(parsed.hash)}`;
+}
+/** 路径归一：空路径与只有斜杠都是 `/`；其余去掉结尾斜杠。查询串已在上游丢弃。 */
+function normalizePath$1(pathname) {
+	if (pathname === "" || pathname === "/") return "/";
+	const stripped = pathname.replace(/\/+$/, "");
+	return stripped === "" ? "/" : stripped;
+}
+/**
+* hash → 路由段（含 `#`，不含 query）。
+*
+* 只认 `#/…` 与 `#!/…`：普通锚点（`#top`）不是页面，返回空串；
+* 根路由（`#/`）等同于无 hash，也返回空串。
+*/
+function hashRouteOf(hash) {
+	if (!hash.startsWith("#")) return "";
+	let rest = hash.slice(1);
+	if (rest.startsWith("!")) rest = rest.slice(1);
+	if (!rest.startsWith("/")) return "";
+	const queryAt = rest.indexOf("?");
+	if (queryAt !== -1) rest = rest.slice(0, queryAt);
+	const route = rest.length > 1 ? rest.replace(/\/+$/, "") : rest;
+	return route === "" || route === "/" ? "" : `#${route}`;
+}
+
+//#endregion
 //#region src/capture/application.ts
-const sleep$1 = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+const sleep$4 = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 /**
 * 单次采集样本上限（§11 A9）：一次 run 至多入库 1000 条样本，超出如实弃采并在 run 上附 notice。
 * 用模块常量而非 config 项——上限是采集纪律（验收基准），不是部署调参。
@@ -2367,7 +2584,7 @@ function newCardAcc() {
 	return {
 		acc: newRequestSamplesAcc(),
 		responseTexts: [],
-		pageUrls: /* @__PURE__ */ new Set(),
+		pageUrls: /* @__PURE__ */ new Map(),
 		sampleTotal: 0
 	};
 }
@@ -2400,7 +2617,8 @@ function wireToStore(deps, captureId, pageIds) {
 		}
 		const raw = responseToRawSample(w, deps.config.captureBodyLimitBytes);
 		if (raw === void 0) return;
-		const pageId = pageIdOf(w.pageUrl);
+		const pageUrl = pageIdentityOf(w.pageUrl);
+		const pageId = pageIdOf(pageUrl);
 		const sampleId = deps.store.upsertSample(captureId, pageId, {
 			...raw,
 			responseHeaders: { "content-type": w.contentType },
@@ -2425,7 +2643,7 @@ function wireToStore(deps, captureId, pageIds) {
 		if (templateSegments.length === rawSegments.length) {
 			for (let i = 0; i < templateSegments.length; i += 1) if (templateSegments[i] === "{p}" && !cardAcc.acc.pathParams.includes(rawSegments[i])) cardAcc.acc.pathParams.push(rawSegments[i]);
 		}
-		cardAcc.pageUrls.add(w.pageUrl);
+		if (!cardAcc.pageUrls.has(pageUrl)) cardAcc.pageUrls.set(pageUrl, w.pageUrl);
 		cardAcc.sampleTotal += 1;
 		if (typeof raw.responseBody === "string" && raw.responseBody !== "") pushCapped(cardAcc.responseTexts, raw.responseBody, CARD_ACC_SAMPLE_CAP);
 		const auth = classifyAuth(raw.url, w.requestHeaders, raw.requestBody);
@@ -2434,7 +2652,7 @@ function wireToStore(deps, captureId, pageIds) {
 			method: raw.method,
 			urlTemplate,
 			name: semanticName(raw.method, urlTemplate),
-			relatedPageUrls: [...cardAcc.pageUrls],
+			relatedPageUrls: [...cardAcc.pageUrls.values()],
 			requestTemplate: buildRequestTemplate({
 				acc: cardAcc.acc,
 				sampleTotal: cardAcc.sampleTotal
@@ -2443,8 +2661,25 @@ function wireToStore(deps, captureId, pageIds) {
 			...auth.authType === void 0 ? {} : { authType: auth.authType },
 			...auth.evidence === void 0 ? {} : { authEvidence: auth.evidence }
 		});
-		const relationId = deps.store.upsertRelation(captureId, cardId, w.pageUrl, paramsFingerprintOf(raw.url, raw.requestBody), pageId);
+		const relationId = deps.store.upsertRelation(captureId, cardId, pageUrl, paramsFingerprintOf(raw.url, raw.requestBody), pageId);
 		deps.store.attachSampleRelation(sampleId, relationId);
+	};
+}
+/**
+* 页面标题/站点名落库（三条采集路径共用）。
+*
+* url 先归一到页面身份再 upsert：与样本桥、爬行 page 事件写的是同一行（upsertPage 按
+* (capture_id,url) 幂等，后到的 meta 只补非空标题/站点名，不重复计页数）。
+* 身份为空（非法 URL）如实丢弃——名称是增强面，不因它中断采集。
+*/
+function pageMetaSink(deps, captureId) {
+	return (meta) => {
+		const identity = pageIdentityOf(meta.url);
+		if (identity === "") return;
+		deps.store.upsertPage(captureId, identity, 0, "ok", {
+			...meta.title === void 0 ? {} : { title: meta.title },
+			...meta.siteName === void 0 ? {} : { siteName: meta.siteName }
+		});
 	};
 }
 /**
@@ -2462,16 +2697,16 @@ function startJobSafely(jobs, spec, onAsyncFailure) {
 	try {
 		started = start.call(jobs, spec);
 	} catch (err) {
-		return { failure: errText(err) };
+		return { failure: errText$1(err) };
 	}
 	if (started === void 0 || started === null) return { failure: "empty-handle" };
 	const maybeThenable = started;
 	if (typeof maybeThenable.then === "function" && typeof maybeThenable.catch === "function") maybeThenable.catch((err) => {
-		onAsyncFailure(errText(err));
+		onAsyncFailure(errText$1(err));
 	});
 	return { started };
 }
-function errText(err) {
+function errText$1(err) {
 	const message = err?.message;
 	return (typeof message === "string" && message.length > 0 ? message : String(err)).slice(0, 200);
 }
@@ -2554,7 +2789,10 @@ async function startCapture(deps, args) {
 			...args.headless === void 0 ? {} : { headless: args.headless },
 			...cookies.length === 0 ? {} : { cookies }
 		});
-		deps.registry.bindSink(sessionId, wireToStore(deps, captureId, /* @__PURE__ */ new Map()));
+		deps.registry.bindSink(sessionId, {
+			onSample: wireToStore(deps, captureId, /* @__PURE__ */ new Map()),
+			onPageMeta: pageMetaSink(deps, captureId)
+		});
 		return {
 			accepted: true,
 			gate: "started",
@@ -2621,7 +2859,7 @@ function makeAutonomousRun(deps, captureId, taskType, entry, args) {
 				try {
 					const pageIds = /* @__PURE__ */ new Map();
 					const onWire = wireToStore(deps, captureId, pageIds);
-					const { page, context, browser } = await deps.openCapturingPage(deps.config.captureChromeChannel, onWire);
+					const { page, context, browser } = await deps.openCapturingPage(deps.config.captureChromeChannel, onWire, { onPageMeta: pageMetaSink(deps, captureId) });
 					closeBrowser = async () => {
 						await browser.close().catch(() => void 0);
 					};
@@ -2641,7 +2879,7 @@ function makeAutonomousRun(deps, captureId, taskType, entry, args) {
 										waitUntil: "domcontentloaded",
 										timeout: 3e4
 									});
-									await sleep$1(deps.config.captureStabilityWindowMs);
+									await sleep$4(deps.config.captureStabilityWindowMs);
 									return {
 										pageId: "",
 										html: await page.content(),
@@ -2658,8 +2896,8 @@ function makeAutonomousRun(deps, captureId, taskType, entry, args) {
 							stabilityMs: deps.config.captureStabilityWindowMs,
 							onEvent: (e) => {
 								if (e.kind === "page") {
-									const pageId = deps.store.upsertPage(captureId, e.url, 0, "ok");
-									if (!pageIds.has(e.url)) pageIds.set(e.url, pageId);
+									const pageUrl = pageIdentityOf(e.url);
+									if (!pageIds.has(pageUrl)) pageIds.set(pageUrl, deps.store.upsertPage(captureId, pageUrl, 0, "ok"));
 								}
 							},
 							onSample: () => void 0
@@ -3175,6 +3413,24 @@ function parseStringArray(text) {
 	const parsed = parseJson$1(text);
 	return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
 }
+/**
+* 页面清单按页面身份去重（`shared/page-url` 口径），保留首次出现的原始 URL。
+*
+* 历史采集库里同一 SPA 页面有多个字面 URL（hash 路由 / `?_at_=` 反缓存戳），
+* 卡文件不该把它们当多个页面来源；原始 URL 保留可打开性，去重只压掉同一身份。
+*/
+function unionPages(pages) {
+	const out = [];
+	const seen = /* @__PURE__ */ new Set();
+	for (const page of pages) {
+		if (page === "") continue;
+		const key = pageIdentityOf(page);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(page);
+	}
+	return out;
+}
 /** 模板 JSON → Template；**存在但解析不出形状**返回 'broken'（调用方按坏卡跳过）。 */
 function parseTemplate(text) {
 	if (text === null || text === "") return void 0;
@@ -3344,7 +3600,7 @@ function projectOutputs(template) {
 	}
 	return out;
 }
-function projectCard(card, relations) {
+function projectCard$1(card, relations) {
 	if (card.method === "") return { reason: "采集卡缺 method" };
 	if (card.urlTemplate === "") return { reason: "采集卡缺 urlTemplate" };
 	const requestTemplate = parseTemplate(card.requestTemplateJson ?? null);
@@ -3354,7 +3610,7 @@ function projectCard(card, relations) {
 	const urlTemplate = normalizeUrlForTemplate(card.urlTemplate).urlTemplate;
 	const mergeKey = mergeKeyOf(card.method, urlTemplate);
 	if (mergeKey === "") return { reason: "归并键为空" };
-	const pages = [.../* @__PURE__ */ new Set([...parseStringArray(card.relatedPagesJson), ...relations.map((row) => row.pageUrl)])].filter((page) => page !== "");
+	const pages = unionPages([...parseStringArray(card.relatedPagesJson), ...relations.map((row) => row.pageUrl)]);
 	const relationIds = [...new Set(relations.map((row) => row.id))];
 	const auth = parseAuthType(card.authJson ?? null);
 	return { draft: {
@@ -3392,7 +3648,7 @@ function mergeSources(existing, incoming) {
 			});
 			continue;
 		}
-		hit.pages = [.../* @__PURE__ */ new Set([...hit.pages, ...source.pages])];
+		hit.pages = unionPages([...hit.pages, ...source.pages]);
 		hit.relationIds = [.../* @__PURE__ */ new Set([...hit.relationIds, ...source.relationIds])];
 	}
 	return out;
@@ -3502,7 +3758,7 @@ function importLibrary(options) {
 		else list.push(relation);
 	}
 	for (const raw of snapshot.cards) {
-		const projection = projectCard(raw, relationsByCard.get(raw.id) ?? []);
+		const projection = projectCard$1(raw, relationsByCard.get(raw.id) ?? []);
 		if ("reason" in projection) {
 			skippedDetails.push({
 				captureId: raw.captureId,
@@ -3640,6 +3896,7 @@ const NodeSchema = Schema.object({
 	baseUrl: Schema.string(),
 	hashes: Schema.dict(Schema.string()),
 	expect: Schema.any(),
+	expects: Schema.any(),
 	retry: Schema.number().min(0),
 	timeoutSeconds: Schema.number().min(0),
 	layout: LayoutSchema
@@ -3680,7 +3937,9 @@ const ChainSchema = Schema.object({
 	meta: MetaSchema.required(),
 	inputs: Schema.array(InputSchema).default([]),
 	nodes: Schema.array(NodeSchema).required(),
-	edges: Schema.array(EdgeSchema).default([])
+	edges: Schema.array(EdgeSchema).default([]),
+	cleanup: Schema.any(),
+	verify: Schema.any()
 });
 /**
 * 从 schemastery 的报错里摘出字段路径。
@@ -3755,6 +4014,14 @@ function isDeclaredContainer(bindingPath, fields) {
 		return declared.length > target.length && target.every((segment, index) => segment.replace(/\[\*\]$/, "") === declared[index].replace(/\[\*\]$/, ""));
 	});
 }
+/** 卡字段表里找同路径的声明（constants 合法性提示用）。 */
+function findDeclaredField(bindingPath, fields) {
+	const target = fieldSegments(bindingPath);
+	return fields.find((field) => {
+		const declared = fieldSegments(field.path);
+		return declared.length === target.length && declared.every((segment, index) => segment === target[index]);
+	});
+}
 function issueOfSchemaFailure(error) {
 	const message = error instanceof Error ? error.message : String(error);
 	return {
@@ -3765,7 +4032,7 @@ function issueOfSchemaFailure(error) {
 }
 /** 把 schema 产物收敛成规范化的 ChainDoc（默认值补齐 + 常量统一成字符串）。 */
 /** 把 YAML 里的 expect 收敛成类型；缺 path/equals 视为没写。 */
-function normalizeExpect(raw) {
+function normalizeExpect$1(raw) {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
 	const record = raw;
 	const path = record["path"];
@@ -3776,6 +4043,12 @@ function normalizeExpect(raw) {
 		path,
 		equals
 	};
+}
+/** expect 数组：非法项丢弃；空数组视为没写。 */
+function normalizeExpects(raw) {
+	if (!Array.isArray(raw)) return void 0;
+	const out = raw.map(normalizeExpect$1).filter((item) => item !== void 0);
+	return out.length === 0 ? void 0 : out;
 }
 /** 把 YAML 里的 pick 收敛成类型；缺 match/field 视为没写（不静默猜）。 */
 function normalizePick(raw) {
@@ -3797,10 +4070,65 @@ function normalizePick(raw) {
 		...typeof take === "string" && take !== "" ? { field: take } : {}
 	};
 }
+/** cleanup 收敛：只认明确的 site/flow/when；输入必须是字符串映射。 */
+function normalizeCleanup(raw) {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return void 0;
+	const record = raw;
+	const chainRaw = record["chain"];
+	if (chainRaw === null || typeof chainRaw !== "object" || Array.isArray(chainRaw)) return void 0;
+	const chain = chainRaw;
+	const site = typeof chain["site"] === "string" ? chain["site"].trim() : "";
+	const flow = typeof chain["flow"] === "string" ? chain["flow"].trim() : "";
+	if (site === "" || flow === "") return void 0;
+	const version = chain["version"];
+	const inputsRaw = record["inputs"];
+	const inputs = {};
+	if (inputsRaw !== null && typeof inputsRaw === "object" && !Array.isArray(inputsRaw)) {
+		for (const [key, value] of Object.entries(inputsRaw)) if (typeof value === "string") inputs[key] = value;
+	}
+	return {
+		when: record["when"] === "always" ? "always" : "onFailure",
+		chain: {
+			site,
+			flow,
+			...typeof version === "number" && Number.isInteger(version) && version >= 1 ? { version } : {}
+		},
+		...Object.keys(inputs).length === 0 ? {} : { inputs }
+	};
+}
+/** verify 收敛：when 缺省 onSuccess；site/flow 必填。 */
+function normalizeVerify(raw) {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return void 0;
+	const record = raw;
+	const uiRaw = record["ui"];
+	if (uiRaw === null || typeof uiRaw !== "object" || Array.isArray(uiRaw)) return void 0;
+	const ui = uiRaw;
+	const site = typeof ui["site"] === "string" ? ui["site"].trim() : "";
+	const flow = typeof ui["flow"] === "string" ? ui["flow"].trim() : "";
+	if (site === "" || flow === "") return void 0;
+	const version = ui["version"];
+	const inputsRaw = record["inputs"];
+	const inputs = {};
+	if (inputsRaw !== null && typeof inputsRaw === "object" && !Array.isArray(inputsRaw)) {
+		for (const [key, value] of Object.entries(inputsRaw)) if (typeof value === "string") inputs[key] = value;
+	}
+	return {
+		when: record["when"] === "always" ? "always" : record["when"] === "onFailure" ? "onFailure" : "onSuccess",
+		ui: {
+			site,
+			flow,
+			...typeof version === "number" && Number.isInteger(version) && version >= 1 ? { version } : {}
+		},
+		...Object.keys(inputs).length === 0 ? {} : { inputs }
+	};
+}
 function normalizeDoc(raw) {
 	const doc = raw;
+	const docUnknown = unknownKeysOf(doc);
+	delete docUnknown.cleanup;
+	delete docUnknown.verify;
 	return {
-		...unknownKeysOf(doc),
+		...docUnknown,
 		apiVersion: doc.apiVersion,
 		kind: doc.kind,
 		meta: {
@@ -3827,6 +4155,7 @@ function normalizeDoc(raw) {
 			delete rest.baseUrl;
 			delete rest.hashes;
 			delete rest.expect;
+			delete rest.expects;
 			const layout = nodeLayoutOf(node.layout);
 			return {
 				...rest,
@@ -3837,7 +4166,8 @@ function normalizeDoc(raw) {
 				...node.baseUrl === void 0 || node.baseUrl === "" ? {} : { baseUrl: node.baseUrl },
 				...node.files === void 0 || Object.keys(node.files).length === 0 ? {} : { files: { ...node.files } },
 				...node.hashes === void 0 || Object.keys(node.hashes).length === 0 ? {} : { hashes: { ...node.hashes } },
-				...normalizeExpect(node.expect) === void 0 ? {} : { expect: normalizeExpect(node.expect) },
+				...normalizeExpect$1(node.expect) === void 0 ? {} : { expect: normalizeExpect$1(node.expect) },
+				...normalizeExpects(node.expects) === void 0 ? {} : { expects: normalizeExpects(node.expects) },
 				...node.retry === void 0 ? {} : { retry: node.retry },
 				...node.timeoutSeconds === void 0 ? {} : { timeoutSeconds: node.timeoutSeconds },
 				...layout === void 0 ? {} : { layout }
@@ -3850,7 +4180,9 @@ function normalizeDoc(raw) {
 			...edge.suggested === true ? { suggested: true } : {},
 			...edge.transform === void 0 ? {} : { transform: edge.transform },
 			...normalizePick(edge.pick) === void 0 ? {} : { pick: normalizePick(edge.pick) }
-		}))
+		})),
+		...normalizeCleanup(doc.cleanup) === void 0 ? {} : { cleanup: normalizeCleanup(doc.cleanup) },
+		...normalizeVerify(doc.verify) === void 0 ? {} : { verify: normalizeVerify(doc.verify) }
 	};
 }
 /**
@@ -3904,7 +4236,7 @@ function parseChainDoc(raw) {
 function parseChainYaml(text) {
 	let raw;
 	try {
-		raw = loadYamlValue(text);
+		raw = loadYamlValue$1(text);
 	} catch (error) {
 		return {
 			ok: false,
@@ -3944,7 +4276,7 @@ function parseCardDoc(raw) {
 * 链/卡文件是给人手改的项目资产，时间戳就该是字符串；YAML 1.1 的 timestamp 类型
 * 会让 `Schema.string()` 报"expected string but got ..."，纯属坑人。
 */
-function loadYamlValue(text) {
+function loadYamlValue$1(text) {
 	return yaml.load(text, { schema: yaml.CORE_SCHEMA });
 }
 /** ChainDoc → 链 YAML 文本（读回时手改过的字段原样保留，不丢未知键）。 */
@@ -4127,6 +4459,57 @@ function checkChain(doc, resolveCard) {
 	});
 	if (doc.kind === "page-chain") checkPageEdges(doc, nodeIds, issues);
 	else checkInterfaceEdges(doc, nodeIds, cards, constantsOf, declaredSlots, referencedSlots, issues);
+	if (doc.cleanup !== void 0) {
+		const target = "cleanup";
+		if (doc.kind !== "interface-chain") issues.push({
+			target,
+			code: "invalid-chain",
+			reason: "cleanup 目前只支持 interface-chain"
+		});
+		if (doc.cleanup.chain.site.trim() === "" || doc.cleanup.chain.flow.trim() === "") issues.push({
+			target,
+			code: "invalid-chain",
+			reason: "cleanup.chain 的 site/flow 不能为空"
+		});
+		if (doc.cleanup.chain.site === doc.meta.site && doc.cleanup.chain.flow === doc.meta.flow) issues.push({
+			target,
+			code: "invalid-chain",
+			reason: "cleanup 不能指向当前链自身（会递归）"
+		});
+		if (doc.cleanup.chain.version !== void 0 && (!Number.isInteger(doc.cleanup.chain.version) || doc.cleanup.chain.version < 1)) issues.push({
+			target,
+			code: "invalid-chain",
+			reason: "cleanup.chain.version 必须是正整数"
+		});
+		for (const [key, value] of Object.entries(doc.cleanup.inputs ?? {})) if (typeof value !== "string") issues.push({
+			target,
+			code: "invalid-chain",
+			reason: `cleanup.inputs.${key} 必须是字符串`
+		});
+	}
+	if (doc.verify !== void 0) {
+		const target = "verify";
+		if (doc.kind !== "interface-chain") issues.push({
+			target,
+			code: "invalid-chain",
+			reason: "verify 目前只支持 interface-chain"
+		});
+		if (doc.verify.ui.site.trim() === "" || doc.verify.ui.flow.trim() === "") issues.push({
+			target,
+			code: "invalid-chain",
+			reason: "verify.ui 的 site/flow 不能为空"
+		});
+		if (doc.verify.ui.version !== void 0 && (!Number.isInteger(doc.verify.ui.version) || doc.verify.ui.version < 1)) issues.push({
+			target,
+			code: "invalid-chain",
+			reason: "verify.ui.version 必须是正整数"
+		});
+		for (const [key, value] of Object.entries(doc.verify.inputs ?? {})) if (typeof value !== "string") issues.push({
+			target,
+			code: "invalid-chain",
+			reason: `verify.inputs.${key} 必须是字符串`
+		});
+	}
 	doc.inputs.forEach((input, index) => {
 		if (!referencedSlots.has(input.name)) issues.push({
 			target: `inputs[${index}]`,
@@ -4345,14 +4728,14 @@ function cardsRoot(workspaceRoot) {
 function slugOf(name) {
 	return String(name ?? "").trim().toLowerCase().replace(/[\s\\/:*?"<>|\u0000-\u001f]+/g, "-").replace(/-{2,}/g, "-").replace(/^[-.]+|[-.]+$/g, "");
 }
-function requireSlug(name, what) {
+function requireSlug$1(name, what) {
 	const slug = slugOf(name);
 	if (slug.length === 0) throw Object.assign(/* @__PURE__ */ new Error(`${what} "${String(name)}" 不能作为目录名（为空或只含路径分隔符）`), { code: "invalid-chain" });
 	return slug;
 }
 /** 链版本目录：`chains/<siteSlug>/<flowSlug>`。 */
 function chainDir(workspaceRoot, site, flow) {
-	return join(chainsRoot(workspaceRoot), requireSlug(site, "site"), requireSlug(flow, "flow"));
+	return join(chainsRoot(workspaceRoot), requireSlug$1(site, "site"), requireSlug$1(flow, "flow"));
 }
 /** 单个版本文件路径：`.../v<n>.yaml`。 */
 function chainFilePath(workspaceRoot, site, flow, version) {
@@ -4782,7 +5165,7 @@ function readCard(workspaceRoot, cardId) {
 		const path = join(dir, name);
 		if (!existsSync(path)) continue;
 		try {
-			const parsed = loadYamlValue(readFileSync(path, "utf8"));
+			const parsed = loadYamlValue$1(readFileSync(path, "utf8"));
 			const card = parseCardDoc(parsed);
 			if (card) return card;
 		} catch {
@@ -4921,9 +5304,9 @@ function actualTypeOf(value) {
 * （`chain_run`）解析后传入，本函数只判定「是不是 http(s) 源」，不做来源推断。
 */
 function buildPlan(doc, cards, inputs, baseUrl) {
-	if (doc.kind === "page-chain") return failure("not-executable", `链 ${doc.meta.site}/${doc.meta.flow} 是 page-chain：先经 R-1 compilePageChain 编译成 interface-chain 草稿并落盘，再执行`);
+	if (doc.kind === "page-chain") return failure$2("not-executable", `链 ${doc.meta.site}/${doc.meta.flow} 是 page-chain：先经 R-1 compilePageChain 编译成 interface-chain 草稿并落盘，再执行`);
 	const topo = topoOrder(doc);
-	if (topo.cycle.length > 0) return failure("cycle", `绑定关系成环，涉及节点：${topo.cycle.join(" → ")}`, [], topo.cycle);
+	if (topo.cycle.length > 0) return failure$2("cycle", `绑定关系成环，涉及节点：${topo.cycle.join(" → ")}`, [], topo.cycle);
 	const missingCards = [];
 	for (const node of doc.nodes) {
 		if (typeof node.card !== "string" || node.card.length === 0) {
@@ -4932,7 +5315,7 @@ function buildPlan(doc, cards, inputs, baseUrl) {
 		}
 		if (!cards.has(node.card)) missingCards.push(`节点 ${node.id} 引用的卡 ${node.card} 不在项目接口库中`);
 	}
-	if (missingCards.length > 0) return failure("card-not-imported", `${missingCards.join("；")}：先跑 dataforge_library_import 把采集包导入`);
+	if (missingCards.length > 0) return failure$2("card-not-imported", `${missingCards.join("；")}：先跑 dataforge_library_import 把采集包导入`);
 	const runtimeInputs = inputs ?? {};
 	const declaredSlots = new Map(doc.inputs.map((input) => [input.name, input]));
 	const edgeSlots = slotRefsFromEdges(doc);
@@ -4969,10 +5352,10 @@ function buildPlan(doc, cards, inputs, baseUrl) {
 		gapsByNode.set(nodeId, gaps);
 	}
 	const allGaps = topo.order.flatMap((nodeId) => gapsByNode.get(nodeId) ?? []);
-	if (allGaps.length > 0) return failure("missing-params", `静态缺参 ${allGaps.length} 条（一个请求都不会发）：${describeGaps(allGaps)}`, allGaps);
+	if (allGaps.length > 0) return failure$2("missing-params", `静态缺参 ${allGaps.length} 条（一个请求都不会发）：${describeGaps(allGaps)}`, allGaps);
 	const resolvedBase = resolveBaseUrl(baseUrl);
 	const nodesWithoutBase = doc.nodes.filter((node) => node.baseUrl === void 0);
-	if (!resolvedBase.ok && nodesWithoutBase.length > 0) return failure("base-url-unresolved", resolvedBase.message);
+	if (!resolvedBase.ok && nodesWithoutBase.length > 0) return failure$2("base-url-unresolved", resolvedBase.message);
 	const planBaseUrl = resolvedBase.ok ? resolvedBase.baseUrl : "";
 	if (authGapNodes.length > 0) notices.push(`auth-not-injected：节点 ${authGapNodes.join("、")} 的凭证入参未注入（R-4 负责），引擎不会发送空值`);
 	const idSet = new Set(topo.order);
@@ -5010,7 +5393,7 @@ function buildPlan(doc, cards, inputs, baseUrl) {
 		notices
 	};
 }
-function failure(code, message, gaps = [], cycle = []) {
+function failure$2(code, message, gaps = [], cycle = []) {
 	return {
 		ok: false,
 		code,
@@ -5788,7 +6171,7 @@ function parseUrlOrUndefined(raw) {
 		return;
 	}
 }
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+const sleep$3 = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 /**
 * 发一次请求（含重定向跟随）。
 *
@@ -5988,7 +6371,7 @@ async function httpRequest(spec) {
 				message: `HTTP ${response.status}`
 			};
 		}
-		if (attempt < retry) await sleep(120 * (attempt + 1));
+		if (attempt < retry) await sleep$3(120 * (attempt + 1));
 	}
 	return {
 		ok: false,
@@ -6480,6 +6863,7 @@ async function executeChainRun(deps, prepared, input) {
 	};
 	const roots = /* @__PURE__ */ new Map();
 	const results = /* @__PURE__ */ new Map();
+	const emittedByNode = /* @__PURE__ */ new Map();
 	let failure;
 	let cancelled = false;
 	let cancelledMessage;
@@ -6888,7 +7272,7 @@ async function executeChainRun(deps, prepared, input) {
 				message: `节点 ${nodeId}：${result.error}`
 			};
 		}
-		const expectation = checkNodeExpect(node, response.json === void 0 ? void 0 : { body: response.json });
+		const expectation = checkNodeExpects(node, response.json === void 0 ? void 0 : { body: response.json });
 		if (!expectation.ok) {
 			result.errorCode = "node-business-error";
 			result.error = expectation.message;
@@ -6915,7 +7299,11 @@ async function executeChainRun(deps, prepared, input) {
 			status: response.status,
 			headers: response.headers
 		});
-		const emitted = sensitive ? {} : redactRecord(collectEmitted(doc, cards, nodeId, roots.get(nodeId)), secrets);
+		const emitted = sensitive ? {} : redactRecord({
+			...collectEmitted(doc, cards, nodeId, roots.get(nodeId)),
+			...collectCardOutputs(doc, cards, nodeId, roots.get(nodeId))
+		}, secrets);
+		emittedByNode.set(nodeId, emitted);
 		result.status = "done";
 		results.set(nodeId, result);
 		emit({
@@ -7025,7 +7413,8 @@ async function executeChainRun(deps, prepared, input) {
 		success,
 		businessData: businessDataOf(doc, ordered, {
 			failedNode,
-			cancelled
+			cancelled,
+			outputs: Object.fromEntries(emittedByNode)
 		})
 	});
 	input.signal?.removeEventListener("abort", onAbort);
@@ -7052,6 +7441,7 @@ function businessDataOf(doc, nodes, extra = {}) {
 		...extra.failedNode === void 0 ? {} : { failedNode: extra.failedNode },
 		...extra.cancelled === true ? { cancelled: true } : {},
 		completed,
+		...extra.outputs === void 0 || Object.keys(extra.outputs).length === 0 ? {} : { outputs: extra.outputs },
 		nodes: nodes.map((node) => ({
 			nodeId: node.nodeId,
 			status: node.status,
@@ -7074,21 +7464,24 @@ function terminalMessage(doc, plan, failure, cancelled, cancelledMessage, nodes)
 	return `链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} 执行完成：${plan.order.length} 个节点全绿`;
 }
 /** 业务码校验：expect 缺省 = 不检查。 */
-function checkNodeExpect(node, json) {
-	if (node.expect === void 0) return { ok: true };
+function checkNodeExpects(node, json) {
+	const expectations = [...node.expect === void 0 ? [] : [node.expect], ...node.expects ?? []];
+	if (expectations.length === 0) return { ok: true };
 	if (json === void 0) return {
 		ok: false,
-		message: `业务码校验失败：响应不是 JSON，取不到 ${node.expect.path}`
+		message: `业务码校验失败：响应不是 JSON，取不到 ${expectations[0]?.path ?? ""}`
 	};
-	const actual = fieldValueOf(json, node.expect.path);
-	if (actual === void 0) return {
-		ok: false,
-		message: `业务码校验失败：响应里没有 ${node.expect.path}`
-	};
-	if (String(actual) !== String(node.expect.equals)) return {
-		ok: false,
-		message: `业务码不符：${node.expect.path} 期望 ${String(node.expect.equals)}，实际 ${String(actual)}`
-	};
+	for (const expectation of expectations) {
+		const actual = fieldValueOf(json, expectation.path);
+		if (actual === void 0) return {
+			ok: false,
+			message: `业务码校验失败：响应里没有 ${expectation.path}`
+		};
+		if (String(actual) !== String(expectation.equals)) return {
+			ok: false,
+			message: `业务码不符：${expectation.path} 期望 ${String(expectation.equals)}，实际 ${String(actual)}`
+		};
+	}
 	return { ok: true };
 }
 /** 从数组出参里按字段值选一个元素，再取字段（缺省取整个元素）。 */
@@ -7261,6 +7654,17 @@ function collectEmitted(doc, cards, nodeId, root) {
 			}
 			emitted[edge.from] = edge.transform === void 0 ? value : applyEdgeTransform(value, edge.transform);
 		}
+	}
+	return emitted;
+}
+/** 卡片声明的全部出参（不依赖 downstream edge），供 businessData/cleanup 结果绑定使用。 */
+function collectCardOutputs(doc, cards, nodeId, root) {
+	const card = cards.get(cardOfNode(doc, nodeId));
+	if (card === void 0) return {};
+	const emitted = {};
+	for (const field of card.outputs) {
+		const bound = resolveBinding(root, field.path);
+		if (bound.ok) emitted[field.path] = bound.value;
 	}
 	return emitted;
 }
@@ -7637,6 +8041,277 @@ function createReloginThrottle() {
 }
 
 //#endregion
+//#region src/uitest/run-store.ts
+/**
+* UI 回放留痕：`dataRoot/ui-runs/<runId>/`。
+*
+* 与造数/链运行同一套习惯（run.json 元数据 + events.ndjson 即写即落盘），但**目录分开**：
+* 造数运行按游戏规则折摘要（foldSummary 认 meta/step/terminal/result），UI 回放有自己
+* 的步骤/断言事件；混进同一个 runs 目录会让 `dataforge_status` 与面板运行列表互相误读。
+*
+* 截图与失败现场（failure.png / failure.html）落在同一目录，证据跟运行记录走。
+*
+* @module dsh-dataforge/uitest/run-store
+*/
+/** UI 运行根：`dataRoot/ui-runs`。 */
+function uiRunsRoot(dataRoot) {
+	return join(dataRoot, "ui-runs");
+}
+/** 单次运行目录。 */
+function uiRunDir(dataRoot, runId) {
+	return join(uiRunsRoot(dataRoot), runId);
+}
+/** 新建运行目录 + 初始 run.json；返回运行目录。 */
+function startUiRun(dataRoot, runId, meta) {
+	const dir = uiRunDir(dataRoot, runId);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "run.json"), JSON.stringify({
+		runId,
+		kind: "ui-run",
+		status: "running",
+		startedAt: Date.now(),
+		...meta
+	}, null, 2), "utf8");
+	return dir;
+}
+/** 追加事件（带 ts）。 */
+function appendUiRunEvent(dataRoot, runId, event) {
+	appendFileSync(join(uiRunDir(dataRoot, runId), "events.ndjson"), `${JSON.stringify({
+		...event,
+		ts: Date.now()
+	})}\n`, "utf8");
+}
+/** 读 run.json；读不到/坏 JSON → undefined（调用方决定跳过还是报错）。 */
+function readUiRunRecord(dataRoot, runId) {
+	const path = join(uiRunDir(dataRoot, runId), "run.json");
+	if (!existsSync(path)) return void 0;
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf8"));
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+		return parsed;
+	} catch {
+		return;
+	}
+}
+/** 读事件流；文件不存在 → 空数组。 */
+function readUiRunEvents(dataRoot, runId) {
+	const path = join(uiRunDir(dataRoot, runId), "events.ndjson");
+	if (!existsSync(path)) return [];
+	const events = [];
+	for (const line of readFileSync(path, "utf8").split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed === "") continue;
+		try {
+			events.push(JSON.parse(trimmed));
+		} catch {}
+	}
+	return events;
+}
+/** 合并写 run.json（运行结束后写终态）。 */
+function finishUiRun(dataRoot, runId, patch) {
+	const current = readUiRunRecord(dataRoot, runId);
+	if (current === void 0) return;
+	writeFileSync(join(uiRunDir(dataRoot, runId), "run.json"), JSON.stringify({
+		...current,
+		...patch
+	}, null, 2), "utf8");
+}
+/** 列运行（最近在前）；坏目录跳过。 */
+function listUiRuns(dataRoot, limit = 20) {
+	const root = uiRunsRoot(dataRoot);
+	if (!existsSync(root)) return [];
+	const dirs = readdirSync(root).filter((entry) => {
+		try {
+			return statSync(join(root, entry)).isDirectory();
+		} catch {
+			return false;
+		}
+	}).sort().reverse().slice(0, limit);
+	const runs = [];
+	for (const dir of dirs) {
+		const record = readUiRunRecord(dataRoot, dir);
+		if (record !== void 0) runs.push(record);
+	}
+	return runs;
+}
+
+//#endregion
+//#region src/datasets/export.ts
+/**
+* 运行产物导出：dataset（业务数据）+ evidence（HTML 报告）。
+*
+* 只读 run 留痕，不重新执行；业务数据来自 foldSummary 的 businessData（result 事件）。
+* 不写凭证、不写请求头原文。
+*
+* @module dsh-dataforge/datasets/export
+*/
+function escapeHtml(text) {
+	return text.replace(/[&<>"']/g, (ch) => ({
+		"&": "&amp;",
+		"<": "&lt;",
+		">": "&gt;",
+		"\"": "&quot;",
+		"'": "&#39;"
+	})[ch]);
+}
+function textOf$1(value) {
+	if (value === void 0) return "";
+	try {
+		return typeof value === "string" ? value : JSON.stringify(value);
+	} catch {
+		return String(value);
+	}
+}
+/**
+* 导出一次运行的 dataset + evidence。
+*
+* @param dataRoot - 插件数据根（runs/datasets/evidence 同级）。
+* @param runId - 运行 id。
+*/
+function exportRunArtifacts(dataRoot, runId) {
+	const id = runId.trim();
+	if (id === "") return {
+		ok: false,
+		code: "run-not-found",
+		error: "run_id 不能为空"
+	};
+	const record = readRunRecord(dataRoot, id);
+	const events = loadRunEvents(dataRoot, id);
+	if (record === void 0 || events === void 0) {
+		const uiRecord = readUiRunRecord(dataRoot, id);
+		if (uiRecord === void 0) return {
+			ok: false,
+			code: "run-not-found",
+			error: `没有这个运行留痕：${id}`,
+			hints: ["先跑一次 dataforge_chain_run / dataforge_ui_run"]
+		};
+		return exportUiRun(dataRoot, id, uiRecord);
+	}
+	let summary;
+	try {
+		summary = foldSummary(id, events);
+	} catch (error) {
+		return {
+			ok: false,
+			code: "run-unreadable",
+			error: `运行留痕折叠失败：${error.message}`
+		};
+	}
+	const rawChain = record["chain"];
+	const chain = rawChain !== null && typeof rawChain === "object" && !Array.isArray(rawChain) ? rawChain : void 0;
+	const chainSite = chain?.["site"];
+	const chainVersion = chain?.["version"];
+	const businessData = summary.businessData ?? {};
+	const dataset = {
+		apiVersion: "dataforge/v1",
+		kind: "run-dataset",
+		runId: id,
+		createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+		status: summary.status,
+		site: typeof record["site"] === "string" ? record["site"] : typeof chainSite === "string" ? chainSite : void 0,
+		flow: typeof record["flow"] === "string" ? record["flow"] : summary.flow,
+		version: typeof record["version"] === "number" ? record["version"] : typeof chainVersion === "number" ? chainVersion : void 0,
+		businessData,
+		chain,
+		run: {
+			startedAt: summary.startedAt,
+			updatedAt: summary.updatedAt,
+			stepsDone: summary.stepsDone,
+			totalSteps: summary.totalSteps,
+			lastError: summary.lastError
+		}
+	};
+	const datasetPath = join(dataRoot, "datasets", `${id}.json`);
+	mkdirSync(dirname(datasetPath), { recursive: true });
+	writeFileSync(datasetPath, JSON.stringify(dataset, null, 2), "utf8");
+	const reportPath = join(dataRoot, "evidence", id, "report.html");
+	mkdirSync(dirname(reportPath), { recursive: true });
+	const businessLines = Object.entries(businessData).length === 0 ? "<p class=\"muted\">本次运行没有 businessData</p>" : `<table><thead><tr><th>字段</th><th>值</th></tr></thead><tbody>${Object.entries(businessData).map(([key, value]) => `<tr><td>${escapeHtml(key)}</td><td><code>${escapeHtml(textOf$1(value))}</code></td></tr>`).join("")}</tbody></table>`;
+	const chainText = chain === void 0 ? "" : `<h2>链身份</h2><pre>${escapeHtml(JSON.stringify(chain, null, 2))}</pre>`;
+	const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>运行报告 ${escapeHtml(id)}</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:920px;margin:32px auto;padding:0 20px;color:#111827;line-height:1.6}h1{font-size:24px}h2{font-size:17px;margin-top:24px}.muted{color:#6b7280}code,pre{background:#f3f4f6;padding:2px 5px;border-radius:4px}pre{padding:12px;overflow:auto}table{border-collapse:collapse;width:100%}th,td{border:1px solid #e5e7eb;padding:7px 9px;text-align:left;vertical-align:top}th{background:#f9fafb}.status{padding:2px 9px;border-radius:999px;background:#e8f7ee;color:#166534}.failed{background:#fdecea;color:#b91c1c}</style></head><body>
+<h1>运行报告 <code>${escapeHtml(id)}</code></h1>
+<p>状态：<span class="status ${summary.status === "failed" ? "failed" : ""}">${escapeHtml(summary.status)}</span> ｜ 步骤 ${summary.stepsDone}/${summary.totalSteps} ｜ 更新 ${new Date(summary.updatedAt).toISOString()}</p>
+${summary.lastError === void 0 ? "" : `<p class="failed">错误：${escapeHtml(summary.lastError)}</p>`}
+<h2>业务数据</h2>${businessLines}
+${chainText}
+<p class="muted">由 dsh-dataforge 生成；本报告只含运行摘要与 businessData，不含请求头/凭证原文。</p>
+</body></html>`;
+	writeFileSync(reportPath, html, "utf8");
+	return {
+		ok: true,
+		runId: id,
+		datasetPath,
+		reportPath,
+		kind: "chain",
+		status: summary.status,
+		businessData,
+		...chain === void 0 ? {} : { chain }
+	};
+}
+/** UI 回放证据：dataset 记录步骤/断言，report.html 引截图（success/failure）。 */
+function exportUiRun(dataRoot, runId, record) {
+	const evidenceDir = join(dataRoot, "evidence", runId);
+	mkdirSync(evidenceDir, { recursive: true });
+	let copied;
+	if (typeof record.screenshot === "string") {
+		const name = record.screenshot.split("/").pop() ?? "";
+		if (name === "success.png" || name === "failure.png") {
+			const source = join(uiRunDir(dataRoot, runId), name);
+			if (existsSync(source)) {
+				copyFileSync(source, join(evidenceDir, name));
+				copied = name;
+			}
+		}
+	}
+	const steps = readUiRunEvents(dataRoot, runId).filter((event) => event.event === "step").map((event) => ({
+		id: event.id,
+		kind: event.kind,
+		status: event.status,
+		error: event.error
+	}));
+	const dataset = {
+		apiVersion: "dataforge/v1",
+		kind: "ui-run-dataset",
+		runId,
+		createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+		status: record.status ?? "unknown",
+		site: record.site,
+		flow: record.flow,
+		version: record.version,
+		ui: record,
+		steps,
+		screenshot: copied
+	};
+	const datasetPath = join(dataRoot, "datasets", `${runId}.json`);
+	mkdirSync(dirname(datasetPath), { recursive: true });
+	writeFileSync(datasetPath, JSON.stringify(dataset, null, 2), "utf8");
+	const rows = steps.length === 0 ? "<p class=\"muted\">没有步骤事件</p>" : `<table><thead><tr><th>步骤</th><th>状态</th><th>错误</th></tr></thead><tbody>${steps.map((step) => `<tr><td>${escapeHtml(step.id ?? "")}（${escapeHtml(step.kind ?? "")}）</td><td>${escapeHtml(step.status ?? "")}</td><td>${escapeHtml(step.error ?? "")}</td></tr>`).join("")}</tbody></table>`;
+	const image = copied === void 0 ? "" : `<h2>末态截图</h2><p><img src="${escapeHtml(copied)}" alt="UI run ${escapeHtml(runId)}" style="max-width:100%;border:1px solid #e5e7eb;border-radius:6px"></p>`;
+	const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>UI 运行报告 ${escapeHtml(runId)}</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:920px;margin:32px auto;padding:0 20px;color:#111827;line-height:1.6}h1{font-size:24px}h2{font-size:17px;margin-top:24px}.muted{color:#6b7280}code{background:#f3f4f6;padding:2px 5px;border-radius:4px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #e5e7eb;padding:7px 9px;text-align:left}th{background:#f9fafb}.status{padding:2px 9px;border-radius:999px;background:#e8f7ee;color:#166534}.failed{background:#fdecea;color:#b91c1c}</style></head><body>
+<h1>UI 运行报告 <code>${escapeHtml(runId)}</code></h1>
+<p>状态：<span class="status ${record.status === "failed" ? "failed" : ""}">${escapeHtml(record.status ?? "unknown")}</span> ｜ ${escapeHtml(String(record.site ?? ""))} / ${escapeHtml(String(record.flow ?? ""))}</p>
+${typeof record.error === "string" ? `<p class="failed">错误：${escapeHtml(record.error)}</p>` : ""}
+<h2>步骤</h2>${rows}
+${image}
+<p class="muted">由 dsh-dataforge 生成；本报告只含 UI 运行摘要/步骤/截图，不含登录凭证。</p>
+</body></html>`;
+	const reportPath = join(evidenceDir, "report.html");
+	writeFileSync(reportPath, html, "utf8");
+	return {
+		ok: true,
+		runId,
+		datasetPath,
+		reportPath,
+		kind: "ui",
+		status: record.status ?? "unknown",
+		businessData: {},
+		ui: record
+	};
+}
+
+//#endregion
 //#region src/orchestration/application.ts
 /**
 * 编排域的应用层：把 IF-1/2/3 的判定与错误折叠收在一处，工具壳（`src/tools.ts`）
@@ -7667,7 +8342,7 @@ function toChainIssues$1(issues) {
 		reason: issue.reason
 	}));
 }
-function messageOf$4(error) {
+function messageOf$7(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function isLibraryError(error) {
@@ -7685,7 +8360,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `解析工作区根失败：${messageOf$4(error)}`,
+			message: `解析工作区根失败：${messageOf$7(error)}`,
 			hints: []
 		};
 	}
@@ -7716,7 +8391,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `导入接口库失败：${messageOf$4(error)}`,
+			message: `导入接口库失败：${messageOf$7(error)}`,
 			hints: []
 		};
 	}
@@ -7747,7 +8422,7 @@ async function upsertChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `落盘链失败：${messageOf$4(error)}`
+			message: `落盘链失败：${messageOf$7(error)}`
 		};
 	}
 }
@@ -7867,19 +8542,19 @@ function originOf(page) {
 		return;
 	}
 }
-function hostOf$1(baseUrl) {
+function hostOf$3(baseUrl) {
 	try {
 		return new URL(baseUrl).host;
 	} catch {
 		return baseUrl;
 	}
 }
-function planValueOf(plan, notices) {
+function planValueOf(plan, notices, cleanup, verify) {
 	return {
 		order: [...plan.order],
 		totalNodes: plan.totalNodes,
 		baseUrl: plan.baseUrl,
-		host: hostOf$1(plan.baseUrl),
+		host: hostOf$3(plan.baseUrl),
 		writeNodes: [...plan.writeNodes],
 		nodes: plan.nodes.map((node) => ({
 			nodeId: node.nodeId,
@@ -7888,11 +8563,13 @@ function planValueOf(plan, notices) {
 			dependsOn: [...node.dependsOn],
 			writes: plan.writeNodes.includes(node.nodeId)
 		})),
-		notices: [...notices]
+		notices: [...notices],
+		...cleanup === void 0 ? {} : { cleanup },
+		...verify === void 0 ? {} : { verify }
 	};
 }
 /** 确认卡：拓扑序 + 每节点方法/URL 骨架 + 写方法清单 + 目标 host。 */
-function chainConfirmationCard(doc, plan, notices) {
+function chainConfirmationCard(doc, plan, notices, cleanup, verify) {
 	const lines = plan.order.map((nodeId, index) => {
 		const node = plan.nodes.find((candidate) => candidate.nodeId === nodeId);
 		const write = plan.writeNodes.includes(nodeId) ? " ✍️写" : "";
@@ -7900,12 +8577,229 @@ function chainConfirmationCard(doc, plan, notices) {
 	});
 	const writes = plan.writeNodes.length === 0 ? "写类节点：无（整链只读）" : `写类节点：${plan.writeNodes.join("、")}（已发出的写请求无法撤销）`;
 	const note = notices.length === 0 ? "" : `\n提醒：${notices.join("；")}`;
+	const cleanupLine = cleanup === void 0 ? "" : `\n清理：${cleanup.site} / ${cleanup.flow}${cleanup.version === void 0 ? "" : ` v${cleanup.version}`}（${cleanup.when}，${cleanup.nodeCount} 节点，写 ${cleanup.writeCount} 个）`;
+	const verifyLine = verify === void 0 ? "" : `\n验收：${verify.site} / ${verify.flow}${verify.version === void 0 ? "" : ` v${verify.version}`}（${verify.when}）`;
 	return [
-		`🧭 执行计划（${doc.meta.site} / ${doc.meta.flow} v${doc.meta.version}）→ ${hostOf$1(plan.baseUrl)}`,
+		`🧭 执行计划（${doc.meta.site} / ${doc.meta.flow} v${doc.meta.version}）→ ${hostOf$3(plan.baseUrl)}`,
 		...lines,
 		writes,
-		`确认后带 confirm=true 重调即真跑；只想留档用 dry_run=true（永不发请求）。${note}`
+		`确认后带 confirm=true 重调即真跑；只想留档用 dry_run=true（永不发请求）。${note}${cleanupLine}${verifyLine}`
 	].join("\n");
+}
+/** cleanup 计划摘要：只读链/卡，不预检执行，供确认卡展示。 */
+function cleanupPlanOf(workspaceRoot, doc) {
+	if (doc.cleanup === void 0) return { ok: true };
+	const loaded = loadChain(workspaceRoot, doc.cleanup.chain.site, doc.cleanup.chain.flow, { ...doc.cleanup.chain.version === void 0 ? {} : { version: doc.cleanup.chain.version } });
+	if (!loaded.ok) return {
+		ok: false,
+		message: `cleanup 链不可用：${loaded.message}`
+	};
+	const cleanupCards = cardsForChain(workspaceRoot, loaded.doc);
+	let writeCount = 0;
+	for (const node of loaded.doc.nodes) {
+		const card = node.card === void 0 ? void 0 : cleanupCards.get(node.card);
+		if (card !== void 0 && card.identity.method !== "GET" && card.identity.method !== "HEAD") writeCount += 1;
+	}
+	return {
+		ok: true,
+		value: {
+			site: loaded.doc.meta.site,
+			flow: loaded.doc.meta.flow,
+			version: loaded.doc.meta.version,
+			when: doc.cleanup.when,
+			nodeCount: loaded.doc.nodes.length,
+			writeCount
+		}
+	};
+}
+function valueAtPath(root, path) {
+	const clean = path.replace(/^\$\.?/, "");
+	const tokens = [];
+	for (const part of clean.split(".")) for (const match of part.matchAll(/([^[\]]+)|\[(\d+)\]/g)) if (match[1] !== void 0 && match[1] !== "") tokens.push(match[1]);
+	else if (match[2] !== void 0) tokens.push(Number(match[2]));
+	let current = root;
+	for (const token of tokens) if (typeof token === "number") {
+		if (!Array.isArray(current) || token < 0 || token >= current.length) return void 0;
+		current = current[token];
+	} else {
+		if (current === null || typeof current !== "object" || Array.isArray(current)) return void 0;
+		current = current[token];
+	}
+	return current;
+}
+function shouldRunCleanup(doc, summary) {
+	if (doc.cleanup === void 0) return false;
+	return doc.cleanup.when === "always" || summary.status === "failed";
+}
+function resolveBoundInputs(templates, mainInputs, summary) {
+	const inputs = {};
+	for (const [key, template] of Object.entries(templates ?? {})) {
+		if (template.startsWith("$inputs.")) {
+			const slot = template.slice(8);
+			if (!(slot in mainInputs)) return {
+				ok: false,
+				missing: template
+			};
+			inputs[key] = mainInputs[slot];
+			continue;
+		}
+		if (template.startsWith("$result.outputs.")) {
+			const rest = template.slice(16);
+			const dot = rest.indexOf(".");
+			const nodeId = dot < 0 ? rest : rest.slice(0, dot);
+			const fieldPath = dot < 0 ? "" : rest.slice(dot + 1);
+			const outputs = summary.businessData?.["outputs"];
+			const nodeOutputs = outputs !== null && typeof outputs === "object" && !Array.isArray(outputs) ? outputs[nodeId] : void 0;
+			const direct = nodeOutputs !== null && typeof nodeOutputs === "object" && !Array.isArray(nodeOutputs) ? nodeOutputs[fieldPath] : void 0;
+			const value = direct !== void 0 ? direct : valueAtPath(nodeOutputs, fieldPath);
+			if (value === void 0) return {
+				ok: false,
+				missing: template
+			};
+			inputs[key] = value;
+			continue;
+		}
+		if (template.startsWith("$result.")) {
+			const value = valueAtPath(summary.businessData, template.slice(8));
+			if (value === void 0) return {
+				ok: false,
+				missing: template
+			};
+			inputs[key] = value;
+			continue;
+		}
+		inputs[key] = template;
+	}
+	return {
+		ok: true,
+		inputs
+	};
+}
+function cleanupInputsOf(doc, mainInputs, summary) {
+	return resolveBoundInputs(doc.cleanup?.inputs, mainInputs, summary);
+}
+function verifyInputsOf(doc, mainInputs, summary) {
+	return resolveBoundInputs(doc.verify?.inputs, mainInputs, summary);
+}
+function verifyPlanOf(doc) {
+	if (doc.verify === void 0) return void 0;
+	return {
+		site: doc.verify.ui.site,
+		flow: doc.verify.ui.flow,
+		...doc.verify.ui.version === void 0 ? {} : { version: doc.verify.ui.version },
+		when: doc.verify.when
+	};
+}
+function shouldRunVerify(doc, summary) {
+	if (doc.verify === void 0) return false;
+	if (doc.verify.when === "always") return true;
+	if (doc.verify.when === "onSuccess") return summary.status === "completed";
+	return summary.status === "failed";
+}
+/** 主链结束后执行 UI 验收；失败只返回错误信息，不覆盖主链结果。 */
+async function runVerifyForTool(deps, doc, summary, mainInputs) {
+	const base = verifyPlanOf(doc);
+	if (base === void 0 || !shouldRunVerify(doc, summary)) return void 0;
+	const resolved = verifyInputsOf(doc, mainInputs, summary);
+	if (!resolved.ok) return {
+		...base,
+		skipped: `缺 UI 验收入参 ${resolved.missing}（主链结果/输入里找不到）`
+	};
+	if (deps.verifyUi === void 0) return {
+		...base,
+		skipped: "未装配 UI 验收执行器（uiTestEnabled / verifyUi）"
+	};
+	try {
+		const result = await deps.verifyUi({
+			site: base.site,
+			flow: base.flow,
+			...base.version === void 0 ? {} : { version: base.version },
+			inputs: Object.fromEntries(Object.entries(resolved.inputs).map(([key, value]) => [key, String(value)]))
+		});
+		const merged = {
+			...base,
+			...result
+		};
+		if (merged.runId !== void 0) {
+			const exported = exportRunArtifacts(deps.dataRoot, merged.runId);
+			if (exported.ok) return {
+				...merged,
+				datasetPath: exported.datasetPath,
+				reportPath: exported.reportPath
+			};
+		}
+		return merged;
+	} catch (error) {
+		return {
+			...base,
+			message: `UI 验收执行失败：${messageOf$7(error)}`
+		};
+	}
+}
+/** 主链结束后执行 cleanup；失败只返回错误信息，不覆盖主链结果。 */
+async function runCleanupForTool(deps, workspaceRoot, doc, summary, mainInputs) {
+	if (doc.cleanup === void 0 || !shouldRunCleanup(doc, summary)) return void 0;
+	const planInfo = cleanupPlanOf(workspaceRoot, doc);
+	if (!planInfo.ok || planInfo.value === void 0) return {
+		site: doc.cleanup.chain.site,
+		flow: doc.cleanup.chain.flow,
+		when: doc.cleanup.when,
+		nodeCount: 0,
+		writeCount: 0,
+		message: planInfo.ok ? "cleanup 链不可用" : planInfo.message
+	};
+	const base = planInfo.value;
+	const resolved = cleanupInputsOf(doc, mainInputs, summary);
+	if (!resolved.ok) return {
+		...base,
+		skipped: `缺 cleanup 入参 ${resolved.missing}（主链结果/输入里找不到）`
+	};
+	const loaded = loadChain(workspaceRoot, base.site, base.flow, { ...base.version === void 0 ? {} : { version: base.version } });
+	if (!loaded.ok) return {
+		...base,
+		message: `cleanup 链不可用：${loaded.message}`
+	};
+	const cards = cardsForChain(workspaceRoot, loaded.doc);
+	const inputCheck = validateChainInputs(loaded.doc, resolved.inputs);
+	if (!inputCheck.ok) return {
+		...base,
+		message: inputCheck.message
+	};
+	const baseUrl = resolveChainBaseUrl(loaded.doc, cards, void 0);
+	const planned = buildPlan(loaded.doc, cards, resolved.inputs, baseUrl.ok ? baseUrl.baseUrl : void 0);
+	if (!planned.ok) return {
+		...base,
+		message: planned.code === "base-url-unresolved" && !baseUrl.ok ? baseUrl.message : planned.message
+	};
+	try {
+		const runInput = {
+			doc: loaded.doc,
+			cards,
+			plan: planned.plan,
+			inputs: resolved.inputs,
+			baseUrl: planned.plan.baseUrl,
+			chainPath: chainPathForRecord(workspaceRoot, loaded.path),
+			...deps.credentials === void 0 ? {} : { credentials: deps.credentials }
+		};
+		const prepared = prepareChainRun({
+			dataRoot: deps.dataRoot,
+			config: deps.chain
+		}, runInput);
+		const run = await executeChainRun({
+			dataRoot: deps.dataRoot,
+			config: deps.chain
+		}, prepared, runInput);
+		return {
+			...base,
+			runId: prepared.runId,
+			...run.ok ? { status: run.summary.status } : { message: run.message }
+		};
+	} catch (error) {
+		return {
+			...base,
+			message: `cleanup 执行失败：${messageOf$7(error)}`
+		};
+	}
 }
 /** 链文件路径：工作区内用相对路径（便于回看与迁移），越界则保留绝对路径。 */
 function chainPathForRecord(workspaceRoot, absolutePath) {
@@ -8069,7 +8963,7 @@ async function chainRunForTool(deps, exec, args) {
 			accepted: false,
 			gate: "blocked",
 			code: "invalid-chain",
-			message: `解析工作区根失败：${messageOf$4(error)}`
+			message: `解析工作区根失败：${messageOf$7(error)}`
 		};
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
@@ -8126,7 +9020,17 @@ async function chainRunForTool(deps, exec, args) {
 		cycle: planned.cycle
 	};
 	const plan = planned.plan;
-	const planValue = planValueOf(plan, planned.notices);
+	const cleanupPlan = cleanupPlanOf(workspaceRoot, doc);
+	if (!cleanupPlan.ok) return {
+		ok: false,
+		accepted: false,
+		gate: "blocked",
+		code: "invalid-chain",
+		message: cleanupPlan.message
+	};
+	const cleanupValue = cleanupPlan.value;
+	const verifyValue = verifyPlanOf(doc);
+	const planValue = planValueOf(plan, planned.notices, cleanupValue, verifyValue);
 	if (args.dryRun !== true && args.confirm !== true) return {
 		ok: true,
 		accepted: false,
@@ -8134,7 +9038,7 @@ async function chainRunForTool(deps, exec, args) {
 		code: "confirm-required",
 		message: `计划已编译（${plan.totalNodes} 个节点，写类 ${plan.writeNodes.length} 个，目标 ${planValue.host}）：确认后带 confirm=true 重调`,
 		plan: planValue,
-		card: chainConfirmationCard(doc, plan, planned.notices)
+		card: chainConfirmationCard(doc, plan, planned.notices, cleanupValue, verifyValue)
 	};
 	if (args.dryRun !== true) {
 		const reason = chainExecutionUnavailableReason();
@@ -8198,11 +9102,22 @@ async function chainRunForTool(deps, exec, args) {
 				job.append(`链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} → ${planValue.host}（${plan.totalNodes} 节点）`);
 				return {
 					cancel: (reason) => controller.abort(reason),
-					done: task.then((result) => ({
-						status: jobStatusOf(result, controller.signal.aborted),
-						detail: jobDetailOf(result),
-						...result.ok ? { result: JSON.stringify(result.summary) } : {}
-					}))
+					done: task.then(async (result) => {
+						const verify = result.ok ? await runVerifyForTool(deps, doc, result.summary, args.inputs ?? {}) : void 0;
+						if (verify !== void 0) job.append(`verify ${verify.site}/${verify.flow}：${verify.skipped ?? verify.status ?? (verify.success === true ? "success" : verify.message ?? "unknown")}`);
+						const cleanup = result.ok ? await runCleanupForTool(deps, workspaceRoot, doc, result.summary, args.inputs ?? {}) : void 0;
+						if (cleanup?.skipped !== void 0) job.append(`cleanup 跳过：${cleanup.skipped}`);
+						else if (cleanup !== void 0) job.append(`cleanup ${cleanup.site}/${cleanup.flow}：${cleanup.status ?? cleanup.message ?? "unknown"}`);
+						return {
+							status: jobStatusOf(result, controller.signal.aborted),
+							detail: jobDetailOf(result),
+							...result.ok ? { result: JSON.stringify(cleanup === void 0 && verify === void 0 ? result.summary : {
+								...result.summary,
+								...verify === void 0 ? {} : { verify },
+								...cleanup === void 0 ? {} : { cleanup }
+							}) } : {}
+						};
+					})
 				};
 			}
 		};
@@ -8226,6 +9141,8 @@ async function chainRunForTool(deps, exec, args) {
 			...runInput,
 			signal: controller.signal
 		});
+		const verify = run.ok ? await runVerifyForTool(deps, doc, run.summary, args.inputs ?? {}) : void 0;
+		const cleanup = run.ok ? await runCleanupForTool(deps, workspaceRoot, doc, run.summary, args.inputs ?? {}) : void 0;
 		return {
 			ok: true,
 			accepted: true,
@@ -8235,6 +9152,8 @@ async function chainRunForTool(deps, exec, args) {
 			runDir: prepared.runDir,
 			plan: planValue,
 			degradedNotice: "宿主未装配 dsh-jobs：本次前台执行（长链会占用对话，且不可 job_kill；建议部署 @deepseek-ai/dsh-jobs + @deepseek-ai/dsh-tool-jobs）",
+			...verify === void 0 ? {} : { verify },
+			...cleanup === void 0 ? {} : { cleanup },
 			...run.ok ? {
 				summary: run.summary,
 				nodes: compactNodes(run.nodes),
@@ -8311,7 +9230,7 @@ function plainRecordOf(value) {
 
 //#endregion
 //#region src/orchestration/bind.ts
-function messageOf$3(error) {
+function messageOf$6(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function toChainIssues(issues) {
@@ -8464,7 +9383,7 @@ async function bindChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `读取链失败：${messageOf$3(error)}`,
+			message: `读取链失败：${messageOf$6(error)}`,
 			site,
 			flow
 		};
@@ -8510,7 +9429,7 @@ async function bindChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `落盘链失败：${messageOf$3(error)}`,
+			message: `落盘链失败：${messageOf$6(error)}`,
 			site,
 			flow
 		};
@@ -8533,7 +9452,7 @@ async function bindChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `绑定已落盘为 v${saved.version}，但回读失败：${messageOf$3(error)}`,
+			message: `绑定已落盘为 v${saved.version}，但回读失败：${messageOf$6(error)}`,
 			version: saved.version,
 			path: saved.path,
 			site,
@@ -9175,7 +10094,7 @@ async function probeNode(input) {
 *
 * @module dsh-dataforge/orchestration/explore
 */
-function messageOf$2(error) {
+function messageOf$5(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function blocked(code, message, extra = {}) {
@@ -9197,7 +10116,7 @@ async function probeForTool(deps, exec, args) {
 	try {
 		workspaceRoot = await deps.resolveWorkspaceRoot(exec) ?? process.cwd();
 	} catch (error) {
-		return blocked("workspace-unavailable", `解析工作区根失败：${messageOf$2(error)}`);
+		return blocked("workspace-unavailable", `解析工作区根失败：${messageOf$5(error)}`);
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
 	if (!loaded.ok) return {
@@ -9566,7 +10485,7 @@ function crystalOutputOf(value) {
 		...value.warnings === void 0 ? {} : { warnings: value.warnings }
 	};
 }
-function messageOf$1(error) {
+function messageOf$4(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function newCrystalRunId(dataRoot, flow, now) {
@@ -9601,7 +10520,7 @@ async function crystalForTool(deps, exec, args) {
 			ok: false,
 			gate: "blocked",
 			code: "crystal-no-source",
-			message: `解析工作区根失败：${messageOf$1(error)}`
+			message: `解析工作区根失败：${messageOf$4(error)}`
 		};
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
@@ -10277,6 +11196,3740 @@ function edgesInto(doc, failedNode, nodes, error) {
 		});
 	}
 	return edges;
+}
+
+//#endregion
+//#region src/trace/analyze.ts
+const STATIC_EXT = /\.(?:js|mjs|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|txt|xml|mp4|webm|mp3|zip|gz)$/i;
+const VOLATILE_QUERY = /^(?:_|_t|ts|timestamp|dp-logid|dp_logid|callback|cb|nonce|sign|signature|token|_sign|rnd|random|request[-_]?id|trace[-_]?id)$/i;
+const SENSITIVE_KEY = /authorization|cookie|token|secret|password|api[-_]?key|session/i;
+const SUCCESS_KEY = /^(?:code|errno|error|status|success|ok)$/i;
+const SUCCESS_VALUES = /* @__PURE__ */ new Set([
+	"0",
+	"true",
+	"success",
+	"ok",
+	"200"
+]);
+const POLL_WINDOW_MS = 5e3;
+const MAX_LEAVES_PER_BODY = 400;
+const MAX_BINDINGS = 300;
+const MAX_INPUTS = 80;
+const MAX_CONSTANTS = 80;
+const MAX_OUTPUTS = 50;
+const MAX_ASSERTIONS = 80;
+function mask(value) {
+	if (value.length <= 8) return `${value.slice(0, 2)}****${value.slice(-2)}`;
+	return `${value.slice(0, 4)}****${value.slice(-4)}`;
+}
+function parseBody(body, contentType) {
+	if (body === void 0 || body.trim() === "") return { kind: "empty" };
+	const type = contentType.toLowerCase();
+	if (type.includes("application/x-www-form-urlencoded") || /^[^=&\s]+=[^&\s]*(?:&[^=&\s]+=[^&\s]*)*$/.test(body.trim())) try {
+		const params = new URLSearchParams(body);
+		const out = {};
+		for (const [key, value] of params.entries()) out[key] = value;
+		return {
+			kind: "form",
+			value: out
+		};
+	} catch {}
+	if (type.includes("json") || /^[\s]*[\[{]/.test(body)) try {
+		return {
+			kind: "json",
+			value: JSON.parse(body)
+		};
+	} catch {
+		return { kind: "text" };
+	}
+	return { kind: "text" };
+}
+function collectLeaves(value, base, out, depth = 0) {
+	if (out.length >= MAX_LEAVES_PER_BODY || depth > 8) return;
+	if (value === null || value === void 0) return;
+	if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+		if (typeof value === "string" && value === "") return;
+		out.push({
+			path: base,
+			value
+		});
+		return;
+	}
+	if (Array.isArray(value)) {
+		value.forEach((item, index) => collectLeaves(item, `${base}[${index}]`, out, depth + 1));
+		return;
+	}
+	if (typeof value === "object") for (const [key, item] of Object.entries(value)) collectLeaves(item, base === "" ? key : `${base}.${key}`, out, depth + 1);
+}
+function leavesOfBody(parsed, prefix) {
+	const out = [];
+	if (parsed.kind === "json" && parsed.value !== void 0) collectLeaves(parsed.value, prefix, out);
+	else if (parsed.kind === "form" && parsed.value !== void 0) collectLeaves(parsed.value, prefix, out);
+	return out;
+}
+function leafKeyValue(leaf) {
+	return String(leaf.value);
+}
+function usableLeaf(leaf) {
+	if (typeof leaf.value === "boolean") return false;
+	const text = String(leaf.value);
+	if (text.length < 4 || text.length > 200) return false;
+	if (SENSITIVE_KEY.test(leaf.path)) return false;
+	return true;
+}
+function likelyDynamic(value) {
+	return /^[0-9a-f]{16,}$/i.test(value) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) || /^\d{10,13}$/.test(value) || /^[A-Za-z0-9+/]{24,}={0,2}$/.test(value);
+}
+function bodyFingerprint(body) {
+	if (body === void 0 || body === "") return "";
+	let hash = 0;
+	for (let index = 0; index < body.length; index += 1) hash = hash * 31 + body.charCodeAt(index) >>> 0;
+	return `${body.length}:${hash.toString(36)}`;
+}
+function normalizeQuery(query) {
+	return Object.keys(query).filter((key) => !VOLATILE_QUERY.test(key)).sort().map((key) => `${key}=${query[key]}`).join("&");
+}
+function isStatic(sample) {
+	if (sample.method !== "GET" && sample.method !== "HEAD") return false;
+	return STATIC_EXT.test(sample.path);
+}
+function leafName(path) {
+	const parts = path.split(".");
+	const last = (parts[parts.length - 1] ?? path).replace(/\[\d+\]/g, "");
+	return last === "" || last === "body" || last === "query" ? "value" : last;
+}
+function uniqueName(base, used) {
+	const clean = base.replace(/[^A-Za-z0-9_\u4e00-\u9fa5-]/g, "_").slice(0, 50) || "input";
+	if (!used.has(clean)) {
+		used.add(clean);
+		return clean;
+	}
+	let index = 2;
+	while (used.has(`${clean}_${index}`)) index += 1;
+	const name = `${clean}_${index}`;
+	used.add(name);
+	return name;
+}
+/**
+* 分析一条 trace；纯函数，不读写磁盘。
+*
+* @param trace - `readTrace` 的结果。
+*/
+function analyzeTrace(trace) {
+	const warnings = [];
+	const nodes = [];
+	const mutable = [];
+	const skipped = [];
+	let staticAssets = 0;
+	for (const sample of trace.samples) {
+		if (isStatic(sample)) {
+			staticAssets += 1;
+			skipped.push(sample);
+			continue;
+		}
+		const write = sample.method !== "GET" && sample.method !== "HEAD" && sample.method !== "OPTIONS";
+		const key = `${sample.method} ${sample.path}?${normalizeQuery(sample.query)}${write ? `#${bodyFingerprint(sample.requestBody)}` : ""}`;
+		const previous = mutable[mutable.length - 1];
+		if (previous !== void 0 && previous.key === key && sample.ts - previous.lastTs <= POLL_WINDOW_MS) {
+			previous.sampleIds.push(sample.id);
+			previous.lastTs = sample.ts;
+			previous.ts = sample.ts;
+			if (sample.responseBody !== void 0) previous.responseBody = sample.responseBody;
+			if (sample.requestBody !== void 0 && previous.requestBody === void 0) previous.requestBody = sample.requestBody;
+			if (sample.cardId !== void 0) previous.cardId = sample.cardId;
+			if (sample.mergeKey !== void 0) previous.mergeKey = sample.mergeKey;
+			if (sample.status !== void 0) previous.status = sample.status;
+			continue;
+		}
+		mutable.push({
+			key,
+			method: sample.method,
+			path: sample.path,
+			url: sample.url,
+			...sample.pageUrl === void 0 ? {} : { pageUrl: sample.pageUrl },
+			...sample.status === void 0 ? {} : { status: sample.status },
+			ts: sample.ts,
+			lastTs: sample.ts,
+			sampleIds: [sample.id],
+			...sample.requestBody === void 0 ? {} : { requestBody: sample.requestBody },
+			...sample.responseBody === void 0 ? {} : { responseBody: sample.responseBody },
+			...sample.cardId === void 0 ? {} : { cardId: sample.cardId },
+			...sample.mergeKey === void 0 ? {} : { mergeKey: sample.mergeKey }
+		});
+	}
+	mutable.forEach((node, index) => {
+		const id = `n${index + 1}`;
+		nodes.push({
+			id,
+			method: node.method,
+			url: node.url,
+			path: node.path,
+			...node.pageUrl === void 0 ? {} : { pageUrl: node.pageUrl },
+			...node.status === void 0 ? {} : { status: node.status },
+			ts: node.ts,
+			write: node.method !== "GET" && node.method !== "HEAD" && node.method !== "OPTIONS",
+			polling: node.sampleIds.length > 1,
+			occurrences: node.sampleIds.length,
+			sampleIds: node.sampleIds,
+			...node.requestBody === void 0 ? {} : { requestBody: node.requestBody },
+			...node.responseBody === void 0 ? {} : { responseBody: node.responseBody },
+			...node.cardId === void 0 ? {} : { cardId: node.cardId },
+			...node.mergeKey === void 0 ? {} : { mergeKey: node.mergeKey }
+		});
+		if (node.sampleIds.length > 1) warnings.push({
+			code: "polling-merged",
+			message: `${node.method} ${node.path} 连续调用 ${node.sampleIds.length} 次，已合并为一个节点（polling）；回放需配置重试/轮询。`
+		});
+	});
+	const nodeLeaves = /* @__PURE__ */ new Map();
+	for (let index = 0; index < mutable.length; index += 1) {
+		const node = mutable[index];
+		const id = `n${index + 1}`;
+		const requestBody = parseBody(node.requestBody, "");
+		const responseBody = parseBody(node.responseBody, "");
+		const requestLeaves = leavesOfBody(requestBody, "body");
+		const responseLeaves = leavesOfBody(responseBody, "body");
+		nodeLeaves.set(id, {
+			request: requestLeaves,
+			response: responseLeaves
+		});
+		if (node.requestBody !== void 0 && requestBody.kind === "text") warnings.push({
+			code: "request-body-unparsed",
+			message: `${node.method} ${node.path} 的请求正文不是 JSON/表单，字段流转无法推断。`
+		});
+		if (node.responseBody !== void 0 && responseBody.kind === "text") warnings.push({
+			code: "response-body-unparsed",
+			message: `${node.method} ${node.path} 的响应正文不是 JSON，字段流转无法推断。`
+		});
+	}
+	for (let index = 0; index < mutable.length; index += 1) {
+		const node = mutable[index];
+		const id = `n${index + 1}`;
+		const leaves = nodeLeaves.get(id);
+		if (leaves === void 0) continue;
+		const sample = trace.samples.find((item) => item.id === node.sampleIds[0]);
+		if (sample === void 0) continue;
+		for (const [key, value] of Object.entries(sample.query)) if (value !== "" && !VOLATILE_QUERY.test(key)) leaves.request.push({
+			path: `query.${key}`,
+			value
+		});
+	}
+	const bindings = [];
+	const boundTo = /* @__PURE__ */ new Set();
+	const responseIndex = /* @__PURE__ */ new Map();
+	for (let index = 0; index < mutable.length; index += 1) {
+		mutable[index];
+		const id = `n${index + 1}`;
+		const leaves = nodeLeaves.get(id);
+		if (leaves === void 0) continue;
+		for (const leaf of leaves.request) {
+			if (!usableLeaf(leaf)) continue;
+			const value = leafKeyValue(leaf);
+			const toKey = `${id}.${leaf.path}`;
+			if (boundTo.has(toKey)) continue;
+			const matches = responseIndex.get(value);
+			if (matches === void 0 || matches.length === 0) continue;
+			const chosen = matches[matches.length - 1];
+			const confidence = matches.length === 1 ? .9 : .65;
+			bindings.push({
+				from: {
+					nodeId: chosen.nodeId,
+					path: chosen.path
+				},
+				to: {
+					nodeId: id,
+					path: leaf.path
+				},
+				valuePreview: mask(value),
+				confidence,
+				reason: matches.length === 1 ? "值在之前响应中唯一出现（精确匹配）" : `值在之前 ${matches.length} 个响应中出现，取最近一个（精确匹配）`
+			});
+			boundTo.add(toKey);
+			if (confidence < .7) warnings.push({
+				code: "low-confidence-binding",
+				message: `${chosen.nodeId}.${chosen.path} → ${id}.${leaf.path} 置信度 ${confidence}：值在多个响应中出现，需 agent 确认来源。`
+			});
+			if (bindings.length >= MAX_BINDINGS) break;
+		}
+		for (const leaf of leaves.response) {
+			if (!usableLeaf(leaf)) continue;
+			const list = responseIndex.get(leafKeyValue(leaf)) ?? [];
+			list.push({
+				nodeId: id,
+				path: leaf.path
+			});
+			responseIndex.set(leafKeyValue(leaf), list);
+		}
+	}
+	const inputMap = /* @__PURE__ */ new Map();
+	for (let index = 0; index < mutable.length; index += 1) {
+		mutable[index];
+		const id = `n${index + 1}`;
+		const leaves = nodeLeaves.get(id);
+		if (leaves === void 0) continue;
+		for (const leaf of leaves.request) {
+			if (!usableLeaf(leaf)) continue;
+			if (boundTo.has(`${id}.${leaf.path}`)) continue;
+			const value = leafKeyValue(leaf);
+			const existing = inputMap.get(leaf.path);
+			if (existing === void 0) inputMap.set(leaf.path, {
+				path: leaf.path,
+				nodeIds: /* @__PURE__ */ new Set([id]),
+				values: /* @__PURE__ */ new Set([value]),
+				example: value
+			});
+			else {
+				existing.nodeIds.add(id);
+				existing.values.add(value);
+			}
+		}
+	}
+	const inputs = [];
+	const constants = [];
+	const usedNames = /* @__PURE__ */ new Set();
+	let inputIndex = 0;
+	for (const item of inputMap.values()) {
+		if (inputs.length >= MAX_INPUTS) break;
+		if ([...item.values].some((value) => likelyDynamic(value))) {
+			warnings.push({
+				code: "unresolved-dynamic",
+				message: `${item.path} 的值像动态 ID/时间戳/编码，未作为输入（需 agent 确认派生来源）。`
+			});
+			continue;
+		}
+		if (item.values.size === 1 && item.nodeIds.size > 1) {
+			if (constants.length < MAX_CONSTANTS) constants.push({
+				path: item.path,
+				valuePreview: mask(item.example),
+				nodeIds: [...item.nodeIds]
+			});
+			continue;
+		}
+		const type = typeof [...item.values][0] === "number" ? "number" : "string";
+		const base = leafName(item.path);
+		const name = uniqueName(base === "value" ? `input_${inputIndex + 1}` : base, usedNames);
+		inputIndex += 1;
+		inputs.push({
+			name,
+			path: item.path,
+			nodeId: [...item.nodeIds][0],
+			nodeIds: [...item.nodeIds],
+			type,
+			examplePreview: mask(item.example),
+			required: item.nodeIds.size <= 1,
+			confidence: item.values.size > 1 ? .8 : .55,
+			reason: item.values.size > 1 ? "同一路径在不同节点取值不同，像业务入参" : "未在前序响应中找到来源"
+		});
+	}
+	const lastNode = nodes[nodes.length - 1];
+	const outputs = [];
+	if (lastNode !== void 0) {
+		const leaves = nodeLeaves.get(lastNode.id)?.response ?? [];
+		const usedOutputs = /* @__PURE__ */ new Set();
+		for (const leaf of leaves) {
+			if (outputs.length >= MAX_OUTPUTS) break;
+			if (SENSITIVE_KEY.test(leaf.path)) continue;
+			const name = uniqueName(leafName(leaf.path), usedOutputs);
+			outputs.push({
+				name,
+				path: leaf.path,
+				nodeId: lastNode.id,
+				type: typeof leaf.value === "number" ? "number" : typeof leaf.value === "boolean" ? "boolean" : "string",
+				examplePreview: mask(String(leaf.value))
+			});
+		}
+	}
+	const assertions = [];
+	for (const node of nodes) {
+		if (node.status !== void 0) assertions.push({
+			nodeId: node.id,
+			path: "status",
+			equals: String(node.status),
+			confidence: .9,
+			reason: "录制时 HTTP 状态码"
+		});
+		const leaves = nodeLeaves.get(node.id)?.response ?? [];
+		for (const leaf of leaves) {
+			if (assertions.length >= MAX_ASSERTIONS) break;
+			if (!SUCCESS_KEY.test(leafName(leaf.path))) continue;
+			const value = String(leaf.value);
+			if (!SUCCESS_VALUES.has(value.toLowerCase())) continue;
+			if (assertions.some((item) => item.nodeId === node.id && item.path === leaf.path)) continue;
+			assertions.push({
+				nodeId: node.id,
+				path: leaf.path,
+				equals: value,
+				confidence: .7,
+				reason: "响应中的成功标记字段（通用键名启发）"
+			});
+		}
+	}
+	const candidateLeaves = [...nodeLeaves.values()].reduce((sum, item) => sum + item.request.length, 0);
+	const boundLeaves = bindings.length;
+	const analyzedSamples = trace.samples.length - skipped.length;
+	const stats = {
+		totalSamples: trace.stats.totalSamples,
+		analyzedSamples,
+		skippedSamples: skipped.length,
+		nodes: nodes.length,
+		writes: nodes.filter((node) => node.write).length,
+		pages: new Set(nodes.map((node) => node.pageUrl).filter((page) => page !== void 0)).size,
+		truncatedBodies: trace.stats.truncatedBodies,
+		staticAssets
+	};
+	if (nodes.length === 0) warnings.push({
+		code: "no-business-calls",
+		message: "没有可分析的业务调用（全部被识别为静态资源或空 trace）。"
+	});
+	if (bindings.length === 0 && nodes.length > 1) warnings.push({
+		code: "no-bindings",
+		message: "没有推断出字段流转：可能是正文加密/截断，或接口之间没有值传递。"
+	});
+	return {
+		captureId: trace.captureId,
+		entryUrl: trace.entryUrl,
+		stats,
+		nodes,
+		bindings,
+		inputs,
+		constants,
+		outputs,
+		assertions,
+		coverage: {
+			candidateLeaves,
+			boundLeaves,
+			bindingCoverage: candidateLeaves === 0 ? 0 : Number((boundLeaves / candidateLeaves).toFixed(3)),
+			callCoverage: trace.samples.length === 0 ? 0 : Number((analyzedSamples / trace.samples.length).toFixed(3))
+		},
+		warnings: warnings.slice(0, 100)
+	};
+}
+
+//#endregion
+//#region src/trace/draft.ts
+/**
+* S3：TraceAnalysis → interface-chain 草稿。
+*
+* 只做“草稿”：不落正式版本、不执行、不碰目标系统。
+* 业务值不写死：未绑定的请求字段变成链级 input（`$inputs.<name>`），由 agent/用户填写；
+* 绑定边来自 S2 推断；卡片必须已在项目接口库，否则该节点跳过并 warning。
+*
+* @module dsh-dataforge/trace/draft
+*/
+function hostOf$2(url) {
+	try {
+		return new URL(url).host;
+	} catch {
+		return "";
+	}
+}
+function safeFlow(captureId) {
+	return `trace-${captureId.replace(/[^A-Za-z0-9_-]/g, "-").slice(-24)}`;
+}
+function safeName(raw, used, fallback) {
+	const clean = raw.replace(/[^A-Za-z0-9_]/g, "_").replace(/^_+/, "").slice(0, 50);
+	const base = clean === "" ? fallback : clean;
+	if (!used.has(base)) {
+		used.add(base);
+		return base;
+	}
+	let index = 2;
+	while (used.has(`${base}_${index}`)) index += 1;
+	used.add(`${base}_${index}`);
+	return `${base}_${index}`;
+}
+function warn(warnings, code, message, nodeId, path) {
+	warnings.push({
+		code,
+		message,
+		...nodeId === void 0 ? {} : { nodeId },
+		...path === void 0 ? {} : { path }
+	});
+}
+function inputTypeOf(input) {
+	return input.type === "number" ? "number" : input.type === "boolean" ? "boolean" : "string";
+}
+function expectsOf(analysis, nodeId) {
+	return analysis.assertions.filter((item) => item.nodeId === nodeId && item.path !== "status" && item.path.startsWith("body.")).map((item) => ({
+		path: item.path,
+		equals: item.equals
+	}));
+}
+/**
+* 由分析结果 + 项目接口库生成草稿。
+*
+* @param analysis - S2 结果。
+* @param cards - 当前工作区接口库卡片。
+* @param options - site/flow/domain/note；缺省 site=entryUrl host、flow=trace-<captureId>。
+*/
+function buildChainDraft(analysis, cards, options = {}) {
+	if (cards.length === 0) return {
+		ok: false,
+		code: "no-cards",
+		error: "项目接口库为空：先 dataforge_library_import 导入采集卡，再生成链草稿",
+		hints: ["接口库在 <workspace>/.dsh/dataforge/library，不读取目标系统数据库"]
+	};
+	const byMergeKey = /* @__PURE__ */ new Map();
+	for (const card of cards) byMergeKey.set(card.identity.mergeKey, card);
+	const byCardId = /* @__PURE__ */ new Map();
+	for (const card of cards) byCardId.set(card.cardId, card);
+	const resolveCard = (cardId) => byCardId.get(cardId);
+	const warnings = [];
+	const nodeByTraceId = /* @__PURE__ */ new Map();
+	const cardByTraceId = /* @__PURE__ */ new Map();
+	for (const node of analysis.nodes) {
+		const mergeKey = node.mergeKey;
+		const card = mergeKey === void 0 ? void 0 : byMergeKey.get(mergeKey);
+		if (card === void 0) {
+			warn(warnings, "card-not-imported", `${node.method} ${node.path} 没有匹配的接口库卡；该节点未进入草稿（先导入采集卡，或让 agent 补卡）`, node.id);
+			continue;
+		}
+		const chainNode = {
+			id: node.id,
+			card: card.cardId,
+			constants: {}
+		};
+		const expects = expectsOf(analysis, node.id);
+		if (expects.length === 1) chainNode.expect = expects[0];
+		else if (expects.length > 1) chainNode.expects = expects;
+		nodeByTraceId.set(node.id, chainNode);
+		cardByTraceId.set(node.id, card);
+	}
+	if (nodeByTraceId.size === 0) return {
+		ok: false,
+		code: "no-nodes",
+		error: "trace 里没有任何节点能匹配到接口库卡，无法生成链草稿",
+		hints: ["先把该 capture 的接口卡导入接口库（dataforge_library_import），再重试"]
+	};
+	const usedInputNames = /* @__PURE__ */ new Set();
+	const inputs = [];
+	const inputByPath = /* @__PURE__ */ new Map();
+	for (const input of analysis.inputs) {
+		const chainInput = {
+			name: safeName(input.name, usedInputNames, "input"),
+			type: inputTypeOf(input),
+			required: input.required
+		};
+		inputs.push(chainInput);
+		inputByPath.set(input.path, chainInput);
+	}
+	for (const input of analysis.inputs) {
+		const chainInput = inputByPath.get(input.path);
+		if (chainInput === void 0) continue;
+		for (const nodeId of input.nodeIds) {
+			const card = cardByTraceId.get(nodeId);
+			const node = nodeByTraceId.get(nodeId);
+			if (card === void 0 || node === void 0) continue;
+			if (!isFieldDeclared(input.path, card.inputs)) {
+				warn(warnings, "input-not-in-card", `${nodeId}.${input.path} 不在卡 ${card.cardId} 的入参模板里；未写入常量`, nodeId, input.path);
+				continue;
+			}
+			const key = findDeclaredField(input.path, card.inputs)?.path ?? input.path;
+			node.constants[key] = `$inputs.${chainInput.name}`;
+		}
+	}
+	const referenced = /* @__PURE__ */ new Set();
+	for (const node of nodeByTraceId.values()) for (const value of Object.values(node.constants)) {
+		const match = /^\$inputs\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(value);
+		if (match !== null) referenced.add(match[1]);
+	}
+	const filteredInputs = inputs.filter((input) => {
+		if (referenced.has(input.name)) return true;
+		warn(warnings, "unreferenced-input", `输入 ${input.name} 在卡入参里找不到落点，已从草稿移除`, void 0, input.name);
+		return false;
+	});
+	const edges = [];
+	for (const binding of analysis.bindings) {
+		const fromNode = nodeByTraceId.get(binding.from.nodeId);
+		const toNode = nodeByTraceId.get(binding.to.nodeId);
+		const fromCard = cardByTraceId.get(binding.from.nodeId);
+		const toCard = cardByTraceId.get(binding.to.nodeId);
+		if (fromNode === void 0 || toNode === void 0 || fromCard === void 0 || toCard === void 0) continue;
+		if (!isFieldDeclared(binding.from.path, fromCard.outputs)) {
+			warn(warnings, "binding-source-not-in-card", `${binding.from.nodeId}.${binding.from.path} 不在卡 ${fromCard.cardId} 的出参模板里；跳过该边`, binding.from.nodeId, binding.from.path);
+			continue;
+		}
+		if (!isFieldDeclared(binding.to.path, toCard.inputs)) {
+			warn(warnings, "binding-target-not-in-card", `${binding.to.nodeId}.${binding.to.path} 不在卡 ${toCard.cardId} 的入参模板里；跳过该边`, binding.to.nodeId, binding.to.path);
+			continue;
+		}
+		edges.push({
+			from: `${binding.from.nodeId}.${binding.from.path}`,
+			to: `${binding.to.nodeId}.${binding.to.path}`
+		});
+	}
+	for (const [traceId, card] of cardByTraceId) {
+		const node = nodeByTraceId.get(traceId);
+		if (node === void 0) continue;
+		const covered = new Set(Object.keys(node.constants));
+		for (const edge of edges) if (edge.to.startsWith(`${traceId}.`)) covered.add(edge.to.slice(traceId.length + 1));
+		for (const field of card.inputs) {
+			if (field.required !== true) continue;
+			if ([...covered].some((path) => isFieldDeclared(path, [field]))) continue;
+			warn(warnings, "missing-required-input", `${traceId}.${field.path} 是必填入参，但 trace 里没有值/绑定；草稿会缺参`, traceId, field.path);
+		}
+	}
+	const site = (options.site ?? "").trim() || hostOf$2(analysis.entryUrl) || "unknown-site";
+	const flow = (options.flow ?? "").trim() || safeFlow(analysis.captureId);
+	const chain = {
+		apiVersion: CHAIN_API_VERSION,
+		kind: "interface-chain",
+		meta: {
+			site,
+			flow,
+			version: 1,
+			created: (/* @__PURE__ */ new Date()).toISOString(),
+			source: "agent",
+			...options.domain === void 0 || options.domain.trim() === "" ? {} : { domain: options.domain.trim() },
+			...options.note === void 0 || options.note.trim() === "" ? {} : { note: options.note.trim() }
+		},
+		inputs: filteredInputs,
+		nodes: [...nodeByTraceId.values()],
+		edges
+	};
+	const validation = validateChain(chain, { resolveCard });
+	const validationOk = validation.ok;
+	if (!validationOk) for (const issue of validation.issues) warn(warnings, issue.code, `${issue.target}：${issue.reason}`);
+	const finalChain = validationOk ? validation.doc : chain;
+	return {
+		ok: true,
+		site,
+		flow,
+		...chain.meta.domain === void 0 ? {} : { domain: chain.meta.domain },
+		chain: finalChain,
+		yaml: chainToYaml(finalChain),
+		warnings,
+		validation: validationOk ? {
+			ok: true,
+			issues: []
+		} : {
+			ok: false,
+			issues: validation.issues
+		},
+		outputs: analysis.outputs,
+		coverage: analysis.coverage
+	};
+}
+
+//#endregion
+//#region src/trace/read.ts
+/**
+* 从采集库只读读取一条 capture 的 trace。
+*
+* 只读纪律与接口库导入一致：`readonly: true, fileMustExist: true`，不建表、不写事件。
+* 正文读取顺序：落盘文件（完整）→ DB 预览（最多 512 字符）→ 缺失；截断必须如实标注。
+*
+* @module dsh-dataforge/trace/read
+*/
+const SENSITIVE_HEADER = /authorization|proxy-authorization|cookie|set-cookie|token|secret|password|api[-_]?key|session/i;
+const SENSITIVE_BODY_KEY = /authorization|cookie|token|secret|password|api[-_]?key|session/i;
+const PREVIEW_CAP = 512;
+function clamp(value, min, max, fallback) {
+	if (value === void 0 || !Number.isFinite(value)) return fallback;
+	return Math.min(Math.max(Math.floor(value), min), max);
+}
+function failure$1(code, error, hints) {
+	return {
+		ok: false,
+		code,
+		error,
+		...hints === void 0 ? {} : { hints }
+	};
+}
+function parseHeaders(raw) {
+	const values = {};
+	const sensitive = [];
+	if (typeof raw !== "string" || raw === "") return {
+		values,
+		sensitive
+	};
+	let parsed;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return {
+			values,
+			sensitive
+		};
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {
+		values,
+		sensitive
+	};
+	for (const [name, value] of Object.entries(parsed)) {
+		if (SENSITIVE_HEADER.test(name)) {
+			sensitive.push(name);
+			continue;
+		}
+		if (typeof value === "string") values[name] = value;
+	}
+	sensitive.sort();
+	return {
+		values,
+		sensitive
+	};
+}
+function redactJson(value, depth = 0) {
+	if (depth > 8) return "[depth]";
+	if (Array.isArray(value)) return value.map((item) => redactJson(item, depth + 1));
+	if (value !== null && typeof value === "object") {
+		const out = {};
+		for (const [key, item] of Object.entries(value)) out[key] = SENSITIVE_BODY_KEY.test(key) ? "[redacted]" : redactJson(item, depth + 1);
+		return out;
+	}
+	return value;
+}
+/** 工具回执用的正文脱敏：JSON 递归按敏感键替换；表单按参数名替换；其它原样截断。 */
+function redactBodyForDisplay(body) {
+	if (body === void 0) return void 0;
+	const trimmed = body.trim();
+	if (trimmed.startsWith("{") || trimmed.startsWith("[")) try {
+		return JSON.stringify(redactJson(JSON.parse(trimmed)));
+	} catch {
+		return body;
+	}
+	if (/^[^=&\s]+=[^&\s]*(?:&[^=&\s]+=[^&\s]*)*$/.test(trimmed)) try {
+		const params = new URLSearchParams(trimmed);
+		const out = new URLSearchParams();
+		for (const [key, value] of params.entries()) out.append(key, SENSITIVE_BODY_KEY.test(key) ? "[redacted]" : value);
+		return out.toString();
+	} catch {
+		return body;
+	}
+	return body;
+}
+function safeReadFile(root, relPath) {
+	try {
+		const rootAbs = resolve(root);
+		const abs = resolve(rootAbs, relPath);
+		if (abs !== rootAbs && !abs.startsWith(`${rootAbs}${sep}`)) return void 0;
+		if (!existsSync(abs)) return void 0;
+		return readFileSync(abs);
+	} catch {
+		return;
+	}
+}
+function readBody$3(samplesDir, bodyPath, preview, cap, rawTruncated) {
+	if (bodyPath !== void 0 && bodyPath !== "") {
+		const buffer = safeReadFile(samplesDir, bodyPath);
+		if (buffer !== void 0) {
+			const truncated = buffer.byteLength > cap;
+			return {
+				body: truncated ? buffer.subarray(0, cap).toString("utf8") : buffer.toString("utf8"),
+				source: "file",
+				truncated
+			};
+		}
+	}
+	if (preview !== void 0 && preview !== "") return {
+		body: preview.slice(0, cap),
+		source: "preview",
+		truncated: preview.length >= PREVIEW_CAP || rawTruncated
+	};
+	return {
+		source: "none",
+		truncated: rawTruncated
+	};
+}
+function parseUrl(url) {
+	try {
+		const parsed = new URL(url);
+		const query = {};
+		for (const [key, value] of parsed.searchParams.entries()) query[key] = value;
+		return {
+			path: parsed.pathname,
+			query
+		};
+	} catch {
+		return {
+			path: url,
+			query: {}
+		};
+	}
+}
+/**
+* 读一条 capture 的 trace；失败返回结构化 code（不抛业务错）。
+*
+* @param deps - 采集库路径 + 落盘正文根。
+* @param captureId - 采集 run id。
+* @param options - limit/bodyLimit/redactBodies/includeBodies。
+*/
+function readTrace(deps, captureId, options = {}) {
+	const id = typeof captureId === "string" ? captureId.trim() : "";
+	if (id === "" || id.length > 200 || /[\\/]/.test(id)) return failure$1("bad-capture-id", "capture_id 非法：需要采集 run id（不含路径分隔符）", ["先用 dataforge_capture_status 或面板确认 captureId"]);
+	if (!existsSync(deps.captureDbPath)) return failure$1("capture-not-found", `采集库不存在：${deps.captureDbPath}`, ["先跑一次采集，再生成 trace"]);
+	const limit = clamp(options.limit, 1, 2e3, 200);
+	const bodyLimit = clamp(options.bodyLimit, 256, 65536, 8192);
+	let db;
+	try {
+		db = new Database(deps.captureDbPath, {
+			readonly: true,
+			fileMustExist: true
+		});
+	} catch (error) {
+		return failure$1("capture-unreadable", `采集库打不开（只读）：${error.message}`, ["确认采集库没有被独占写入；或先关闭正在跑的采集"]);
+	}
+	try {
+		const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+		if (!tables.has("capture_runs") || !tables.has("request_samples")) return failure$1("capture-empty", "采集库里还没有 capture_runs/request_samples：没有可读的 trace", ["先跑一次采集"]);
+		const run = db.prepare("SELECT id,entry_url,status FROM capture_runs WHERE id=?").get(id);
+		const countRow = db.prepare("SELECT COUNT(*) AS n FROM request_samples WHERE capture_id=?").get(id);
+		const totalSamples = Number(countRow.n);
+		if (run === void 0 && totalSamples === 0) return failure$1("capture-not-found", `没有这个 capture：${id}`, ["先用 dataforge_capture_status 列最近采集，确认 id"]);
+		if (totalSamples === 0) return failure$1("capture-empty", `capture ${id} 还没有请求样本`, ["确认采集已完成且页面确实产生了 XHR/fetch；或重采一条"]);
+		const relations = /* @__PURE__ */ new Map();
+		if (tables.has("page_card_relations")) {
+			const relRows = db.prepare("SELECT id,card_id FROM page_card_relations WHERE capture_id=?").all(id);
+			const cards = /* @__PURE__ */ new Map();
+			if (tables.has("interface_cards")) {
+				const cardRows = db.prepare("SELECT id,merge_key FROM interface_cards WHERE capture_id=?").all(id);
+				for (const card of cardRows) cards.set(card.id, card.merge_key === null ? {} : { mergeKey: card.merge_key });
+			}
+			for (const rel of relRows) {
+				const card = cards.get(rel.card_id);
+				relations.set(rel.id, {
+					cardId: rel.card_id,
+					...card?.mergeKey === void 0 ? {} : { mergeKey: card.mergeKey }
+				});
+			}
+		}
+		const rows = db.prepare(`SELECT id,page_url,ts,seq,url,method,status,request_headers_json,request_body_path,request_body_preview,
+                response_headers_json,response_body_path,response_preview,truncated,relation_id
+           FROM request_samples WHERE capture_id=? ORDER BY seq ASC, ts ASC LIMIT ?`).all(id, limit);
+		const includeBodies = options.includeBodies !== false;
+		const redactBodies = options.redactBodies === true;
+		const warnings = [];
+		const interfaces = /* @__PURE__ */ new Set();
+		const pages = /* @__PURE__ */ new Set();
+		let writes = 0;
+		let truncatedBodies = 0;
+		const samples = rows.map((row) => {
+			const method = String(row.method || "GET").toUpperCase();
+			const url = String(row.url || "");
+			const parsed = parseUrl(url);
+			const request = readBody$3(deps.samplesDir, row.request_body_path ?? void 0, row.request_body_preview ?? void 0, bodyLimit, row.truncated === 1);
+			const response = readBody$3(deps.samplesDir, row.response_body_path ?? void 0, row.response_preview ?? void 0, bodyLimit, row.truncated === 1);
+			if (request.truncated || response.truncated) truncatedBodies += 1;
+			if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") writes += 1;
+			interfaces.add(`${method} ${parsed.path}`);
+			const pageUrl = typeof row.page_url === "string" && row.page_url !== "" ? row.page_url : void 0;
+			if (pageUrl !== void 0) pages.add(pageUrl);
+			const relation = row.relation_id === null ? void 0 : relations.get(row.relation_id);
+			const requestBody = includeBodies && request.body !== void 0 ? redactBodies ? redactBodyForDisplay(request.body) : request.body : void 0;
+			const responseBody = includeBodies && response.body !== void 0 ? redactBodies ? redactBodyForDisplay(response.body) : response.body : void 0;
+			return {
+				id: String(row.id),
+				seq: Number(row.seq),
+				ts: Number(row.ts),
+				method,
+				url,
+				path: parsed.path,
+				query: parsed.query,
+				...row.status === null ? {} : { status: Number(row.status) },
+				...pageUrl === void 0 ? {} : { pageUrl },
+				requestHeaders: parseHeaders(row.request_headers_json),
+				...requestBody === void 0 ? {} : { requestBody },
+				requestBodySource: includeBodies ? request.source : "none",
+				requestBodyTruncated: includeBodies ? request.truncated : false,
+				responseHeaders: parseHeaders(row.response_headers_json),
+				...responseBody === void 0 ? {} : { responseBody },
+				responseBodySource: includeBodies ? response.source : "none",
+				responseBodyTruncated: includeBodies ? response.truncated : false,
+				truncated: row.truncated === 1,
+				...relation === void 0 ? {} : { cardId: relation.cardId },
+				...relation?.mergeKey === void 0 ? {} : { mergeKey: relation.mergeKey }
+			};
+		});
+		if (rows.length < totalSamples) warnings.push({
+			code: "trace-limit",
+			message: `只返回了前 ${rows.length} / ${totalSamples} 条样本（limit=${limit}）；分析全文时提高 limit。`
+		});
+		if (truncatedBodies > 0) warnings.push({
+			code: "body-truncated",
+			message: `${truncatedBodies} 条样本的正文被截断/只有预览；字段流转推断可能漏字段。`
+		});
+		const stats = {
+			totalSamples,
+			returnedSamples: samples.length,
+			interfaces: interfaces.size,
+			writes,
+			pages: pages.size,
+			truncatedBodies
+		};
+		return {
+			captureId: id,
+			entryUrl: run?.entry_url ?? "",
+			...run === void 0 ? {} : { status: run.status },
+			samples,
+			stats,
+			warnings
+		};
+	} finally {
+		db.close();
+	}
+}
+
+//#endregion
+//#region src/trace/application.ts
+/**
+* Trace 工具应用层：读 trace / 分析 trace。
+*
+* 与工具壳分离：这里只做参数收口、只读读取、分析结果合并与错误返回；
+* 工具壳负责 schema 与模型可见的渲染。
+*
+* @module dsh-dataforge/trace/application
+*/
+function traceGetForTool(deps, args) {
+	const trace = readTrace(deps, args.capture_id, {
+		...args.limit === void 0 ? {} : { limit: args.limit },
+		...args.body_limit === void 0 ? {} : { bodyLimit: args.body_limit },
+		redactBodies: true,
+		includeBodies: true
+	});
+	if ("ok" in trace) return trace;
+	return {
+		ok: true,
+		captureId: trace.captureId,
+		entryUrl: trace.entryUrl,
+		...trace.status === void 0 ? {} : { status: trace.status },
+		stats: trace.stats,
+		samples: trace.samples,
+		warnings: trace.warnings
+	};
+}
+async function chainDraftForTool(deps, exec, args) {
+	const trace = readTrace(deps, args.capture_id, {
+		limit: args.limit ?? 1e3,
+		bodyLimit: 65536,
+		redactBodies: false,
+		includeBodies: true
+	});
+	if ("ok" in trace) return trace;
+	const workspaceRoot = await deps.resolveWorkspaceRoot(exec);
+	if (workspaceRoot === void 0) return {
+		ok: false,
+		code: "no-workspace",
+		error: "无法解析工作区根：接口库/链文件都按工作区落盘"
+	};
+	const analysis = analyzeTrace(trace);
+	const cards = listCards(workspaceRoot);
+	const built = buildChainDraft(analysis, cards, {
+		...args.site === void 0 ? {} : { site: args.site },
+		...args.flow === void 0 ? {} : { flow: args.flow },
+		...args.domain === void 0 ? {} : { domain: args.domain },
+		...args.note === void 0 ? {} : { note: args.note }
+	});
+	if (built.ok !== true) return built;
+	return {
+		ok: true,
+		captureId: trace.captureId,
+		site: built.site,
+		flow: built.flow,
+		...built.domain === void 0 ? {} : { domain: built.domain },
+		yaml: built.yaml,
+		chain: built.chain,
+		warnings: [...trace.warnings.map((warning) => ({
+			code: warning.code,
+			message: warning.message
+		})), ...built.warnings],
+		validation: built.validation,
+		outputs: built.outputs,
+		coverage: built.coverage
+	};
+}
+function traceAnalyzeForTool(deps, args) {
+	const trace = readTrace(deps, args.capture_id, {
+		limit: args.limit ?? 1e3,
+		bodyLimit: 65536,
+		redactBodies: false,
+		includeBodies: true
+	});
+	if ("ok" in trace) return trace;
+	const analysis = analyzeTrace(trace);
+	return {
+		ok: true,
+		captureId: trace.captureId,
+		entryUrl: trace.entryUrl,
+		analysis: {
+			...analysis,
+			warnings: [...trace.warnings, ...analysis.warnings].slice(0, 100)
+		}
+	};
+}
+
+//#endregion
+//#region src/lookup/lookup.ts
+/**
+* 运行时 lookup：业务值从接口（或后续页面）获取，带缓存与来源。
+*
+* 解决的是“生态链 → stockOrg/purchaseOrg”这类映射不能写死的问题：
+*   - YAML 只声明**怎么查**（源、路径、匹配字段、映射字段），不存业务值；
+*   - 运行时 fetch 接口 → 缓存 items → 按 query 匹配 → 返回值 + source/fetchedAt；
+*   - 代码里不出现任何业务名称/编码。
+*
+* 本期只实现 `source.kind: api`（GET/HEAD）；page 来源明确返回 unavailable，
+* 不伪造页面读取成功（后续 S5 可接 UiBrowserEngine / 无头页面读取）。
+*
+* @module dsh-dataforge/lookup/lookup
+*/
+function failure(code, error, hints) {
+	return {
+		ok: false,
+		code,
+		error,
+		...hints === void 0 ? {} : { hints }
+	};
+}
+function optionalString(value) {
+	return typeof value === "string" && value.trim() !== "" ? value.trim() : void 0;
+}
+function expandEnv(text) {
+	return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, name) => {
+		const value = process.env[name];
+		if (value === void 0) throw new Error(`lookup 配置引用的环境变量不存在：${name}`);
+		return value;
+	});
+}
+/** 极简 JSON 路径：`$.a.b[0].c` / `a.b`；不支持通配，lookup 只需要标量/数组。 */
+function getByPath(value, path) {
+	const trimmed = path.trim();
+	if (trimmed === "" || trimmed === "$" || trimmed === ".") return value;
+	const normalized = trimmed.replace(/^\$?\.?/, "");
+	const tokens = [];
+	for (const part of normalized.split(".")) {
+		const matches = [...part.matchAll(/([^[\]]+)|\[(\d+)\]/g)];
+		for (const match of matches) if (match[1] !== void 0 && match[1] !== "") tokens.push(match[1]);
+		else if (match[2] !== void 0) tokens.push(Number(match[2]));
+	}
+	let current = value;
+	for (const token of tokens) if (typeof token === "number") {
+		if (!Array.isArray(current) || token < 0 || token >= current.length) return void 0;
+		current = current[token];
+	} else {
+		if (current === null || typeof current !== "object" || Array.isArray(current)) return void 0;
+		current = current[token];
+	}
+	return current;
+}
+function parseConfig(raw, name) {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("lookup yaml 必须是映射");
+	const doc = raw;
+	if (doc["kind"] !== void 0 && doc["kind"] !== "data-lookup") throw new Error(`kind 必须是 data-lookup（收到 ${String(doc["kind"])}）`);
+	const source = doc["source"];
+	if (source === null || typeof source !== "object" || Array.isArray(source)) throw new Error("source 必须是映射");
+	const s = source;
+	const kind = s["kind"];
+	if (kind !== "api" && kind !== "page") throw new Error("source.kind 必须是 api 或 page");
+	const mapRaw = s["map"];
+	if (mapRaw === null || typeof mapRaw !== "object" || Array.isArray(mapRaw)) throw new Error("source.map 必须是字段映射");
+	const map = {};
+	for (const [key, value] of Object.entries(mapRaw)) {
+		if (typeof value !== "string" || value.trim() === "") throw new Error(`source.map.${key} 必须是 JSON 路径`);
+		map[key] = value.trim();
+	}
+	if (Object.keys(map).length === 0) throw new Error("source.map 不能为空");
+	const site = optionalString(doc["site"]);
+	const cacheRaw = doc["cache"];
+	const ttl = cacheRaw !== null && typeof cacheRaw === "object" && !Array.isArray(cacheRaw) ? Number(cacheRaw["ttlSeconds"]) : void 0;
+	const common = {
+		kind: "data-lookup",
+		name: optionalString(doc["name"]) ?? name,
+		...site === void 0 ? {} : { site },
+		cache: ttl !== void 0 && Number.isFinite(ttl) && ttl >= 0 ? { ttlSeconds: Math.floor(ttl) } : { ttlSeconds: 86400 }
+	};
+	if (kind === "api") {
+		const matchRaw = s["match"];
+		const match = Array.isArray(matchRaw) ? matchRaw.filter((item) => typeof item === "string" && item.trim() !== "") : typeof matchRaw === "string" && matchRaw.trim() !== "" ? [matchRaw.trim()] : [];
+		if (match.length === 0) throw new Error("api lookup 的 source.match 至少给一个字段路径");
+		return {
+			...common,
+			source: {
+				kind: "api",
+				...optionalString(s["baseUrl"]) === void 0 ? {} : { baseUrl: expandEnv(String(s["baseUrl"])) },
+				path: optionalString(s["path"]) ?? (() => {
+					throw new Error("api lookup 缺 source.path");
+				})(),
+				method: s["method"] === "HEAD" ? "HEAD" : "GET",
+				...s["query"] !== null && typeof s["query"] === "object" && !Array.isArray(s["query"]) ? { query: Object.fromEntries(Object.entries(s["query"]).filter((entry) => typeof entry[1] === "string")) } : {},
+				...s["headers"] !== null && typeof s["headers"] === "object" && !Array.isArray(s["headers"]) ? { headers: Object.fromEntries(Object.entries(s["headers"]).filter((entry) => typeof entry[1] === "string")) } : {},
+				...optionalString(s["items"]) === void 0 ? {} : { items: optionalString(s["items"]) },
+				match,
+				map
+			}
+		};
+	}
+	const items = optionalString(s["items"]);
+	const label = optionalString(s["label"]);
+	if (items === void 0) throw new Error("page lookup 缺 source.items（CSS selector）");
+	if (label === void 0) throw new Error("page lookup 缺 source.label（text 或 attr:<name>）");
+	const mapSpec = {};
+	for (const [key, value] of Object.entries(map)) {
+		if (value !== "text" && !/^attr:.+/.test(value)) throw new Error(`page lookup 的 map.${key} 必须是 text 或 attr:<name>`);
+		mapSpec[key] = value;
+	}
+	return {
+		...common,
+		source: {
+			kind: "page",
+			url: optionalString(s["url"]) ?? (() => {
+				throw new Error("page lookup 缺 source.url");
+			})(),
+			items,
+			label: label === "text" || /^attr:.+/.test(label) ? label : (() => {
+				throw new Error("page lookup 的 source.label 必须是 text 或 attr:<name>");
+			})(),
+			map: mapSpec
+		}
+	};
+}
+function cachePath(dataRoot, site, name) {
+	const safeSite = site.replace(/[^A-Za-z0-9._-]/g, "_") || "default";
+	const safeName = name.replace(/[^A-Za-z0-9._-]/g, "_") || "lookup";
+	return join(dataRoot, "lookups", safeSite, `${safeName}.json`);
+}
+function configHash(config) {
+	return JSON.stringify(config.source);
+}
+function readCache(path) {
+	if (!existsSync(path)) return void 0;
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf8"));
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+		const file = parsed;
+		if (!Array.isArray(file.items) || typeof file.fetchedAt !== "string" || typeof file.configHash !== "string") return void 0;
+		return file;
+	} catch {
+		return;
+	}
+}
+function writeCache(path, file) {
+	mkdirSync(dirname(path), { recursive: true });
+	const tmp = `${path}.tmp`;
+	writeFileSync(tmp, JSON.stringify(file, null, 2), "utf8");
+	renameSync(tmp, path);
+}
+function valueOf(item, path) {
+	const value = getByPath(item, path);
+	return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : void 0;
+}
+function matchItem(item, match, query) {
+	const wanted = query.trim().toLowerCase();
+	for (const path of match) {
+		const value = valueOf(item, path);
+		if (value === void 0) continue;
+		const text = String(value).trim();
+		if (text.toLowerCase() === wanted || text.toLowerCase().includes(wanted)) return text;
+	}
+}
+async function fetchItems(config, query, fetchImpl) {
+	if (config.source.kind !== "api") throw new Error("page source 不能走 fetchItems");
+	const source = config.source;
+	const base = source.baseUrl === void 0 ? void 0 : expandEnv(source.baseUrl);
+	let url;
+	try {
+		url = base === void 0 ? new URL(source.path) : new URL(source.path, base.endsWith("/") ? base : `${base}/`);
+	} catch {
+		throw new Error(`lookup URL 不合法：${source.path}`);
+	}
+	for (const [key, template] of Object.entries(source.query ?? {})) url.searchParams.set(key, template.replaceAll("{{query}}", query));
+	const headers = { accept: "application/json" };
+	for (const [key, value] of Object.entries(source.headers ?? {})) headers[key] = expandEnv(value);
+	const response = await fetchImpl(url.toString(), {
+		method: source.method ?? "GET",
+		headers,
+		signal: AbortSignal.timeout(15e3)
+	});
+	if (!response.ok) throw new Error(`lookup 接口返回 HTTP ${response.status}`);
+	const itemsValue = getByPath(await response.json(), source.items ?? "$");
+	if (!Array.isArray(itemsValue)) throw new Error("lookup items 路径没有返回数组");
+	return {
+		items: itemsValue,
+		description: `${source.method ?? "GET"} ${url.pathname}`
+	};
+}
+async function loadConfig(workspaceRoot, dataRoot, name) {
+	const path = [
+		join(workspaceRoot, ".dsh", "dataforge", "lookups", `${name}.yaml`),
+		join(workspaceRoot, ".dsh", "dataforge", "lookups", `${name}.yml`),
+		join(dataRoot, "lookups", `${name}.yaml`)
+	].find((candidate) => existsSync(candidate));
+	if (path === void 0) return void 0;
+	return parseConfig(yaml.load(readFileSync(path, "utf8"), { schema: yaml.CORE_SCHEMA }), name);
+}
+/**
+* 运行时 lookup：查缓存 → 过期则 fetch → 按 match 过滤 → map 出候选值。
+*
+* @param deps - dataRoot + 工作区解析 + 可注入 fetch。
+* @param exec - 工具执行上下文（解析工作区）。
+* @param args - name/query/site/refresh。
+*/
+async function lookupForTool(deps, exec, args) {
+	const name = args.name.trim();
+	const query = args.query.trim();
+	if (name === "") return failure("lookup-not-found", "lookup name 不能为空", ["lookup 配置放 <workspace>/.dsh/dataforge/lookups/<name>.yaml"]);
+	if (query === "") return failure("lookup-unusable", "lookup query 不能为空", ["给 query 传业务词，例如生态链"]);
+	const workspaceRoot = await deps.resolveWorkspaceRoot(exec);
+	if (workspaceRoot === void 0) return failure("no-workspace", "无法解析工作区根：lookup 配置按工作区落盘");
+	let config;
+	try {
+		config = await loadConfig(workspaceRoot, deps.dataRoot, name);
+	} catch (error) {
+		return failure("lookup-invalid", `lookup 配置无效：${error.message}`);
+	}
+	if (config === void 0) return failure("lookup-not-found", `没有 lookup 配置：${name}`, ["在 <workspace>/.dsh/dataforge/lookups/ 下新增 YAML；只声明怎么查，不写业务值"]);
+	const site = (args.site ?? config.site ?? "default").trim();
+	const path = cachePath(deps.dataRoot, site, name);
+	const hash = configHash(config);
+	const cached = readCache(path);
+	const ttl = config.cache?.ttlSeconds ?? 86400;
+	const fresh = cached !== void 0 && cached.configHash === hash && ttl > 0 && Date.now() - Date.parse(cached.fetchedAt) < ttl * 1e3;
+	let items;
+	let fetchedAt;
+	let source;
+	let cache;
+	let warnings = [];
+	if (config.source.kind === "page") {
+		if (!args.refresh && fresh && cached !== void 0) {
+			items = cached.items;
+			fetchedAt = cached.fetchedAt;
+			source = cached.source;
+			cache = "hit";
+		} else {
+			const reader = deps.pageReader;
+			if (reader === void 0) return failure("page-lookup-unavailable", "page 来源 lookup 需要页面读取器（Playwright）；当前未装配", ["先用 api 来源；或启用 pageReader"]);
+			try {
+				items = await reader(config.source);
+				fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
+				source = {
+					kind: "page",
+					description: `PAGE ${new URL(config.source.url).pathname}`
+				};
+				cache = "miss";
+				writeCache(path, {
+					name,
+					site,
+					configHash: hash,
+					fetchedAt,
+					source,
+					items
+				});
+			} catch (error) {
+				if (cached !== void 0 && cached.configHash === hash) {
+					items = cached.items;
+					fetchedAt = cached.fetchedAt;
+					source = cached.source;
+					cache = "hit";
+					warnings = [`page lookup 读取失败，降级使用缓存：${error.message}`];
+				} else return failure("lookup-http-error", `page lookup 失败：${error.message}`);
+			}
+		}
+		const candidates = items.filter((item) => item !== null && typeof item === "object" && !Array.isArray(item)).filter((item) => item.label !== void 0 && item.values !== void 0 && String(item.label).toLowerCase().includes(query.toLowerCase()));
+		return {
+			ok: true,
+			name,
+			site,
+			query,
+			cache,
+			fetchedAt,
+			source,
+			candidates,
+			warnings
+		};
+	}
+	if (!args.refresh && fresh && cached !== void 0) {
+		items = cached.items;
+		fetchedAt = cached.fetchedAt;
+		source = cached.source;
+		cache = "hit";
+	} else try {
+		const fetched = await fetchItems(config, query, deps.fetch ?? globalThis.fetch);
+		items = fetched.items;
+		source = {
+			kind: "api",
+			description: fetched.description
+		};
+		fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
+		cache = "miss";
+		writeCache(path, {
+			name,
+			site,
+			configHash: hash,
+			fetchedAt,
+			source,
+			items
+		});
+	} catch (error) {
+		if (cached !== void 0 && cached.configHash === hash) {
+			items = cached.items;
+			fetchedAt = cached.fetchedAt;
+			source = cached.source;
+			cache = "hit";
+			warnings = [`lookup 刷新失败，降级使用缓存：${error.message}`];
+		} else return failure("lookup-http-error", `lookup 查询失败：${error.message}`, ["检查 source.baseUrl/path/headers；凭证用 ${ENV} 注入，不要写进 YAML"]);
+	}
+	const candidates = [];
+	for (const item of items) {
+		const label = matchItem(item, config.source.match, query);
+		if (label === void 0) continue;
+		const values = {};
+		for (const [key, itemPath] of Object.entries(config.source.map)) {
+			const value = valueOf(item, itemPath);
+			if (value !== void 0) values[key] = value;
+		}
+		if (Object.keys(values).length === 0) continue;
+		if (candidates.some((candidate) => candidate.label === label && JSON.stringify(candidate.values) === JSON.stringify(values))) continue;
+		candidates.push({
+			label,
+			values
+		});
+	}
+	return {
+		ok: true,
+		name,
+		site,
+		query,
+		cache,
+		fetchedAt,
+		source,
+		candidates,
+		warnings
+	};
+}
+
+//#endregion
+//#region src/uitest/features.ts
+const MAX_FEATURE_TEXT = 80;
+function clean(value) {
+	if (typeof value !== "string") return void 0;
+	const text = value.replace(/\s+/g, " ").trim();
+	return text === "" ? void 0 : text.slice(0, MAX_FEATURE_TEXT);
+}
+/** 收口任意来源的 features（录制载荷 / YAML）；非法字段丢弃。 */
+function normalizeFeatures(raw) {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return void 0;
+	const value = raw;
+	const tag = clean(value["tag"]);
+	if (tag === void 0) return void 0;
+	const out = { tag: tag.toLowerCase() };
+	for (const key of [
+		"id",
+		"testId",
+		"name",
+		"ariaLabel",
+		"placeholder",
+		"role",
+		"type",
+		"text",
+		"title",
+		"alt",
+		"href",
+		"label"
+	]) {
+		const item = clean(value[key]);
+		if (item !== void 0) out[key] = item;
+	}
+	const index = value["canvasIndex"];
+	if (typeof index === "number" && Number.isInteger(index) && index >= 0 && index <= 1e4) out.canvasIndex = index;
+	return out;
+}
+/** CSS 属性值转义（只处理引号/反斜杠，特征来自真实 DOM，够用）。 */
+function quote(value) {
+	return value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+}
+/**
+* 由特征生成备用候选（按稳定性排序）。
+* 返回的字符串同时兼容 Playwright 选择器与共享引擎的映射（text= / :has-text）。
+*/
+function featureCandidates(features) {
+	if (features === void 0) return [];
+	const out = [];
+	const add = (selector) => {
+		if (selector !== "" && !out.includes(selector) && out.length < 8) out.push(selector);
+	};
+	const tag = features.tag;
+	if (features.testId !== void 0) add(`[data-testid="${quote(features.testId)}"]`);
+	if (features.id !== void 0) add(`#${features.id.replace(/([^\w-])/g, "\\$1")}`);
+	if (features.name !== void 0) add(`${tag}[name="${quote(features.name)}"]`);
+	if (features.ariaLabel !== void 0) add(`${tag}[aria-label="${quote(features.ariaLabel)}"]`);
+	if (features.placeholder !== void 0) add(`${tag}[placeholder="${quote(features.placeholder)}"]`);
+	if (features.title !== void 0) add(`${tag}[title="${quote(features.title)}"]`);
+	if (features.alt !== void 0) add(`${tag}[alt="${quote(features.alt)}"]`);
+	if (features.href !== void 0) add(`${tag}[href="${quote(features.href)}"]`);
+	if (features.role !== void 0 && features.text !== void 0) add(`[role="${quote(features.role)}"]:has-text("${quote(features.text)}")`);
+	if (features.text !== void 0 && /^(BUTTON|A|LABEL|SUMMARY)$/i.test(tag)) {
+		add(`${tag}:has-text("${quote(features.text)}")`);
+		add(`text="${quote(features.text)}"`);
+	}
+	if (features.role !== void 0) add(`[role="${quote(features.role)}"]`);
+	return out;
+}
+
+//#endregion
+//#region src/uitest/schema.ts
+/**
+* UI 测试脚本（ui-script）的契约：YAML 形状 + 类型 + 解析/校验入口。
+*
+* 定位：这是**浏览器回放**的资产，不是接口链（interface-chain）的变体。
+*   - 链走纯 HTTP，断言的是响应字段；
+*   - ui-script 走真浏览器，断言的是页面状态（元素/文本/URL），步骤就是"人怎么点"。
+* 两者共享的只有项目资产目录与运行留痕习惯，执行面互不依赖（见 README 的架构守卫）。
+*
+* 为什么用 YAML + 版本快照：
+*   - 与链/卡同款：`.dsh/dataforge/ui-tests/<site>/<flow>/vN.yaml`，进 git、可手改、可评审；
+*   - 一个版本一个文件，版本不可变（写入永远 max+1），回放记录里存版本号即快照身份。
+*
+* 选择器纪律：
+*   - `selector` 是主选择器；`candidates` 是录制器给的有序候选（优先级从高到低），
+*     回放时取**第一个在该页面唯一命中**的候选——录制期的 DOM 与回放期不完全相同，
+*     单条选择器一旦失效就整步失败，候选链让回放有容错但不猜。
+*   - `{{input}}` 是链级入参槽位引用（与链同款语法），可出现在 url / value / key / files / 断言文本里。
+*
+* @module dsh-dataforge/uitest/schema
+*/
+/** ui-script 文件格式版本；写进每份脚本，未来演进走它。 */
+const UI_SCRIPT_API_VERSION = "dataforge/v1";
+const UI_SCRIPT_KIND = "ui-script";
+/** 步骤动作词表：录得出来的、回放得回去的。 */
+const UI_STEP_KINDS = [
+	"goto",
+	"click",
+	"fill",
+	"press",
+	"select",
+	"submit",
+	"wait",
+	"upload"
+];
+/** 页面断言词表：回放判定只看页面，不看响应（响应断言走接口链）。 */
+const UI_EXPECT_KINDS = [
+	"visible",
+	"hidden",
+	"text",
+	"value",
+	"url",
+	"count"
+];
+/** 入参槽位类型词表（与链的标量词表对齐，数组在 UI 步里没有落点）。 */
+const UI_INPUT_TYPES = [
+	"string",
+	"number",
+	"boolean"
+];
+/** 单个脚本最多步骤数（再多就该拆流程，或者干脆写代码）。 */
+const MAX_UI_STEPS = 300;
+/** 单脚本最多入参槽位。 */
+const MAX_UI_INPUTS = 20;
+/** selector / 值 / 文件路径的长度上限（防手滑把整段 HTML 塞进来）。 */
+const MAX_SELECTOR_CHARS = 2e3;
+const MAX_VALUE_CHARS = 8e3;
+const MAX_FILE_CHARS = 1e3;
+/** 单个步骤最多候选/断言数。 */
+const MAX_CANDIDATES = 8;
+const MAX_EXPECTS = 10;
+/** upload 单步最多文件数。 */
+const MAX_UPLOAD_FILES = 10;
+/** wait 上限（毫秒）。 */
+const MAX_WAIT_MS = 6e4;
+function isRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function asString(value) {
+	return typeof value === "string" ? value : void 0;
+}
+/** 空白裁掉；非字符串或空串 → undefined。 */
+function textOf(value) {
+	const text = asString(value);
+	if (text === void 0) return void 0;
+	const trimmed = text.trim();
+	return trimmed.length === 0 ? void 0 : trimmed;
+}
+/** 入参引用语法：`{{name}}`（名字与链的槽位规则一致：字母/数字/下划线，字母开头）。 */
+const INPUT_REF_RE = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
+/** 一段文本里引用了哪些入参（去重保序）。 */
+function inputRefsOf(text) {
+	if (text === void 0) return [];
+	const refs = [];
+	for (const match of text.matchAll(INPUT_REF_RE)) if (!refs.includes(match[1])) refs.push(match[1]);
+	return refs;
+}
+/** 用入参值替换 `{{name}}`；未提供的槽位原样保留（由缺参闸在运行前拦）。 */
+function substituteInputs(text, inputs) {
+	return text.replace(INPUT_REF_RE, (whole, name) => {
+		const value = inputs[name];
+		return value === void 0 ? whole : value;
+	});
+}
+/** 一个步骤里所有可替换文本（校验引用与运行期替换共用同一入口）。 */
+function substitutableTextsOf(step) {
+	const texts = [];
+	if (step.url !== void 0) texts.push(step.url);
+	if (step.value !== void 0) texts.push(step.value);
+	if (step.key !== void 0) texts.push(step.key);
+	for (const file of step.files ?? []) texts.push(file);
+	for (const expect of step.expect ?? []) {
+		if (expect.equals !== void 0) texts.push(String(expect.equals));
+		if (expect.contains !== void 0) texts.push(expect.contains);
+	}
+	return texts;
+}
+/** 页面地址合法性：只收 http/https（file: 留给单测，不进项目脚本）。 */
+function isHttpUrl(value) {
+	try {
+		const parsed = new URL(value);
+		return parsed.protocol === "http:" || parsed.protocol === "https:";
+	} catch {
+		return false;
+	}
+}
+function issue(target, code, reason) {
+	return {
+		target,
+		code,
+		reason
+	};
+}
+function normalizeExpect(raw, target, issues) {
+	if (!isRecord(raw)) {
+		issues.push(issue(target, "bad-expect", "断言必须是对象（kind + selector/equals/contains）"));
+		return;
+	}
+	const kind = asString(raw["kind"]);
+	if (kind === void 0 || !UI_EXPECT_KINDS.includes(kind)) {
+		issues.push(issue(target, "bad-expect", `断言 kind 非法：${String(raw["kind"])}（可选 ${UI_EXPECT_KINDS.join("/")}）`));
+		return;
+	}
+	const expectKind = kind;
+	const selector = textOf(raw["selector"]);
+	if (expectKind !== "url" && selector === void 0) {
+		issues.push(issue(target, "bad-expect", `${expectKind} 断言缺 selector`));
+		return;
+	}
+	if (selector !== void 0 && selector.length > MAX_SELECTOR_CHARS) {
+		issues.push(issue(target, "bad-expect", `断言 selector 超过 ${MAX_SELECTOR_CHARS} 字符`));
+		return;
+	}
+	const equalsRaw = raw["equals"];
+	const equals = typeof equalsRaw === "number" ? equalsRaw : textOf(equalsRaw);
+	const contains = textOf(raw["contains"]);
+	if (expectKind === "visible" || expectKind === "hidden") {
+		if (equals !== void 0 || contains !== void 0) {
+			issues.push(issue(target, "bad-expect", `${expectKind} 断言不接受 equals/contains（只判元素是否可见）`));
+			return;
+		}
+		return {
+			kind: expectKind,
+			selector
+		};
+	}
+	if (equals === void 0 && contains === void 0) {
+		issues.push(issue(target, "bad-expect", `${expectKind} 断言必须给 equals 或 contains`));
+		return;
+	}
+	if (equals !== void 0 && typeof equals === "number" && expectKind !== "count") {
+		issues.push(issue(target, "bad-expect", "只有 count 断言允许数字 equals（其他按字符串比较）"));
+		return;
+	}
+	if (equals === void 0 && expectKind === "count") {
+		issues.push(issue(target, "bad-expect", "count 断言必须给 equals（数字）"));
+		return;
+	}
+	return {
+		kind: expectKind,
+		...selector === void 0 ? {} : { selector },
+		...equals === void 0 ? {} : { equals },
+		...contains === void 0 ? {} : { contains }
+	};
+}
+function normalizeStep(raw, index, issues) {
+	const target = `steps[${index}]`;
+	if (!isRecord(raw)) {
+		issues.push(issue(target, "bad-step-field", "步骤必须是对象"));
+		return;
+	}
+	const id = textOf(raw["id"]);
+	if (id === void 0) {
+		issues.push(issue(target, "bad-step-id", "步骤缺 id"));
+		return;
+	}
+	if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+		issues.push(issue(target, "bad-step-id", `步骤 id 只能用字母/数字/下划线/连字符：${id}`));
+		return;
+	}
+	const kindRaw = asString(raw["kind"]);
+	if (kindRaw === void 0 || !UI_STEP_KINDS.includes(kindRaw)) {
+		issues.push(issue(target, "bad-step-kind", `步骤 kind 非法：${String(raw["kind"])}（可选 ${UI_STEP_KINDS.join("/")}）`));
+		return;
+	}
+	const kind = kindRaw;
+	const selector = textOf(raw["selector"]);
+	const candidatesRaw = Array.isArray(raw["candidates"]) ? raw["candidates"] : [];
+	const candidates = [];
+	for (const item of candidatesRaw) {
+		const candidate = textOf(item);
+		if (candidate === void 0 || candidates.includes(candidate)) continue;
+		if (candidate.length > MAX_SELECTOR_CHARS) {
+			issues.push(issue(target, "bad-step-field", `candidate 超过 ${MAX_SELECTOR_CHARS} 字符`));
+			return;
+		}
+		candidates.push(candidate);
+	}
+	if (selector !== void 0 && selector.length > MAX_SELECTOR_CHARS) {
+		issues.push(issue(target, "bad-step-field", `selector 超过 ${MAX_SELECTOR_CHARS} 字符`));
+		return;
+	}
+	if (candidates.length > MAX_CANDIDATES) {
+		issues.push(issue(target, "bad-step-field", `candidates 最多 ${MAX_CANDIDATES} 条`));
+		return;
+	}
+	const hasTarget = selector !== void 0 || candidates.length > 0;
+	if ((kind === "click" || kind === "fill" || kind === "press" || kind === "select" || kind === "submit" || kind === "upload") && !hasTarget && kind !== "press") {
+		issues.push(issue(target, "missing-target", `${kind} 步骤缺 selector/candidates`));
+		return;
+	}
+	const value = asString(raw["value"]);
+	const url = textOf(raw["url"]);
+	const key = textOf(raw["key"]);
+	const msRaw = raw["ms"];
+	const step = {
+		id,
+		kind
+	};
+	if (selector !== void 0) step.selector = selector;
+	if (candidates.length > 0) step.candidates = candidates;
+	if (kind === "click") {
+		const point = parseClickPoint(raw["clickPoint"], target, issues);
+		if (point !== void 0) step.clickPoint = point;
+	}
+	const features = normalizeFeatures(raw["features"]);
+	if (features !== void 0) step.features = features;
+	if (kind === "goto") {
+		if (url === void 0) {
+			issues.push(issue(target, "bad-step-field", "goto 步骤缺 url"));
+			return;
+		}
+		if (!isHttpUrl(substituteInputs(url, {})) && !url.includes("{{")) {
+			issues.push(issue(target, "bad-step-field", `goto url 必须是 http/https：${url}`));
+			return;
+		}
+		step.url = url;
+	}
+	if (kind === "fill") {
+		if (value === void 0) {
+			issues.push(issue(target, "bad-step-field", "fill 步骤缺 value（密码类输入不录制，见录制器说明）"));
+			return;
+		}
+		if (value.length > MAX_VALUE_CHARS) {
+			issues.push(issue(target, "bad-step-field", `fill value 超过 ${MAX_VALUE_CHARS} 字符`));
+			return;
+		}
+		step.value = value;
+	}
+	if (kind === "select") {
+		if (value === void 0) {
+			issues.push(issue(target, "bad-step-field", "select 步骤缺 value（选项值）"));
+			return;
+		}
+		step.value = value;
+	}
+	if (kind === "press") {
+		if (key === void 0) {
+			issues.push(issue(target, "bad-step-field", "press 步骤缺 key（如 Enter/Escape/Tab）"));
+			return;
+		}
+		step.key = key;
+	}
+	if (kind === "wait") {
+		if (typeof msRaw !== "number" || !Number.isFinite(msRaw) || msRaw < 0 || msRaw > 6e4) {
+			issues.push(issue(target, "bad-step-field", `wait 步骤的 ms 必须是 0..${MAX_WAIT_MS} 的数字`));
+			return;
+		}
+		step.ms = Math.round(msRaw);
+	}
+	if (kind === "upload") {
+		const filesRaw = Array.isArray(raw["files"]) ? raw["files"] : [];
+		const files = [];
+		for (const item of filesRaw) {
+			const file = textOf(item);
+			if (file === void 0) continue;
+			if (file.length > MAX_FILE_CHARS) {
+				issues.push(issue(target, "bad-step-field", `upload 文件路径超过 ${MAX_FILE_CHARS} 字符`));
+				return;
+			}
+			files.push(file);
+		}
+		if (files.length === 0) {
+			issues.push(issue(target, "bad-step-field", "upload 步骤缺 files（本地路径数组）"));
+			return;
+		}
+		if (files.length > MAX_UPLOAD_FILES) {
+			issues.push(issue(target, "bad-step-field", `upload 最多 ${MAX_UPLOAD_FILES} 个文件`));
+			return;
+		}
+		step.files = files;
+	}
+	const at = textOf(raw["at"]);
+	if (at !== void 0) step.at = at;
+	const expectRaw = raw["expect"];
+	if (expectRaw !== void 0) {
+		if (!Array.isArray(expectRaw)) {
+			issues.push(issue(target, "bad-expect", "expect 必须是数组"));
+			return;
+		}
+		if (expectRaw.length > MAX_EXPECTS) {
+			issues.push(issue(target, "bad-expect", `单步断言最多 ${MAX_EXPECTS} 条`));
+			return;
+		}
+		const expects = [];
+		for (const [i, item] of expectRaw.entries()) {
+			const normalized = normalizeExpect(item, `${target}.expect[${i}]`, issues);
+			if (normalized === void 0) return void 0;
+			expects.push(normalized);
+		}
+		if (expects.length > 0) step.expect = expects;
+	}
+	return step;
+}
+function normalizeMeta(raw, issues) {
+	if (!isRecord(raw)) {
+		issues.push(issue("meta", "bad-meta", "缺 meta（site/flow/version/created/startUrl）"));
+		return;
+	}
+	const site = textOf(raw["site"]);
+	const flow = textOf(raw["flow"]);
+	const versionRaw = raw["version"];
+	if (site === void 0) issues.push(issue("meta", "bad-meta", "meta.site 不能为空"));
+	if (flow === void 0) issues.push(issue("meta", "bad-meta", "meta.flow 不能为空"));
+	if (typeof versionRaw !== "number" || !Number.isInteger(versionRaw) || versionRaw < 1) issues.push(issue("meta", "bad-meta", "meta.version 必须是 ≥1 的整数"));
+	const startUrl = textOf(raw["startUrl"]);
+	if (startUrl === void 0) issues.push(issue("meta", "bad-start-url", "meta.startUrl 不能为空（回放要一个起点）"));
+	else if (!isHttpUrl(startUrl)) issues.push(issue("meta", "bad-start-url", `meta.startUrl 必须是 http/https：${startUrl}`));
+	if (issues.length > 0) return void 0;
+	const created = raw["created"] instanceof Date ? raw["created"].toISOString() : textOf(raw["created"]);
+	const sourceRaw = asString(raw["source"]);
+	const source = sourceRaw === "record" || sourceRaw === "agent" || sourceRaw === "canvas" ? sourceRaw : void 0;
+	const viewportRaw = raw["viewport"];
+	let viewport;
+	if (isRecord(viewportRaw)) {
+		const width = viewportRaw["width"];
+		const height = viewportRaw["height"];
+		if (typeof width === "number" && typeof height === "number" && width > 0 && height > 0) viewport = {
+			width: Math.round(width),
+			height: Math.round(height)
+		};
+	}
+	return {
+		site,
+		flow,
+		version: versionRaw,
+		created: created ?? (/* @__PURE__ */ new Date()).toISOString(),
+		startUrl,
+		...source === void 0 ? {} : { source },
+		...textOf(raw["domain"]) === void 0 ? {} : { domain: textOf(raw["domain"]) },
+		...textOf(raw["note"]) === void 0 ? {} : { note: textOf(raw["note"]) },
+		...viewport === void 0 ? {} : { viewport }
+	};
+}
+function normalizeInputs$1(raw, issues) {
+	if (raw === void 0) return [];
+	if (!Array.isArray(raw)) {
+		issues.push(issue("inputs", "bad-input", "inputs 必须是数组"));
+		return;
+	}
+	if (raw.length > 20) {
+		issues.push(issue("inputs", "bad-input", `入参槽位最多 ${20} 个`));
+		return;
+	}
+	const inputs = [];
+	for (const [i, item] of raw.entries()) {
+		const target = `inputs[${i}]`;
+		if (!isRecord(item)) {
+			issues.push(issue(target, "bad-input", "入参槽位必须是对象（name/type/required）"));
+			return;
+		}
+		const name = textOf(item["name"]);
+		if (name === void 0 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+			issues.push(issue(target, "bad-input", `入参名非法：${String(item["name"])}`));
+			return;
+		}
+		if (inputs.some((input) => input.name === name)) {
+			issues.push(issue(target, "duplicate-input", `入参名重复：${name}`));
+			return;
+		}
+		const typeRaw = asString(item["type"]);
+		if (typeRaw === void 0 || !UI_INPUT_TYPES.includes(typeRaw)) {
+			issues.push(issue(target, "bad-input", `入参类型非法：${String(item["type"])}（可选 ${UI_INPUT_TYPES.join("/")}）`));
+			return;
+		}
+		const required = item["required"] === void 0 ? false : item["required"];
+		if (typeof required !== "boolean") {
+			issues.push(issue(target, "bad-input", "required 必须是布尔"));
+			return;
+		}
+		const example = textOf(item["example"]);
+		inputs.push({
+			name,
+			type: typeRaw,
+			required,
+			...example === void 0 ? {} : { example }
+		});
+	}
+	return inputs;
+}
+/** 解析点击落点：非法值忽略（不让旧脚本因坐标脏值整份失败）。 */
+function parseClickPoint(raw, target, issues) {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return void 0;
+	const value = raw;
+	const num = (key) => {
+		const item = value[key];
+		return typeof item === "number" && Number.isFinite(item) ? item : void 0;
+	};
+	const fx = num("fx");
+	const fy = num("fy");
+	const x = num("x");
+	const y = num("y");
+	const vw = num("vw");
+	const vh = num("vh");
+	if (fx === void 0 || fy === void 0 || x === void 0 || y === void 0) {
+		issues.push(issue(target, "bad-step-field", "clickPoint 需要数字 fx/fy/x/y"));
+		return;
+	}
+	if (fx < 0 || fx > 1 || fy < 0 || fy > 1 || vw !== void 0 && vw <= 0 || vh !== void 0 && vh <= 0) {
+		issues.push(issue(target, "bad-step-field", "clickPoint 的 fx/fy 必须在 0..1、vw/vh 必须为正"));
+		return;
+	}
+	const tag = textOf(value["tag"]);
+	const box = [
+		"bx",
+		"by",
+		"bw",
+		"bh"
+	].map((key) => num(key));
+	const hasBox = box.every((item) => item !== void 0);
+	const name = textOf(value["name"]);
+	return {
+		fx,
+		fy,
+		x,
+		y,
+		vw: vw ?? 0,
+		vh: vh ?? 0,
+		...tag === void 0 ? {} : { tag },
+		...hasBox ? {
+			bx: box[0],
+			by: box[1],
+			bw: box[2],
+			bh: box[3]
+		} : {},
+		...name === void 0 ? {} : { name: name.slice(0, 120) }
+	};
+}
+/**
+* 已解析的 YAML 值 → UiScriptDoc。
+*
+* 只做形状与"该有的字段必须有"，语义（入参引用是否都声明了、是否有人用）在同一遍
+* 校验里做完——ui-script 没有卡引用那种跨文件语义，不需要像链那样拆两段。
+*/
+function parseUiScriptDoc(raw) {
+	if (!isRecord(raw)) return {
+		ok: false,
+		issues: [issue("script", "invalid-script", "脚本必须是一个 YAML 映射（key: value）")]
+	};
+	const issues = [];
+	if (asString(raw["apiVersion"]) !== "dataforge/v1") issues.push(issue("script", "invalid-script", `apiVersion 必须是 ${UI_SCRIPT_API_VERSION}（收到 ${String(raw["apiVersion"])}）`));
+	if (raw["kind"] !== "ui-script") issues.push(issue("script", "invalid-script", `kind 必须是 ${UI_SCRIPT_KIND}（收到 ${String(raw["kind"])}）`));
+	const meta = normalizeMeta(raw["meta"], issues);
+	const inputs = normalizeInputs$1(raw["inputs"], issues);
+	const stepsRaw = raw["steps"];
+	const steps = [];
+	if (!Array.isArray(stepsRaw) || stepsRaw.length === 0) issues.push(issue("steps", "no-steps", "脚本至少要有 1 个步骤"));
+	else if (stepsRaw.length > 300) issues.push(issue("steps", "too-many-steps", `步骤最多 ${300} 个`));
+	else {
+		const ids = /* @__PURE__ */ new Set();
+		for (const [i, item] of stepsRaw.entries()) {
+			const step = normalizeStep(item, i, issues);
+			if (step === void 0) continue;
+			if (ids.has(step.id)) {
+				issues.push(issue(`steps[${i}]`, "duplicate-step-id", `步骤 id 重复：${step.id}`));
+				continue;
+			}
+			ids.add(step.id);
+			steps.push(step);
+		}
+	}
+	if (issues.length > 0 || meta === void 0 || inputs === void 0) return {
+		ok: false,
+		issues
+	};
+	const used = /* @__PURE__ */ new Set();
+	const unknownRefs = /* @__PURE__ */ new Set();
+	const declared = new Set(inputs.map((input) => input.name));
+	for (const step of steps) for (const text of substitutableTextsOf(step)) for (const ref of inputRefsOf(text)) {
+		used.add(ref);
+		if (!declared.has(ref)) unknownRefs.add(ref);
+	}
+	for (const ref of unknownRefs) issues.push(issue("steps", "unknown-input-ref", `步骤里引用了未声明的入参槽位 {{${ref}}}`));
+	for (const input of inputs) if (!used.has(input.name)) issues.push(issue("inputs", "unreferenced-input", `入参槽位 ${input.name} 没有被任何步骤引用（\\{\\{${input.name}\\}\\}）`));
+	if (issues.length > 0) return {
+		ok: false,
+		issues
+	};
+	return {
+		ok: true,
+		doc: {
+			apiVersion: UI_SCRIPT_API_VERSION,
+			kind: UI_SCRIPT_KIND,
+			meta,
+			inputs,
+			steps
+		}
+	};
+}
+/** YAML 文本 → UiScriptDoc；YAML 语法错也算 invalid-script。 */
+function parseUiScriptYaml(text) {
+	let raw;
+	try {
+		raw = loadYamlValue(text);
+	} catch (error) {
+		return {
+			ok: false,
+			issues: [issue("script", "invalid-script", `YAML 解析失败：${error instanceof Error ? error.message : String(error)}`)]
+		};
+	}
+	return parseUiScriptDoc(raw);
+}
+/**
+* YAML 文本 → JS 值（CORE schema：时间戳保持字符串，与链/卡同款，避免 YAML 1.1 把
+* `created` 变 Date 再被 schema 判成非字符串）。
+*/
+function loadYamlValue(text) {
+	return yaml.load(text, { schema: yaml.CORE_SCHEMA });
+}
+/** UiScriptDoc → YAML 文本。 */
+function uiScriptToYaml(doc) {
+	return yaml.dump(doc, {
+		lineWidth: 120,
+		noRefs: true,
+		sortKeys: false
+	});
+}
+/** 缺参闸：回放前检查 required 槽位是否给了值；返回缺的槽位名（类型按 string 传入）。 */
+function missingInputsOf(doc, provided) {
+	return doc.inputs.filter((input) => input.required).filter((input) => (provided[input.name] ?? "").length === 0).map((input) => input.name);
+}
+/** 统一格式化成一行可读问题（工具回执/面板展示共用）。 */
+function formatUiIssues(issues) {
+	return issues.map((item) => `${item.target}：${item.reason}`).join("；");
+}
+
+//#endregion
+//#region src/uitest/store.ts
+/**
+* ui-script 存取：版本快照、回读、列表。
+*
+* 落点（项目资产，进 git、可手改）：
+*   <workspaceRoot>/.dsh/dataforge/ui-tests/<siteSlug>/<flowSlug>/v<n>.yaml
+*
+* 纪律与链完全一致：
+*   - 一个版本一个文件，**版本即不可变快照**：写入永远分配 max+1，不覆盖旧版本；
+*   - 写入前先校验（形状 + 入参引用），全过才落盘——不存在"部分写入"；
+*   - 读时重新校验（文件可能被手改坏），坏文件如实报 `invalid-ui-script` 并列出可用版本；
+*   - 路径参数一律经 slug 校验，不把用户输入直接拼进文件路径。
+*
+* 与链的差异：ui-script 没有跨文件引用（不解析接口卡），所以没有 CardResolver 这类注入缝。
+*
+* @module dsh-dataforge/uitest/store
+*/
+/** ui-script 根目录：`.dsh/dataforge/ui-tests`。 */
+function uiTestsRoot(workspaceRoot) {
+	return join(dataforgeRoot(workspaceRoot), "ui-tests");
+}
+function requireSlug(name, what) {
+	const slug = slugOf(name);
+	if (slug.length === 0) throw Object.assign(/* @__PURE__ */ new Error(`${what} "${String(name)}" 不能作为目录名（为空或只含路径分隔符）`), { code: "invalid-ui-script" });
+	return slug;
+}
+/** 流程版本目录：`ui-tests/<siteSlug>/<flowSlug>`。 */
+function uiScriptDir(workspaceRoot, site, flow) {
+	return join(uiTestsRoot(workspaceRoot), requireSlug(site, "site"), requireSlug(flow, "flow"));
+}
+/** 单个版本文件路径：`.../v<n>.yaml`。 */
+function uiScriptPath(workspaceRoot, site, flow, version) {
+	return join(uiScriptDir(workspaceRoot, site, flow), `v${version}.yaml`);
+}
+/** 已有版本号（升序）；目录不存在返回空数组。 */
+function listUiScriptVersions(workspaceRoot, site, flow) {
+	const dir = uiScriptDir(workspaceRoot, site, flow);
+	if (!existsSync(dir)) return [];
+	const versions = [];
+	for (const entry of readdirSync(dir)) {
+		const hit = /^v(\d+)\.ya?ml$/.exec(entry);
+		if (!hit) continue;
+		const version = Number(hit[1]);
+		if (Number.isInteger(version) && version >= 1) versions.push(version);
+	}
+	return versions.sort((left, right) => left - right);
+}
+/** 最新版本号；没有任何版本返回 undefined。 */
+function latestUiScriptVersion(workspaceRoot, site, flow) {
+	const versions = listUiScriptVersions(workspaceRoot, site, flow);
+	return versions.length > 0 ? versions[versions.length - 1] : void 0;
+}
+/** 下一个版本号 = max+1（没有历史则 1）。 */
+function nextUiScriptVersion(workspaceRoot, site, flow) {
+	return (latestUiScriptVersion(workspaceRoot, site, flow) ?? 0) + 1;
+}
+function dirOfSite(root) {
+	if (!existsSync(root)) return [];
+	try {
+		return readdirSync(root).filter((entry) => {
+			try {
+				return statSync(join(root, entry)).isDirectory();
+			} catch {
+				return false;
+			}
+		});
+	} catch {
+		return [];
+	}
+}
+/** 逐版本读文件头：面板要显示「v3 · 3 步 · 更新时间」。 */
+function listUiVersionInfos(workspaceRoot, site, flow) {
+	return listUiScriptVersions(workspaceRoot, site, flow).map((version) => {
+		try {
+			const doc = parseUiScriptYaml(readFileSync(uiScriptPath(workspaceRoot, site, flow, version), "utf8"));
+			if (!doc.ok) return {
+				version,
+				unreadable: doc.issues.map((item) => `${item.target}：${item.reason}`).join("；")
+			};
+			return {
+				version,
+				created: doc.doc.meta.created,
+				...doc.doc.meta.source === void 0 ? {} : { source: doc.doc.meta.source },
+				stepCount: doc.doc.steps.length,
+				startUrl: doc.doc.meta.startUrl,
+				...doc.doc.meta.note === void 0 ? {} : { note: doc.doc.meta.note }
+			};
+		} catch (error) {
+			return {
+				version,
+				unreadable: String(error?.message ?? error)
+			};
+		}
+	});
+}
+/** 列全部流程（面板一级/二级列表用；坏目录跳过）。 */
+function listUiScripts(workspaceRoot) {
+	const root = uiTestsRoot(workspaceRoot);
+	const refs = [];
+	for (const site of dirOfSite(root)) for (const flow of dirOfSite(join(root, site))) {
+		let versions = [];
+		try {
+			versions = listUiScriptVersions(workspaceRoot, site, flow);
+		} catch {
+			continue;
+		}
+		if (versions.length === 0) continue;
+		const latest = versions[versions.length - 1];
+		let domain;
+		let unreadable;
+		let updatedAt;
+		try {
+			const doc = parseUiScriptYaml(readFileSync(uiScriptPath(workspaceRoot, site, flow, latest), "utf8"));
+			if (doc.ok) {
+				domain = doc.doc.meta.domain;
+				updatedAt = doc.doc.meta.created;
+			} else unreadable = doc.issues.map((item) => `${item.target}：${item.reason}`).join("；");
+		} catch (error) {
+			unreadable = String(error?.message ?? error);
+		}
+		refs.push({
+			site,
+			flow,
+			latest,
+			versions,
+			...domain === void 0 ? {} : { domain },
+			...updatedAt === void 0 ? {} : { updatedAt },
+			...unreadable === void 0 ? {} : { unreadable }
+		});
+	}
+	return refs.sort((left, right) => `${left.site}/${left.flow}`.localeCompare(`${right.site}/${right.flow}`));
+}
+/** 读一个版本（缺省最新）；文件坏了不静默，返回 issues + 可用版本。 */
+function loadUiScript(workspaceRoot, site, flow, version) {
+	const availableVersions = listUiScriptVersions(workspaceRoot, site, flow);
+	const target = version ?? availableVersions[availableVersions.length - 1];
+	if (target === void 0 || !availableVersions.includes(target)) return {
+		ok: false,
+		code: "ui-script-not-found",
+		message: target === void 0 ? `没有找到 ${site} / ${flow} 的任何 UI 脚本版本` : `${site} / ${flow} 没有 v${target}`,
+		availableVersions
+	};
+	const path = uiScriptPath(workspaceRoot, site, flow, target);
+	const text = readFileSync(path, "utf8");
+	const parsed = parseUiScriptYaml(text);
+	if (!parsed.ok) return {
+		ok: false,
+		code: "invalid-ui-script",
+		message: `${path} 未通过校验（可能被手改坏）：可回读旧版本或修好再试`,
+		issues: parsed.issues,
+		availableVersions
+	};
+	return {
+		ok: true,
+		doc: parsed.doc,
+		yaml: text,
+		path,
+		version: target,
+		availableVersions
+	};
+}
+/**
+* 落盘为**新版本**（version 取 max+1，输入里的 meta.version 会被覆盖成实际版本号）。
+*
+* `input` 可以是已解析的 UiScriptDoc，也可以是 YAML 文本（agent 手写/面板导入）。
+* 校验不过一律不落盘。`source` 由调用方声明（record/agent/canvas），不猜。
+*/
+function saveUiScript(workspaceRoot, input, options = {}) {
+	const parsed = typeof input === "string" ? parseUiScriptYaml(input) : parseUiScriptDoc(input);
+	if (!parsed.ok) return {
+		ok: false,
+		issues: parsed.issues
+	};
+	const doc = parsed.doc;
+	const version = nextUiScriptVersion(workspaceRoot, doc.meta.site, doc.meta.flow);
+	const meta = {
+		...doc.meta,
+		version,
+		created: isValidInstant(doc.meta.created) ? doc.meta.created : (/* @__PURE__ */ new Date()).toISOString(),
+		...options.source === void 0 ? {} : { source: options.source }
+	};
+	const finalDoc = {
+		...doc,
+		meta
+	};
+	const path = uiScriptPath(workspaceRoot, meta.site, meta.flow, version);
+	mkdirSync(uiScriptDir(workspaceRoot, meta.site, meta.flow), { recursive: true });
+	writeFileSync(path, uiScriptToYaml(finalDoc), "utf8");
+	return {
+		ok: true,
+		version,
+		path,
+		doc: finalDoc
+	};
+}
+function isValidInstant(value) {
+	if (typeof value !== "string" || value.length === 0) return false;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed);
+}
+
+//#endregion
+//#region src/uitest/highlight.ts
+/**
+* 回放点击的视觉提示：在点击落点注入一个脉冲光圈 + 圆点，让观看者能看清"点到哪了"。
+*
+* 约束：
+*   - `pointer-events:none` + 最高 z-index：不拦截点击、不改布局；
+*   - 开一次样式、每次点击生成一个小节点，900ms 后自删；
+*   - 纯页面内 DOM，不依赖 CDP 覆盖层（共享浏览器和 Playwright 都能用）。
+*
+* @module dsh-dataforge/uitest/highlight
+*/
+const STYLE_ID = "df-ui-click-highlight-style";
+/** 生成"在视口 (x, y) 点击"的注入表达式（数字内联，安全）。 */
+function highlightClickExpression(x, y) {
+	const px = Math.round(Number.isFinite(x) ? x : 0);
+	const py = Math.round(Number.isFinite(y) ? y : 0);
+	return `(() => {
+    try {
+      const STYLE_ID = ${JSON.stringify(STYLE_ID)}
+      if (document.getElementById(STYLE_ID) === null) {
+        const style = document.createElement('style')
+        style.id = STYLE_ID
+        style.textContent = [
+          '@keyframes dfUiClickRing { 0% { transform: translate(-50%, -50%) scale(0.25); opacity: 0.95 } 100% { transform: translate(-50%, -50%) scale(1.7); opacity: 0 } }',
+          '@keyframes dfUiClickDot { 0% { transform: translate(-50%, -50%) scale(0); opacity: 1 } 25% { transform: translate(-50%, -50%) scale(1); opacity: 1 } 100% { transform: translate(-50%, -50%) scale(0.9); opacity: 0 } }'
+        ].join('\\n')
+        ;(document.head || document.documentElement).appendChild(style)
+      }
+      const host = document.createElement('div')
+      host.setAttribute('data-df-ui-click', '1')
+      host.style.cssText = 'position:fixed;left:${px}px;top:${py}px;width:0;height:0;z-index:2147483647;pointer-events:none;'
+      const ring = document.createElement('span')
+      ring.style.cssText = 'position:absolute;left:0;top:0;width:34px;height:34px;border:2px solid rgba(255,82,82,0.95);border-radius:50%;box-shadow:0 0 10px rgba(255,82,82,0.55);animation:dfUiClickRing 760ms ease-out forwards;'
+      const dot = document.createElement('span')
+      dot.style.cssText = 'position:absolute;left:0;top:0;width:9px;height:9px;border-radius:50%;background:#ff5252;box-shadow:0 0 6px rgba(255,82,82,0.8);animation:dfUiClickDot 760ms ease-out forwards;'
+      host.appendChild(ring)
+      host.appendChild(dot)
+      ;(document.body || document.documentElement).appendChild(host)
+      setTimeout(() => { host.remove() }, 1000)
+      return { x: ${px}, y: ${py} }
+    } catch (err) { return null }
+  })()`;
+}
+
+//#endregion
+//#region src/uitest/run.ts
+/**
+* UI 回放引擎：把 ui-script 的步骤在真浏览器里按顺序执行，并在每步后做页面断言。
+*
+* 与接口链执行（src/execute）的关系：
+*   - 两者都是「执行面」，但依赖图互不相交：本模块只依赖 playwright-core + uitest 自己的
+*     store，**不 import src/execute/**、不 import src/capture/**（浏览器只在这里起）；
+*   - 共用的是运行留痕习惯（run.json + events.ndjson）与凭证纪律（cookie 只进 context，
+*     不进事件/摘要）。
+*
+* 回放语义（刻意保守）：
+*   - 选择器候选按顺序找「当前页面唯一命中」的那个；候选全失效 = 该步失败（带截图）；
+*   - 动作后用 Playwright 的自动等待收口（点击后导航、列表渲染）；断言独立轮询到步骤超时；
+*   - 失败即停（fail-fast），不猜测修复、不重试写操作（重试写可能造成重复提交）。
+*
+* @module dsh-dataforge/uitest/run
+*/
+/** 默认工厂：playwright-core + 系统 Chrome（与本插件采集同款，免下载浏览器）。 */
+const openUiBrowser = async ({ headless, viewport, channel }) => {
+	const { chromium } = await import("playwright-core");
+	const browser = await chromium.launch({
+		channel,
+		headless
+	});
+	const context = await browser.newContext({ viewport });
+	return {
+		browser,
+		context,
+		page: await context.newPage()
+	};
+};
+/** 步骤执行后的目标描述（回执/事件用，不含值）。 */
+function targetOf(step) {
+	return step.selector ?? step.candidates?.[0] ?? step.url;
+}
+/** 计划：替换入参后的步骤摘要 + 写操作计数。 */
+function planUiRun(doc, inputs = {}) {
+	return {
+		site: doc.meta.site,
+		flow: doc.meta.flow,
+		version: doc.meta.version,
+		startUrl: substituteInputs(doc.meta.startUrl, inputs),
+		stepCount: doc.steps.length,
+		writeSteps: doc.steps.filter((step) => step.kind === "click" || step.kind === "submit" || step.kind === "upload").length,
+		steps: doc.steps.map((step) => ({
+			id: step.id,
+			kind: step.kind,
+			...targetOf(step) === void 0 ? {} : { target: targetOf(step) },
+			...step.value === void 0 ? {} : { value: substituteInputs(step.value, inputs) }
+		})),
+		inputs
+	};
+}
+/** 跑一次 ui-script：建留痕 → 起浏览器 → 逐步执行 + 断言 → 写终态。 */
+async function runUiScript(deps, args) {
+	const { doc } = args;
+	const inputs = args.inputs ?? {};
+	const runId = `uir_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+	const startUrl = substituteInputs(doc.meta.startUrl, inputs);
+	const headless = args.headless ?? true;
+	const slowMoMs = Math.min(Math.max(Math.floor(args.slowMoMs ?? 0), 0), 1e4);
+	const highlightClicks = args.highlightClicks ?? true;
+	const holdMs = Math.min(Math.max(Math.floor(args.holdMs ?? 0), 0), 3e4);
+	const startedAt = Date.now();
+	const viewport = doc.meta.viewport ?? {
+		width: 1280,
+		height: 720
+	};
+	startUiRun(deps.dataRoot, runId, {
+		site: doc.meta.site,
+		flow: doc.meta.flow,
+		version: doc.meta.version,
+		startUrl,
+		headless,
+		totalSteps: doc.steps.length
+	});
+	emit(deps.dataRoot, runId, {
+		event: "meta",
+		site: doc.meta.site,
+		flow: doc.meta.flow,
+		version: doc.meta.version,
+		startUrl
+	});
+	const stepResults = [];
+	let cookiesApplied = 0;
+	let browser;
+	try {
+		const opened = await (deps.openBrowser ?? openUiBrowser)({
+			headless,
+			viewport,
+			channel: deps.channel
+		});
+		browser = opened.browser;
+		const { page, context } = opened;
+		if (deps.loadCookies !== void 0) {
+			const cookies = await deps.loadCookies(startUrl).catch(() => []);
+			if (cookies.length > 0) {
+				await context.addCookies(cookies.map((cookie) => ({
+					name: cookie.name,
+					value: cookie.value,
+					domain: cookie.domain,
+					path: cookie.path ?? "/",
+					secure: cookie.secure ?? startUrl.startsWith("https:"),
+					...cookie.expires === void 0 ? {} : { expires: cookie.expires }
+				}))).catch(() => void 0);
+				cookiesApplied = cookies.length;
+			}
+		}
+		await page.goto(startUrl, {
+			waitUntil: "domcontentloaded",
+			timeout: deps.stepTimeoutMs
+		});
+		const emitStepEvent = (event) => appendUiRunEvent(deps.dataRoot, runId, event);
+		for (const step of doc.steps) {
+			if (slowMoMs > 0) await sleep$2(slowMoMs);
+			const result = await runStep$1(page, step, inputs, deps.stepTimeoutMs, emitStepEvent, highlightClicks);
+			stepResults.push(result);
+			if (!result.ok) {
+				const evidence = await captureFailure$1(page, deps.dataRoot, runId);
+				const elapsedMs = Date.now() - startedAt;
+				appendUiRunEvent(deps.dataRoot, runId, {
+					event: "terminal",
+					success: false,
+					message: result.error,
+					...evidence.screenshot === void 0 ? {} : { screenshot: evidence.screenshot },
+					...evidence.dom === void 0 ? {} : { dom: evidence.dom },
+					elapsed: elapsedMs
+				});
+				finishUiRun(deps.dataRoot, runId, {
+					status: "failed",
+					finishedAt: Date.now(),
+					stepsDone: stepResults.length - 1,
+					failedStep: result.id,
+					...result.error === void 0 ? {} : { error: result.error },
+					...evidence.screenshot === void 0 ? {} : { screenshot: evidence.screenshot },
+					elapsedMs
+				});
+				return {
+					runId,
+					site: doc.meta.site,
+					flow: doc.meta.flow,
+					version: doc.meta.version,
+					startUrl,
+					success: false,
+					totalSteps: doc.steps.length,
+					stepsDone: stepResults.length - 1,
+					steps: stepResults,
+					failedStep: result,
+					...evidence.screenshot === void 0 ? {} : { screenshot: evidence.screenshot },
+					...evidence.dom === void 0 ? {} : { dom: evidence.dom },
+					...result.error === void 0 ? {} : { error: result.error },
+					elapsedMs,
+					cookiesApplied
+				};
+			}
+		}
+		const elapsedMs = Date.now() - startedAt;
+		const evidence = await captureSuccess(page, deps.dataRoot, runId);
+		appendUiRunEvent(deps.dataRoot, runId, {
+			event: "terminal",
+			success: true,
+			message: `全部 ${doc.steps.length} 步通过`,
+			elapsed: elapsedMs,
+			...evidence.screenshot === void 0 ? {} : { screenshot: evidence.screenshot }
+		});
+		finishUiRun(deps.dataRoot, runId, {
+			status: "success",
+			finishedAt: Date.now(),
+			stepsDone: stepResults.length,
+			...evidence.screenshot === void 0 ? {} : { screenshot: evidence.screenshot },
+			elapsedMs
+		});
+		return {
+			runId,
+			site: doc.meta.site,
+			flow: doc.meta.flow,
+			version: doc.meta.version,
+			startUrl,
+			success: true,
+			totalSteps: doc.steps.length,
+			stepsDone: stepResults.length,
+			steps: stepResults,
+			...evidence.screenshot === void 0 ? {} : { screenshot: evidence.screenshot },
+			elapsedMs,
+			cookiesApplied
+		};
+	} catch (error) {
+		const message = String(error?.message ?? error).slice(0, 1e3);
+		const elapsedMs = Date.now() - startedAt;
+		appendUiRunEvent(deps.dataRoot, runId, {
+			event: "terminal",
+			success: false,
+			message,
+			elapsed: elapsedMs
+		});
+		finishUiRun(deps.dataRoot, runId, {
+			status: "failed",
+			finishedAt: Date.now(),
+			stepsDone: stepResults.length,
+			error: message,
+			elapsedMs
+		});
+		return {
+			runId,
+			site: doc.meta.site,
+			flow: doc.meta.flow,
+			version: doc.meta.version,
+			startUrl,
+			success: false,
+			totalSteps: doc.steps.length,
+			stepsDone: stepResults.length,
+			steps: stepResults,
+			error: message,
+			elapsedMs,
+			cookiesApplied
+		};
+	} finally {
+		if (browser !== void 0 && holdMs > 0) await sleep$2(holdMs);
+		await browser?.close().catch(() => void 0);
+	}
+}
+/** 点击前在元素中心画光圈（best-effort：无 boundingBox/evaluate 时跳过）。 */
+async function highlightLocator(page, locator, enabled) {
+	if (!enabled) return;
+	try {
+		const box = await locator.boundingBox();
+		if (box === null || box.width <= 0 || box.height <= 0) return;
+		if (typeof page.evaluate !== "function") return;
+		await page.evaluate(highlightClickExpression(box.x + box.width / 2, box.y + box.height / 2));
+	} catch {}
+}
+/** 按元素内比例坐标点击（clickPoint.fx/fy）；元素不可见/无尺寸时抛错。 */
+async function clickLocatorPoint(page, locator, point, highlightClicks) {
+	const box = await locator.boundingBox();
+	if (box === null || box.width <= 0 || box.height <= 0) throw new Error("元素没有可点击的尺寸（无法按坐标点击）");
+	const near = (left, right) => Math.abs(left - right) <= 1.5;
+	const unchanged = point.bx !== void 0 && point.by !== void 0 && point.bw !== void 0 && point.bh !== void 0 && near(point.bx, box.x) && near(point.by, box.y) && near(point.bw, box.width) && near(point.bh, box.height);
+	const x = unchanged ? point.x : box.x + point.fx * box.width;
+	const y = unchanged ? point.y : box.y + point.fy * box.height;
+	if (highlightClicks && typeof page.evaluate === "function") await page.evaluate(highlightClickExpression(x, y)).catch(() => void 0);
+	await page.mouse.click(x, y);
+}
+function emit(dataRoot, runId, event) {
+	appendUiRunEvent(dataRoot, runId, event);
+}
+/** 单步：动作 → 断言（任一失败即该步失败）。 */
+async function runStep$1(page, step, inputs, timeoutMs, emit, highlightClicks) {
+	const startedAt = Date.now();
+	const result = {
+		id: step.id,
+		kind: step.kind,
+		ok: false,
+		elapsedMs: 0,
+		assertions: []
+	};
+	const target = targetOf(step);
+	emit({
+		event: "step",
+		id: step.id,
+		kind: step.kind,
+		status: "start",
+		...target === void 0 ? {} : { target }
+	});
+	try {
+		if (step.kind === "wait") await page.waitForTimeout(Math.min(step.ms ?? 0, timeoutMs));
+		else if (step.kind === "goto") {
+			const url = substituteInputs(step.url ?? "", inputs);
+			await page.goto(url, {
+				waitUntil: "domcontentloaded",
+				timeout: timeoutMs
+			});
+		} else if (step.kind === "press" && step.selector === void 0 && (step.candidates?.length ?? 0) === 0) await page.keyboard.press(substituteInputs(step.key ?? "", inputs));
+		else {
+			let resolved;
+			try {
+				resolved = await resolveTarget(page, step, timeoutMs);
+			} catch (error) {
+				const at = typeof step.at === "string" && /^https?:\/\//.test(step.at) ? step.at : void 0;
+				if (at === void 0 || page.url() === at) throw error;
+				await page.goto(at, {
+					waitUntil: "domcontentloaded",
+					timeout: timeoutMs
+				});
+				resolved = await resolveTarget(page, step, timeoutMs);
+			}
+			result.target = resolved.selector;
+			const timeout = Math.max(500, timeoutMs - (Date.now() - startedAt));
+			if (step.kind === "click") {
+				if (step.clickPoint === void 0) {
+					await highlightLocator(page, resolved.locator, highlightClicks);
+					await resolved.locator.click({ timeout });
+				} else if (await resolved.locator.evaluate((el) => el.tagName === "CANVAS").catch(() => false)) await clickLocatorPoint(page, resolved.locator, step.clickPoint, highlightClicks);
+				else try {
+					await highlightLocator(page, resolved.locator, highlightClicks);
+					await resolved.locator.click({ timeout });
+				} catch (error) {
+					await clickLocatorPoint(page, resolved.locator, step.clickPoint, highlightClicks).catch(() => {
+						throw error;
+					});
+				}
+			} else if (step.kind === "fill") await resolved.locator.fill(substituteInputs(step.value ?? "", inputs), { timeout });
+			else if (step.kind === "select") await resolved.locator.selectOption(substituteInputs(step.value ?? "", inputs), { timeout });
+			else if (step.kind === "press") await resolved.locator.press(substituteInputs(step.key ?? "", inputs), { timeout });
+			else if (step.kind === "submit") await resolved.locator.evaluate((form) => {
+				const target = form;
+				if (typeof target.requestSubmit === "function") target.requestSubmit();
+			});
+			else if (step.kind === "upload") {
+				const files = (step.files ?? []).map((file) => substituteInputs(file, inputs));
+				await resolved.locator.setInputFiles(files, { timeout });
+			}
+		}
+		for (const expect of step.expect ?? []) {
+			const assertion = await runExpect$1(page, expect, timeoutMs);
+			result.assertions.push(assertion);
+			emit({
+				event: "assert",
+				stepId: step.id,
+				kind: assertion.kind,
+				status: assertion.ok ? "ok" : "error",
+				...assertion.selector === void 0 ? {} : { selector: assertion.selector },
+				...assertion.expected === void 0 ? {} : { expected: assertion.expected },
+				...assertion.actual === void 0 ? {} : { actual: assertion.actual },
+				elapsed: assertion.elapsedMs,
+				...assertion.error === void 0 ? {} : { error: assertion.error }
+			});
+			if (!assertion.ok) {
+				result.error = `断言失败：${assertion.error ?? "未知原因"}`;
+				result.elapsedMs = Date.now() - startedAt;
+				return result;
+			}
+		}
+		result.ok = true;
+		result.elapsedMs = Date.now() - startedAt;
+		return result;
+	} catch (error) {
+		result.error = String(error?.message ?? error).slice(0, 800);
+		result.elapsedMs = Date.now() - startedAt;
+		return result;
+	} finally {
+		emit({
+			event: "step",
+			id: step.id,
+			kind: step.kind,
+			status: result.ok ? "done" : "error",
+			elapsed: result.elapsedMs,
+			...result.target === void 0 ? {} : { target: result.target },
+			...result.error === void 0 ? {} : { error: result.error }
+		});
+	}
+}
+/** 目标解析：候选链里找第一个"当前唯一命中"的元素，找不到就给全部候选的失败说明。 */
+async function resolveTarget(page, step, timeoutMs) {
+	const candidates = buildCandidates(step);
+	if (candidates.length === 0) throw new Error(`${step.kind} 步骤没有 selector/candidates`);
+	const deadline = Date.now() + timeoutMs;
+	const attempts = [];
+	for (const candidate of candidates) {
+		const locator = page.locator(candidate);
+		try {
+			const count = await waitForPresent(locator, Math.max(1e3, Math.floor(timeoutMs / candidates.length)));
+			if (count === 1) return {
+				locator,
+				selector: candidate
+			};
+			attempts.push(`${candidate}（命中 ${count} 个，需唯一）`);
+		} catch (error) {
+			attempts.push(`${candidate}（${String(error?.message ?? error).slice(0, 120)}）`);
+		}
+		if (Date.now() > deadline) break;
+	}
+	throw new Error(`找不到唯一命中元素：${attempts.join("；")}`);
+}
+function buildCandidates(step) {
+	const out = [];
+	if (step.selector !== void 0) out.push(step.selector);
+	for (const candidate of step.candidates ?? []) if (!out.includes(candidate)) out.push(candidate);
+	for (const candidate of featureCandidates(step.features)) if (!out.includes(candidate)) out.push(candidate);
+	const name = step.clickPoint?.name;
+	if (name !== void 0 && name !== "") {
+		const text = `text="${name.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
+		if (!out.includes(text)) out.push(text);
+	}
+	return out;
+}
+/**
+* 轮询等待元素出现（命中数 ≥1 就返回；返回 0 = 超时）。
+*
+* 命中数 >1 说明选择器有歧义，交给调用方换下一个候选——不在这里等"变成 1"，
+* 那只会白等到超时。
+*/
+async function waitForPresent(locator, timeoutMs) {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const count = await locator.count().catch(() => 0);
+		if (count >= 1) return count;
+		if (Date.now() >= deadline) return 0;
+		await sleep$2(80);
+	}
+}
+/** 断言：轮询到步骤超时，失败时带实际值（截断）作为证据。 */
+async function runExpect$1(page, expect, timeoutMs) {
+	const startedAt = Date.now();
+	const deadline = startedAt + timeoutMs;
+	const selector = expect.selector;
+	const expectedText = expect.equals === void 0 ? expect.contains : String(expect.equals);
+	const result = {
+		kind: expect.kind,
+		...selector === void 0 ? {} : { selector },
+		ok: false,
+		elapsedMs: 0,
+		...expectedText === void 0 ? {} : { expected: expectedText }
+	};
+	const locator = selector === void 0 ? void 0 : page.locator(selector);
+	let actual = "";
+	for (;;) {
+		try {
+			const verdict = await evaluateExpect(page, expect, locator);
+			actual = verdict.actual;
+			if (verdict.ok) {
+				result.ok = true;
+				result.elapsedMs = Date.now() - startedAt;
+				return result;
+			}
+		} catch (error) {
+			actual = String(error?.message ?? error).slice(0, 300);
+		}
+		if (Date.now() >= deadline) break;
+		await sleep$2(80);
+	}
+	result.elapsedMs = Date.now() - startedAt;
+	result.actual = actual.slice(0, 500);
+	result.error = expect.kind === "url" ? `URL 期望 ${expect.equals === void 0 ? `包含 ${String(expect.contains)}` : `等于 ${String(expect.equals)}`}，实际 ${actual.slice(0, 200)}` : expect.kind === "count" ? `元素数期望 ${String(expect.equals)}，实际 ${actual}` : expect.kind === "visible" || expect.kind === "hidden" ? `元素可见性期望 ${expect.kind}，实际不满足（${selector ?? "?"}）` : `期望 ${expectedText ?? ""}，实际 ${actual.slice(0, 200)}`;
+	return result;
+}
+async function evaluateExpect(page, expect, locator) {
+	if (expect.kind === "url") {
+		const url = page.url();
+		return {
+			ok: expect.equals !== void 0 ? url === String(expect.equals) : url.includes(expect.contains ?? ""),
+			actual: url
+		};
+	}
+	if (locator === void 0) throw new Error("断言缺 selector");
+	if (expect.kind === "count") {
+		const count = await locator.count();
+		return {
+			ok: count === Number(expect.equals),
+			actual: String(count)
+		};
+	}
+	if (expect.kind === "visible") {
+		const visible = await locator.first().isVisible().catch(() => false);
+		return {
+			ok: visible,
+			actual: visible ? "visible" : "hidden"
+		};
+	}
+	if (expect.kind === "hidden") {
+		const visible = await locator.first().isVisible().catch(() => false);
+		return {
+			ok: !visible,
+			actual: visible ? "visible" : "hidden"
+		};
+	}
+	if (expect.kind === "value") {
+		const value = await locator.first().inputValue().catch(() => "");
+		return {
+			ok: expect.equals !== void 0 ? value === String(expect.equals) : value.includes(expect.contains ?? ""),
+			actual: value
+		};
+	}
+	const normalized = (await locator.first().innerText().catch(() => "") || "").replace(/\s+/g, " ").trim();
+	return {
+		ok: expect.equals !== void 0 ? normalized === String(expect.equals) : normalized.includes(expect.contains ?? ""),
+		actual: normalized
+	};
+}
+/** 成功证据：末态截图（写不进去不阻断结果，如实不带路径）。 */
+async function captureSuccess(page, dataRoot, runId) {
+	const target = join(uiRunDir(dataRoot, runId), "success.png");
+	try {
+		await page.screenshot({
+			path: target,
+			fullPage: false,
+			timeout: 1e4
+		});
+		return existsSync(target) ? { screenshot: join("ui-runs", runId, "success.png") } : {};
+	} catch {
+		return {};
+	}
+}
+/** 失败证据：截图 + 现场 HTML（写不进去不阻断结果，如实不带路径）。 */
+async function captureFailure$1(page, dataRoot, runId) {
+	const dir = uiRunDir(dataRoot, runId);
+	const evidence = {};
+	try {
+		await page.screenshot({
+			path: join(dir, "failure.png"),
+			fullPage: false,
+			timeout: 1e4
+		});
+		evidence.screenshot = join("ui-runs", runId, "failure.png");
+	} catch {}
+	try {
+		const html = await page.content();
+		writeFileSync(join(dir, "failure.html"), html.slice(0, 2097152), "utf8");
+		evidence.dom = join("ui-runs", runId, "failure.html");
+	} catch {}
+	return evidence;
+}
+function sleep$2(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+//#endregion
+//#region src/uitest/batch-store.ts
+/**
+* UI 批量回放留痕：`dataRoot/ui-batches/<batchId>/`。
+*
+* 与单次运行（`ui-runs/`）分目录：
+*   - 单次运行回答「这条脚本哪一步断了」；
+*   - 批次回答「这一轮回归整体过没过、报告在哪」。
+* 报告同时落 `report.md`（人看）与 `report.json`（CI/后续工具消费），
+* 两者都由 `batch.json` 的 items 生成，不引入第二份事实源。
+*
+* @module dsh-dataforge/uitest/batch-store
+*/
+/** 批次根目录。 */
+function uiBatchesRoot(dataRoot) {
+	return join(dataRoot, "ui-batches");
+}
+/** 单批次目录。 */
+function uiBatchDir(dataRoot, batchId) {
+	return join(uiBatchesRoot(dataRoot), batchId);
+}
+/** 新建批次目录 + 初始 batch.json；返回目录。 */
+function startUiBatch(dataRoot, batchId, meta) {
+	const dir = uiBatchDir(dataRoot, batchId);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "batch.json"), JSON.stringify({
+		batchId,
+		status: "running",
+		startedAt: Date.now(),
+		...meta
+	}, null, 2), "utf8");
+	return dir;
+}
+/** 读 batch.json；坏文件/不存在 → undefined。 */
+function readUiBatch(dataRoot, batchId) {
+	const path = join(uiBatchDir(dataRoot, batchId), "batch.json");
+	if (!existsSync(path)) return void 0;
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf8"));
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+		return parsed;
+	} catch {
+		return;
+	}
+}
+/** 合并写 batch.json（执行完写终态）。 */
+function finishUiBatch(dataRoot, batchId, patch) {
+	const current = readUiBatch(dataRoot, batchId);
+	if (current === void 0) return void 0;
+	const next = {
+		...current,
+		...patch
+	};
+	writeFileSync(join(uiBatchDir(dataRoot, batchId), "batch.json"), JSON.stringify(next, null, 2), "utf8");
+	return next;
+}
+/** 列最近批次（按目录名倒序 = 创建时间倒序）。 */
+function listUiBatches(dataRoot, limit = 20) {
+	const root = uiBatchesRoot(dataRoot);
+	if (!existsSync(root)) return [];
+	const dirs = readdirSync(root).filter((entry) => {
+		try {
+			return statSync(join(root, entry)).isDirectory();
+		} catch {
+			return false;
+		}
+	}).sort().reverse().slice(0, Math.max(1, limit));
+	const records = [];
+	for (const dir of dirs) {
+		const record = readUiBatch(dataRoot, dir);
+		if (record !== void 0) records.push(record);
+	}
+	return records;
+}
+/** 报告文件白名单解析（面板/工具读取出口）。 */
+function batchReportPath(dataRoot, batchId, format) {
+	if (!/^[A-Za-z0-9_-]{1,80}$/.test(batchId)) return void 0;
+	const name = format === "md" ? "report.md" : "report.json";
+	const path = join(uiBatchDir(dataRoot, batchId), name);
+	return existsSync(path) ? path : void 0;
+}
+/**
+* 生成并落盘报告（md + json），返回相对 dataRoot 的路径。
+*
+* md 是给人/PR 贴的；json 给 CI 判断退出码与看明细。
+*/
+function writeUiBatchReport(dataRoot, record) {
+	const dir = uiBatchDir(dataRoot, record.batchId);
+	const finishedAt = record.finishedAt ?? Date.now();
+	const summary = {
+		batchId: record.batchId,
+		generatedAt: new Date(finishedAt).toISOString(),
+		selection: record.selection,
+		...record.site === void 0 ? {} : { site: record.site },
+		total: record.total,
+		passed: record.passed,
+		failed: record.failed,
+		skipped: record.skipped,
+		elapsedMs: record.elapsedMs ?? 0,
+		success: record.failed === 0,
+		items: record.items
+	};
+	const lines = [
+		"# UI 批量回归报告",
+		"",
+		`- 批次：\`${record.batchId}\``,
+		`- 时间：${summary.generatedAt}`,
+		`- 范围：${record.selection === "all" ? "全部脚本" : record.selection === "site" ? `站点 ${record.site ?? ""}` : "指定流程"}`,
+		`- 结果：**${record.passed} 通过 / ${record.failed} 失败 / ${record.skipped} 跳过**（共 ${record.total}，${Math.round((record.elapsedMs ?? 0) / 1e3)}s）`,
+		"",
+		"| # | 站点 / 流程 | 版本 | 步骤 | 结果 | 耗时 | 失败点 / 原因 |",
+		"|---|---|---|---|---|---|---|"
+	];
+	for (const item of record.items) {
+		const version = item.version === void 0 ? "—" : `v${item.version}`;
+		const steps = item.totalSteps === void 0 ? "—" : `${item.stepsDone ?? 0}/${item.totalSteps}`;
+		const elapsed = item.elapsedMs === void 0 ? "—" : `${item.elapsedMs}ms`;
+		const verdict = item.skipped === true ? "⏭ 跳过" : item.success ? "✅ 通过" : "❌ 失败";
+		const reason = item.error === void 0 ? "" : item.error.replace(/\|/g, "\\|").replace(/\n/g, " ");
+		lines.push(`| ${item.index + 1} | ${item.site} / ${item.flow} | ${version} | ${steps} | ${verdict} | ${elapsed} | ${reason} |`);
+	}
+	const failures = record.items.filter((item) => item.success !== true);
+	if (failures.length > 0) {
+		lines.push("", "## 失败证据", "");
+		for (const item of failures) {
+			if (item.runId === void 0) {
+				lines.push(`- ${item.site} / ${item.flow}：${item.error ?? "未执行"}（未产生运行记录）`);
+				continue;
+			}
+			lines.push(`- ${item.site} / ${item.flow}（run \`${item.runId}\`）${item.failedStep === void 0 ? "" : `断在 ${item.failedStep}`}${item.screenshot === void 0 ? "" : `；截图 \`${item.screenshot}\``}`);
+		}
+	}
+	lines.push("");
+	writeFileSync(join(dir, "report.md"), lines.join("\n"), "utf8");
+	writeFileSync(join(dir, "report.json"), JSON.stringify(summary, null, 2), "utf8");
+	return {
+		report: join("ui-batches", record.batchId, "report.md"),
+		reportJson: join("ui-batches", record.batchId, "report.json")
+	};
+}
+
+//#endregion
+//#region src/uitest/batch.ts
+/**
+* UI 批量回归：选脚本 → 逐条回放 → 汇总通过/失败 → 落报告。
+*
+* 与单次 `runUiScript` 的关系：批次不重新实现回放，只做「选哪些、按什么顺序、怎么汇总」；
+* 每条脚本的回放/断言/截图/run 留痕完全复用单次执行（runId 一一对应）。
+*
+* 为什么默认串行：一个 Chrome 实例 = 一份内存/CPU；并发回放很容易把同一台机器打满，
+* 而 UI 回归的价值在"稳定"不在"快"。并发留给后续版本（要配合队列与资源上限）。
+*
+* 设计取舍：缺必填入参的脚本**不静默跳过**——在计划卡里列出，执行时记 `skipped + 原因`，
+* 最终计入 failed/skipped 而不是从总数里消失。
+*
+* @module dsh-dataforge/uitest/batch
+*/
+const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 50;
+/** `site/flow` 或 `site/flow@3` → {site, flow, version?}（站点名里可能有空格，取最后一个 `/`）。 */
+function parseFlowRef(text) {
+	const trimmed = text.trim();
+	if (trimmed === "") return void 0;
+	const at = trimmed.lastIndexOf("@");
+	let version;
+	let base = trimmed;
+	if (at > 0) {
+		const parsed = Number(trimmed.slice(at + 1));
+		if (Number.isInteger(parsed) && parsed >= 1) {
+			version = parsed;
+			base = trimmed.slice(0, at);
+		}
+	}
+	const slash = base.lastIndexOf("/");
+	if (slash <= 0 || slash === base.length - 1) return void 0;
+	return {
+		site: base.slice(0, slash).trim(),
+		flow: base.slice(slash + 1).trim(),
+		...version === void 0 ? {} : { version }
+	};
+}
+function normalizeInputs(raw) {
+	if (raw === void 0) return {};
+	const out = {};
+	for (const [key, value] of Object.entries(raw)) if (typeof value === "string") out[key] = value;
+	else if (typeof value === "number" || typeof value === "boolean") out[key] = String(value);
+	return out;
+}
+/**
+* 选脚本并生成计划（不跑浏览器）。
+*
+* 缺参/坏文件不抛，写进条目的 `missing` / `error`，由执行阶段记为跳过/失败——
+* 计划卡里先让用户看到"这轮会跑什么、哪些跑不了"。
+*/
+function planUiBatch(workspaceRoot, args, inputsOverride) {
+	const inputs = normalizeInputs(inputsOverride ?? args.inputs);
+	const limit = Math.min(Math.max(Math.floor(args.limit ?? DEFAULT_LIMIT), 1), MAX_LIMIT);
+	const refs = [];
+	let selection = "all";
+	const flowArgs = (args.flows ?? []).map((item) => item.trim()).filter((item) => item !== "");
+	if (flowArgs.length > 0) {
+		selection = "flows";
+		for (const text of flowArgs) {
+			const parsed = parseFlowRef(text);
+			if (parsed === void 0) return {
+				ok: false,
+				message: `flows 里的条目格式不对：${text}（应为 site/flow 或 site/flow@3）`
+			};
+			refs.push(parsed);
+		}
+	} else if (args.site !== void 0 && args.site.trim() !== "") {
+		selection = "site";
+		for (const script of listUiScripts(workspaceRoot)) {
+			if (script.site !== args.site.trim()) continue;
+			refs.push({
+				site: script.site,
+				flow: script.flow,
+				version: script.latest
+			});
+		}
+	} else for (const script of listUiScripts(workspaceRoot)) refs.push({
+		site: script.site,
+		flow: script.flow,
+		version: script.latest
+	});
+	const limited = refs.slice(0, limit);
+	const entries = [];
+	const missingUnion = [];
+	let writeSteps = 0;
+	for (const [index, ref] of limited.entries()) {
+		const loaded = loadUiScript(workspaceRoot, ref.site, ref.flow, ref.version);
+		if (!loaded.ok) {
+			entries.push({
+				item: {
+					index,
+					site: ref.site,
+					flow: ref.flow,
+					...ref.version === void 0 ? {} : { version: ref.version },
+					stepCount: 0,
+					writeSteps: 0,
+					missing: [],
+					error: loaded.message
+				},
+				inputs
+			});
+			continue;
+		}
+		const doc = loaded.doc;
+		const missing = missingInputsOf(doc, inputs);
+		const item = {
+			index,
+			site: doc.meta.site,
+			flow: doc.meta.flow,
+			version: loaded.version,
+			stepCount: doc.steps.length,
+			writeSteps: doc.steps.filter((step) => step.kind === "click" || step.kind === "submit" || step.kind === "upload").length,
+			missing
+		};
+		for (const name of missing) if (!missingUnion.includes(name)) missingUnion.push(name);
+		writeSteps += item.writeSteps;
+		entries.push({
+			item,
+			doc,
+			inputs
+		});
+	}
+	return {
+		ok: true,
+		entries,
+		plan: {
+			selection,
+			...args.site === void 0 || args.site.trim() === "" || selection !== "site" ? {} : { site: args.site.trim() },
+			total: entries.length,
+			limit,
+			items: entries.map((entry) => entry.item),
+			missingInputs: missingUnion,
+			writeSteps
+		}
+	};
+}
+/**
+* 执行计划：逐条调用 `deps.run`，汇总后写 batch.json + report.md/json。
+*
+* 某条脚本回放抛错不会中断整批（捕获成该条失败）；预检失败（缺参/脚本坏）不跑浏览器。
+*/
+async function executeUiBatch(deps, planned) {
+	const startedAt = Date.now();
+	const batchId = `uibatch_${startedAt.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+	const items = [];
+	startUiBatch(deps.dataRoot, batchId, {
+		selection: planned.plan.selection,
+		...planned.plan.site === void 0 ? {} : { site: planned.plan.site },
+		total: planned.entries.length,
+		passed: 0,
+		failed: 0,
+		skipped: 0,
+		items: []
+	});
+	for (const entry of planned.entries) {
+		const { item, doc, inputs } = entry;
+		const base = {
+			index: item.index,
+			site: item.site,
+			flow: item.flow,
+			...item.version === void 0 ? {} : { version: item.version },
+			success: false
+		};
+		if (item.error !== void 0 || item.missing.length > 0 || doc === void 0) {
+			const reason = item.error ?? `缺必填入参：${item.missing.join("、")}`;
+			items.push({
+				...base,
+				skipped: true,
+				error: reason
+			});
+			continue;
+		}
+		try {
+			const run = await deps.run(doc, inputs);
+			items.push({
+				...base,
+				runId: run.runId,
+				success: run.success,
+				stepsDone: run.stepsDone,
+				totalSteps: run.totalSteps,
+				...run.failedStep === void 0 ? {} : { failedStep: run.failedStep.id },
+				...run.screenshot === void 0 ? {} : { screenshot: run.screenshot },
+				...run.error === void 0 ? {} : { error: run.error },
+				elapsedMs: run.elapsedMs
+			});
+		} catch (error) {
+			items.push({
+				...base,
+				error: String(error?.message ?? error).slice(0, 800)
+			});
+		}
+	}
+	const passed = items.filter((item) => item.success).length;
+	const failed = items.filter((item) => item.success !== true && item.skipped !== true).length;
+	const skipped = items.filter((item) => item.skipped === true).length;
+	const elapsedMs = Date.now() - startedAt;
+	const record = finishUiBatch(deps.dataRoot, batchId, {
+		status: "done",
+		finishedAt: Date.now(),
+		total: items.length,
+		passed,
+		failed,
+		skipped,
+		elapsedMs,
+		items
+	});
+	if (record === void 0) throw new Error(`批次 ${batchId} 的 batch.json 写入失败`);
+	const paths = writeUiBatchReport(deps.dataRoot, record);
+	finishUiBatch(deps.dataRoot, batchId, paths);
+	return {
+		batchId,
+		selection: record.selection,
+		...record.site === void 0 ? {} : { site: record.site },
+		total: items.length,
+		passed,
+		failed,
+		skipped,
+		elapsedMs,
+		items,
+		report: paths.report,
+		reportJson: paths.reportJson
+	};
+}
+
+//#endregion
+//#region src/uitest/naming.ts
+function cleanText(value) {
+	return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+}
+/** hostname（去 www.、去端口、去末尾点）。非法 URL 返回空串。 */
+function hostOfUrl(url) {
+	if (url === void 0 || url === "") return "";
+	try {
+		return new URL(url).hostname.replace(/^www\./i, "").replace(/\.$/, "");
+	} catch {
+		return "";
+	}
+}
+/** 站点名：og:site_name 优先，其次 hostname。 */
+function suggestSiteName(meta) {
+	const siteName = cleanText(meta.siteName);
+	if (siteName !== "") return siteName.slice(0, 80);
+	return hostOfUrl(meta.url).slice(0, 80);
+}
+const TITLE_SEPARATORS = /\s*[-–—|·•/]\s*/g;
+/** 去掉标题里重复的站点名与首尾分隔符。 */
+function stripSiteFromTitle(title, siteName) {
+	let text = title;
+	if (siteName !== "") text = text.replace(new RegExp(siteName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), " ");
+	text = text.split(TITLE_SEPARATORS).map((part) => part.trim()).filter((part) => part !== "").join(" - ");
+	return text.replace(/^[\s\-–—|·•/]+|[\s\-–—|·•/]+$/g, "").trim();
+}
+/** URL 最后一个有意义路径段（跳过纯数字/扩展名/id 形式的段）。 */
+function lastPathSegment(url) {
+	if (url === void 0 || url === "") return "";
+	try {
+		const segments = new URL(url).pathname.split("/").map((part) => decodeURIComponent(part).trim()).filter((part) => part !== "");
+		for (let i = segments.length - 1; i >= 0; i -= 1) {
+			const segment = segments[i];
+			if (/^\d+$/.test(segment) || /^[0-9a-f-]{16,}$/i.test(segment)) continue;
+			return segment.replace(/\.[a-z0-9]{1,6}$/i, "");
+		}
+		return "";
+	} catch {
+		return "";
+	}
+}
+/** 流程名：页面标题 → 路径段 → `录制-MMDD-HHmm` 兜底。 */
+function suggestFlowName(meta, now = /* @__PURE__ */ new Date()) {
+	const siteName = cleanText(meta.siteName);
+	const fromTitle = stripSiteFromTitle(cleanText(meta.title), siteName !== "" ? siteName : hostOfUrl(meta.url));
+	const cleaned = (fromTitle !== "" ? fromTitle : lastPathSegment(meta.url)).replace(/\s+/g, " ").trim().slice(0, 60);
+	if (cleaned !== "") return cleaned;
+	const pad = (value) => String(value).padStart(2, "0");
+	return `录制-${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+}
+/** 一次生成站点/流程（只在调用方没有显式给名字时用）。 */
+function autoNameFor(meta, now = /* @__PURE__ */ new Date()) {
+	return {
+		site: suggestSiteName(meta),
+		flow: suggestFlowName(meta, now)
+	};
+}
+
+//#endregion
+//#region src/uitest/application.ts
+/**
+* UI 测试域的应用层：录制生命周期、脚本读写、回放闸门与回执折叠。
+*
+* 分层与编排域一致：工具壳（`src/tools.ts`）只声明参数/渲染回执，判定与 IO 都在这里，
+* 面板路由复用同一批函数（不重新实现闸门）。
+*
+* 三道闸（沿用链路执行纪律，不另造一套）：
+*   1. 必填：脚本声明的 required 入参缺一即 `missing-inputs`，一个请求/浏览器都不起；
+*   2. 确认：不带 confirm 只给计划卡（步骤 + 写操作数 + 起点 host），不起浏览器；
+*   3. 开关：`uiTestEnabled=false` 时一律 `ui-test-disabled`（脚本读写/历史回看照常）。
+*
+* 凭证纪律：录制结束把会话 cookie 写进本地凭证 jar（0600、按 origin 隔离），回放按起点域名
+* 读回；cookie 值只在内存/context 里过手，事件、回执、摘要只有条数。
+*
+* @module dsh-dataforge/uitest/application
+*/
+async function workspaceOf(deps, exec) {
+	return await deps.resolveWorkspaceRoot(exec) ?? process.cwd();
+}
+function messageOf$3(error) {
+	return (error instanceof Error ? error.message : String(error)).slice(0, 1e3);
+}
+/**
+* 读脚本：给 site+flow 回详情（缺省最新版本），否则回列表。
+*
+* `yaml: true` 时详情附 YAML 原文（agent 要改脚本时先读原文，避免重写丢字段）。
+*/
+async function getUiScriptForTool(deps, exec, args) {
+	const workspaceRoot = await workspaceOf(deps, exec);
+	const site = args.site?.trim();
+	const flow = args.flow?.trim();
+	if (site === void 0 || site === "" || flow === void 0 || flow === "") return {
+		ok: true,
+		scripts: listUiScripts(workspaceRoot)
+	};
+	const loaded = loadUiScript(workspaceRoot, site, flow, args.version);
+	if (!loaded.ok) return {
+		ok: false,
+		code: loaded.code,
+		message: loaded.message,
+		availableVersions: loaded.availableVersions,
+		...loaded.issues === void 0 ? {} : { issues: loaded.issues }
+	};
+	return {
+		ok: true,
+		site,
+		flow,
+		version: loaded.version,
+		availableVersions: loaded.availableVersions,
+		yaml: loaded.yaml,
+		doc: loaded.doc
+	};
+}
+/** agent 手写/导入脚本：YAML 进、校验过才落新版本。 */
+async function upsertUiScriptForTool(deps, exec, args) {
+	const workspaceRoot = await workspaceOf(deps, exec);
+	let parsed;
+	try {
+		parsed = parseUiScriptDoc(safeYaml(args.yaml));
+	} catch (error) {
+		return {
+			ok: false,
+			message: messageOf$3(error)
+		};
+	}
+	if (!parsed.ok) return {
+		ok: false,
+		message: `脚本未通过校验：${formatUiIssues(parsed.issues)}`,
+		issues: parsed.issues
+	};
+	const saved = saveUiScript(workspaceRoot, parsed.doc, { source: args.source ?? "agent" });
+	if (!saved.ok) return {
+		ok: false,
+		issues: saved.issues,
+		message: `脚本未通过校验：${formatUiIssues(saved.issues)}`
+	};
+	return {
+		ok: true,
+		site: saved.doc.meta.site,
+		flow: saved.doc.meta.flow,
+		version: saved.version,
+		path: saved.path
+	};
+}
+function safeYaml(text) {
+	try {
+		return parseYaml(text);
+	} catch (error) {
+		throw new Error(`YAML 解析失败：${messageOf$3(error)}`);
+	}
+}
+function parseYaml(text) {
+	return loadYamlValue(text);
+}
+/**
+* 打开一个可见 Chrome（不开始录制）：先让用户登录/导航到起点，再 start。
+*
+* 为什么分成 open/start 两步：登录动作不该进脚本。用户先登录，再点"开始录制"，
+* 脚本里就只剩业务操作；回放靠录制时持久化的 cookie 直接进登录态。
+*/
+async function openRecordingForTool(deps, args) {
+	let url;
+	try {
+		const parsed = new URL(args.startUrl);
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("protocol");
+		url = parsed.toString();
+	} catch {
+		return {
+			ok: false,
+			error: `startUrl 必须是 http/https 的合法 URL：${args.startUrl}`
+		};
+	}
+	const selection = deps.resolveEngine();
+	const engine = selection.engine;
+	if (!engine.available()) return {
+		ok: false,
+		error: `浏览器引擎 ${engine.label} 不可用：${selection.degraded ?? "宿主未提供共享浏览器（安装/启用 dsh-builtin-browser 或把 uiTestBrowser 设为 playwright）"}`
+	};
+	const cookies = engine.managesCookies ? void 0 : await loadCookiesForStart(deps, url);
+	const opened = await engine.open({
+		startUrl: url,
+		...args.headless === void 0 ? {} : { headless: args.headless },
+		...cookies === void 0 ? {} : { cookies },
+		...args.ownerSessionId === void 0 || args.ownerSessionId === "" ? {} : { owner: args.ownerSessionId }
+	});
+	if (!opened.ok) return {
+		ok: false,
+		error: opened.error
+	};
+	const meta = opened.sessionId === void 0 ? {} : await engine.pageMeta(opened.sessionId).catch(() => ({}));
+	const suggestedSite = suggestSiteName(meta);
+	const suggestedFlow = suggestFlowName(meta);
+	return {
+		ok: true,
+		sessionId: opened.sessionId,
+		pageUrl: opened.pageUrl,
+		engine: engine.kind,
+		...suggestedSite === "" ? {} : { suggestedSite },
+		...suggestedFlow === "" ? {} : { suggestedFlow },
+		notice: engine.kind === "shared" ? "共享浏览器已打开（未开始录制）：页面在该对话的右侧栏浏览器面板里——没看到就点会话右上角的展开侧栏按钮。站点名/流程名留空会自动命名。" : "浏览器已打开（未开始录制）：先完成登录/导航，再开始录制；站点名/流程名留空会自动命名。"
+	};
+}
+async function startRecordingForTool(deps, args) {
+	const { engine } = deps.resolveEngine();
+	if (!engine.available()) return {
+		ok: false,
+		error: `浏览器引擎 ${engine.label} 不可用`
+	};
+	const started = await engine.start(args.sessionId);
+	if (!started.ok) return {
+		ok: false,
+		error: started.error
+	};
+	return {
+		ok: true,
+		sessionId: args.sessionId,
+		pageUrl: started.pageUrl,
+		...started.alreadyRecording === true ? { alreadyRecording: true } : {}
+	};
+}
+/**
+* 停止录制：生成步骤 → 持久化会话 cookie → （可选）落新脚本版本。
+*
+* 没给 site/flow 就只回步骤（agent 先看再决定怎么落盘）；给了默认保存。
+* 空步骤不落盘（脚本 schema 要求至少 1 步），如实回 notice。
+*/
+async function stopRecordingForTool(deps, exec, args) {
+	const { engine } = deps.resolveEngine();
+	if (!engine.available()) return {
+		ok: false,
+		sessionId: args.sessionId,
+		error: `浏览器引擎 ${engine.label} 不可用`
+	};
+	const stopped = await engine.stop(args.sessionId);
+	if (!stopped.ok || stopped.result === void 0) return {
+		ok: false,
+		sessionId: args.sessionId,
+		error: stopped.error ?? "没有录到步骤"
+	};
+	const result = stopped.result;
+	const persistedCookies = engine.managesCookies ? void 0 : await persistSessionCookies(deps, engine, args.sessionId);
+	const base = {
+		ok: true,
+		sessionId: args.sessionId,
+		startUrl: result.startUrl,
+		steps: result.steps,
+		stepCount: result.steps.length,
+		skippedSecrets: result.skippedSecrets,
+		skippedUploads: result.skippedUploads,
+		...result.notice === void 0 ? {} : { notice: result.notice },
+		...persistedCookies === void 0 ? {} : { persistedCookies }
+	};
+	let site = args.site?.trim();
+	let flow = args.flow?.trim();
+	const save = args.save ?? true;
+	let autoNamed = false;
+	if (save && result.steps.length > 0 && (site === void 0 || site === "" || flow === void 0 || flow === "")) {
+		const meta = await engine.pageMeta(args.sessionId).catch(() => ({}));
+		const auto = autoNameFor(meta);
+		if (site === void 0 || site === "") {
+			site = auto.site === "" ? "未命名站点" : auto.site;
+			autoNamed = true;
+		}
+		if (flow === void 0 || flow === "") {
+			flow = auto.flow;
+			autoNamed = true;
+		}
+	}
+	if (save && site !== void 0 && site !== "" && flow !== void 0 && flow !== "" && result.steps.length > 0) {
+		const saved = saveUiScript(await workspaceOf(deps, exec), {
+			apiVersion: "dataforge/v1",
+			kind: "ui-script",
+			meta: {
+				site,
+				flow,
+				version: 1,
+				created: (/* @__PURE__ */ new Date()).toISOString(),
+				source: "record",
+				startUrl: result.startUrl,
+				viewport: result.viewport,
+				...args.domain === void 0 || args.domain.trim() === "" ? {} : { domain: args.domain.trim() },
+				...args.note === void 0 || args.note.trim() === "" ? {} : { note: args.note.trim() }
+			},
+			inputs: [],
+			steps: result.steps
+		}, { source: "record" });
+		if (saved.ok) {
+			base.saved = {
+				site: saved.doc.meta.site,
+				flow: saved.doc.meta.flow,
+				version: saved.version,
+				path: saved.path
+			};
+			if (autoNamed) base.notice = [base.notice, `站点/流程名留空，已自动命名：${saved.doc.meta.site} / ${saved.doc.meta.flow}（可在脚本 YAML 里改）`].filter((item) => item !== void 0 && item !== "").join("；");
+		} else base.notice = [base.notice, `脚本未保存：${formatUiIssues(saved.issues)}`].filter((item) => item !== void 0 && item !== "").join("；");
+	} else if (save && result.steps.length === 0) base.notice = [base.notice, "没有可保存的步骤（未落盘）"].filter((item) => item !== void 0 && item !== "").join("；");
+	return base;
+}
+/** 关闭录制会话回执。 */
+async function closeRecordingForTool(deps, args) {
+	const { engine } = deps.resolveEngine();
+	return (await engine.close(args.sessionId)).ok ? { ok: true } : {
+		ok: false,
+		error: `会话 ${args.sessionId} 不存在或已关闭`
+	};
+}
+/** 录制会话列表（面板轮询用）。 */
+function recordingSessionsOf(deps) {
+	return deps.resolveEngine().engine.list();
+}
+/** 在录制会话页面上点选一个元素（面板补断言/改步骤用；agent 无此工具，避免误触）。 */
+async function pickSelectorForTool(deps, args) {
+	return deps.resolveEngine().engine.pickSelector(args.sessionId, args.timeoutMs);
+}
+/**
+* 回放一个脚本：三道闸 + 执行。
+*
+* 不带 confirm / dry_run=true 只回计划卡；带 confirm 才起浏览器。
+* 写操作提示：click/submit/upload 可能产生业务写入，计划卡里如实计数，不替用户担保。
+*/
+async function runUiScriptForTool(deps, exec, args) {
+	if (!deps.enabled) return {
+		ok: false,
+		gate: "ui-test-disabled",
+		code: "ui-test-disabled",
+		message: "UI 回放开关关闭（uiTestEnabled=false）：脚本读写与历史回看照常，回放不执行。"
+	};
+	const inputs = normalizeInputsMap(args.inputs);
+	const workspaceRoot = await workspaceOf(deps, exec);
+	const loaded = loadUiScript(workspaceRoot, args.site, args.flow, args.version);
+	if (!loaded.ok) return {
+		ok: false,
+		gate: loaded.code,
+		code: loaded.code,
+		message: loaded.message,
+		availableVersions: loaded.availableVersions,
+		...loaded.issues === void 0 ? {} : { issues: loaded.issues }
+	};
+	const missing = missingInputsOf(loaded.doc, inputs);
+	if (missing.length > 0) return {
+		ok: false,
+		gate: "missing-inputs",
+		code: "missing-inputs",
+		message: `缺必填入参：${missing.join("、")}`,
+		missing
+	};
+	const plan = planUiRun(loaded.doc, inputs);
+	const writeHint = plan.writeSteps > 0 ? `其中 ${plan.writeSteps} 步是 click/submit/upload，可能产生真实业务写入` : "没有写操作步骤（只读）";
+	const card = [
+		`🧪 UI 回放计划：${plan.site} / ${plan.flow} v${plan.version}`,
+		`起点：${plan.startUrl}`,
+		`步骤 ${plan.stepCount} 条（${writeHint}）`,
+		...plan.steps.slice(0, 20).map((step, index) => `${index + 1}. ${step.kind}${step.target === void 0 ? "" : ` ${step.target}`}`),
+		plan.steps.length > 20 ? `… 还有 ${plan.steps.length - 20} 步` : "",
+		"确认后带 confirm=true 重调才会起浏览器。"
+	].filter((line) => line !== "").join("\n");
+	if (args.dryRun === true || args.confirm !== true) return {
+		ok: true,
+		gate: args.dryRun === true ? "dry-run" : "confirm-required",
+		plan: {
+			...plan,
+			card
+		}
+	};
+	const selection = deps.resolveEngine();
+	const engine = selection.engine;
+	if (!engine.available()) return {
+		ok: false,
+		gate: "ui-engine-unavailable",
+		code: "ui-engine-unavailable",
+		message: `浏览器引擎 ${engine.label} 不可用：${selection.degraded ?? "宿主未提供共享浏览器；请安装/启用 dsh-builtin-browser 或把 uiTestBrowser 设为 playwright"}`
+	};
+	const owner = args.ownerSessionId ?? ownerOf(exec);
+	const result = await engine.run(loaded.doc, inputs, {
+		...args.headless === void 0 ? {} : { headless: args.headless },
+		...args.slowMoMs === void 0 ? {} : { slowMoMs: args.slowMoMs },
+		...args.highlightClicks === void 0 ? {} : { highlightClicks: args.highlightClicks },
+		holdMs: args.holdMs ?? 1200,
+		...owner === void 0 ? {} : { owner }
+	});
+	return {
+		ok: true,
+		gate: "executed",
+		plan: {
+			...plan,
+			card
+		},
+		result: {
+			runId: result.runId,
+			success: result.success,
+			site: result.site,
+			flow: result.flow,
+			version: result.version,
+			startUrl: result.startUrl,
+			totalSteps: result.totalSteps,
+			stepsDone: result.stepsDone,
+			steps: result.steps,
+			...result.failedStep === void 0 ? {} : { failedStep: result.failedStep },
+			...result.screenshot === void 0 ? {} : { screenshot: result.screenshot },
+			...result.dom === void 0 ? {} : { dom: result.dom },
+			...result.error === void 0 ? {} : { error: result.error },
+			elapsedMs: result.elapsedMs,
+			cookiesApplied: result.cookiesApplied
+		}
+	};
+}
+function normalizeInputsMap(raw) {
+	if (raw === void 0) return {};
+	const out = {};
+	for (const [key, value] of Object.entries(raw)) if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") out[key] = String(value);
+	return out;
+}
+function runRowOf(record) {
+	return {
+		runId: record.runId,
+		status: record.status,
+		site: record.site,
+		flow: record.flow,
+		version: record.version,
+		startUrl: record.startUrl,
+		startedAt: record.startedAt,
+		...record.finishedAt === void 0 ? {} : { finishedAt: record.finishedAt },
+		...record.totalSteps === void 0 ? {} : { totalSteps: record.totalSteps },
+		...record.stepsDone === void 0 ? {} : { stepsDone: record.stepsDone },
+		...record.failedStep === void 0 ? {} : { failedStep: record.failedStep },
+		...record.error === void 0 ? {} : { error: record.error },
+		...record.screenshot === void 0 ? {} : { screenshot: record.screenshot }
+	};
+}
+function eventRowsOf(events) {
+	return events.map((event) => {
+		if (event.event === "step") return {
+			event: "step",
+			...event.ts === void 0 ? {} : { ts: event.ts },
+			id: event.id,
+			kind: event.kind,
+			status: event.status,
+			...event.elapsed === void 0 ? {} : { elapsed: event.elapsed },
+			...event.error === void 0 ? {} : { error: event.error }
+		};
+		if (event.event === "assert") return {
+			event: "assert",
+			...event.ts === void 0 ? {} : { ts: event.ts },
+			stepId: event.stepId,
+			kind: event.kind,
+			status: event.status,
+			...event.selector === void 0 ? {} : { selector: event.selector },
+			...event.expected === void 0 ? {} : { expected: event.expected },
+			...event.actual === void 0 ? {} : { actual: event.actual },
+			...event.elapsed === void 0 ? {} : { elapsed: event.elapsed },
+			...event.error === void 0 ? {} : { error: event.error }
+		};
+		if (event.event === "terminal") return {
+			event: "terminal",
+			...event.ts === void 0 ? {} : { ts: event.ts },
+			success: event.success,
+			...event.message === void 0 ? {} : { message: event.message },
+			...event.screenshot === void 0 ? {} : { screenshot: event.screenshot },
+			...event.dom === void 0 ? {} : { dom: event.dom },
+			...event.elapsed === void 0 ? {} : { elapsed: event.elapsed }
+		};
+		return {
+			event: "meta",
+			...event.ts === void 0 ? {} : { ts: event.ts },
+			site: event.site,
+			flow: event.flow,
+			version: event.version,
+			startUrl: event.startUrl
+		};
+	});
+}
+function runsForTool(deps, args) {
+	if (args.runId !== void 0 && args.runId.trim() !== "") {
+		const runId = args.runId.trim();
+		const run = readUiRunRecord(deps.dataRoot, runId);
+		if (run === void 0) return {
+			ok: false,
+			message: `UI 运行 ${runId} 不存在`
+		};
+		return {
+			ok: true,
+			run: runRowOf(run),
+			events: eventRowsOf(readUiRunEvents(deps.dataRoot, runId))
+		};
+	}
+	return {
+		ok: true,
+		runs: listUiRuns(deps.dataRoot, args.limit ?? 20).map(runRowOf)
+	};
+}
+function renderBatchPlanCard(plan) {
+	const scope = plan.selection === "all" ? "全部脚本" : plan.selection === "site" ? `站点 ${plan.site ?? ""}` : "指定流程";
+	const lines = plan.items.map((item) => {
+		const version = item.version === void 0 ? "" : ` v${item.version}`;
+		const tail = item.error !== void 0 ? `（✗ ${item.error}）` : item.missing.length > 0 ? `（缺参 ${item.missing.join("、")}）` : "";
+		return `${item.index + 1}. ${item.site} / ${item.flow}${version} ｜ ${item.stepCount} 步${tail}`;
+	});
+	const missing = plan.missingInputs.length === 0 ? "" : `\n缺必填入参：${plan.missingInputs.join("、")}（补齐后重调）`;
+	const writes = plan.writeSteps === 0 ? "无写操作步骤" : `${plan.writeSteps} 步 click/submit/upload 可能产生真实业务写入`;
+	return [
+		`🧪 UI 批量回放计划：${scope}，${plan.total} 条脚本（${writes}）`,
+		...lines,
+		missing,
+		"确认后带 confirm=true 重调才会逐条起浏览器。"
+	].filter((line) => line !== "").join("\n");
+}
+/**
+* 批量回放：计划（确认前）/ 执行（confirm=true）。
+*
+* 与单次回放同款纪律：`uiTestEnabled=false` 拒跑；缺参不静默跳过（计划卡列出，执行记跳过）；
+* 默认串行；每条脚本的回放/断言/截图复用单次执行，报告落 `dataRoot/ui-batches/<id>/`。
+*/
+async function batchRunForTool(deps, exec, args) {
+	if (!deps.enabled) return {
+		ok: false,
+		gate: "ui-test-disabled",
+		code: "ui-test-disabled",
+		message: "UI 回放开关关闭（uiTestEnabled=false）：批量回放不执行，脚本与历史留痕照常。"
+	};
+	const workspaceRoot = await workspaceOf(deps, exec);
+	const planned = planUiBatch(workspaceRoot, args, args.inputs);
+	if (!planned.ok) return {
+		ok: false,
+		gate: "batch-plan-failed",
+		code: "batch-plan-failed",
+		message: planned.message
+	};
+	if (planned.plan.total === 0) return {
+		ok: false,
+		gate: "batch-plan-failed",
+		code: "batch-plan-failed",
+		message: args.flows !== void 0 && args.flows.length > 0 ? "指定的流程没有找到 UI 脚本" : "没有选中任何 UI 脚本（先录制或用 ui_script_upsert 写入）"
+	};
+	const plan = {
+		...planned.plan,
+		card: renderBatchPlanCard(planned.plan)
+	};
+	if (args.dryRun === true || args.confirm !== true) return {
+		ok: true,
+		gate: args.dryRun === true ? "dry-run" : "confirm-required",
+		plan
+	};
+	if (!deps.batchEngine.available()) return {
+		ok: false,
+		gate: "batch-plan-failed",
+		code: "ui-engine-unavailable",
+		message: `批量回放引擎 ${deps.batchEngine.label} 不可用`
+	};
+	return {
+		ok: true,
+		gate: "executed",
+		plan,
+		result: await executeUiBatch({
+			dataRoot: deps.dataRoot,
+			run: (doc, inputs) => deps.batchEngine.run(doc, inputs, {
+				headless: true,
+				highlightClicks: false,
+				holdMs: 0
+			})
+		}, {
+			plan: planned.plan,
+			entries: planned.entries
+		})
+	};
+}
+/** 按起点 URL 从本地凭证 jar 读 cookie（值只进内存，供 context.addCookies）。 */
+async function loadCookiesForStart(deps, startUrl) {
+	if (deps.credentialStorePath === void 0) return [];
+	let host;
+	try {
+		host = new URL(startUrl).hostname;
+	} catch {
+		return [];
+	}
+	const store = readStore(deps.credentialStorePath);
+	const out = [];
+	for (const [origin, entry] of Object.entries(store.origins)) {
+		let originHost;
+		try {
+			originHost = new URL(origin).hostname;
+		} catch {
+			continue;
+		}
+		if (!domainMatches(host, originHost)) continue;
+		const secure = origin.startsWith("https:");
+		for (const cookie of entry.cookies) out.push({
+			name: cookie.name,
+			value: cookie.value,
+			domain: originHost,
+			path: "/",
+			secure,
+			...cookie.expiresAt === void 0 ? {} : { expires: cookie.expiresAt }
+		});
+	}
+	return out;
+}
+/**
+* 录制结束后把会话 cookie 写进本地 jar（0600、按 origin 隔离）。
+*
+* 只报写入条数，cookie 值不经过任何回执/日志。落盘失败不抛（录制本身已成功）。
+*/
+async function persistSessionCookies(deps, engine, sessionId) {
+	if (deps.credentialStorePath === void 0) return void 0;
+	const cookies = await engine.cookiesOf(sessionId);
+	if (cookies.length === 0) return 0;
+	const now = deps.now?.() ?? Date.now();
+	const byOrigin = /* @__PURE__ */ new Map();
+	for (const cookie of cookies) {
+		const domain = cookie.domain.replace(/^\./, "");
+		const origin = `${cookie.secure === true ? "https" : "http"}://${domain}`;
+		const expires = cookie.expires === void 0 ? "" : `; Max-Age=${Math.max(0, Math.floor((cookie.expires - now) / 1e3))}`;
+		const line = `${cookie.name}=${cookie.value}; Path=${cookie.path ?? "/"}${expires}`;
+		byOrigin.set(origin, [...byOrigin.get(origin) ?? [], line]);
+	}
+	let persisted = 0;
+	for (const [origin, lines] of byOrigin) {
+		if (originOfUrl(origin) === void 0) continue;
+		persisted += persistCookies(deps.credentialStorePath, origin, lines, now);
+	}
+	return persisted;
+}
+/** 运行证据文件（面板 GET 用）：只允许运行目录内的白名单文件名。 */
+function evidencePathOf(dataRoot, runId, name) {
+	if (!/^[A-Za-z0-9._-]{1,80}$/.test(name)) return void 0;
+	if (name !== "failure.png" && name !== "failure.html" && name !== "success.png") return void 0;
+	return join(uiRunDir(dataRoot, runId), name);
+}
+/** 保存脚本（面板导入/手写用）。 */
+async function saveUiScriptForPanel(deps, workspaceRoot, yaml, source = "agent") {
+	let parsed;
+	try {
+		parsed = parseUiScriptDoc(safeYaml(yaml));
+	} catch (error) {
+		return {
+			ok: false,
+			issues: [{
+				target: "script",
+				code: "invalid-script",
+				reason: messageOf$3(error)
+			}]
+		};
+	}
+	if (!parsed.ok) return {
+		ok: false,
+		issues: parsed.issues
+	};
+	return saveUiScript(workspaceRoot, parsed.doc, { source });
+}
+/**
+* 保存脚本（面板编辑器用）：客户端回传**完整 doc**（含未知字段）而不是 YAML。
+*
+* 客户端没有 YAML 序列化器（不为它把 js-yaml 打进 bundle）；回传整份 doc 也能保证
+* 编辑过程中未被前端理解的字段零丢失（与服务端 `parseUiScriptDoc` 的"保留未知键"口径一致）。
+*/
+function saveUiScriptDocForPanel(workspaceRoot, docRaw, source = "canvas") {
+	const parsed = parseUiScriptDoc(docRaw);
+	if (!parsed.ok) return {
+		ok: false,
+		issues: parsed.issues
+	};
+	const doc = {
+		...parsed.doc,
+		meta: {
+			...parsed.doc.meta,
+			created: (/* @__PURE__ */ new Date()).toISOString()
+		}
+	};
+	return saveUiScript(workspaceRoot, doc, { source });
+}
+/** 脚本详情（面板用；缺省最新）。 */
+function loadUiScriptForPanel(workspaceRoot, site, flow, version) {
+	return loadUiScript(workspaceRoot, site, flow, version);
+}
+/** 版本摘要（面板用）。 */
+function uiVersionInfosForPanel(workspaceRoot, site, flow) {
+	return listUiVersionInfos(workspaceRoot, site, flow);
 }
 
 //#endregion
@@ -11064,6 +15717,515 @@ function renderLibraryImport(value) {
 	const ids = value.cardIds ?? [];
 	return `${head}\n${ids.length === 0 ? "- 本次没有卡落库" : ids.slice(0, RECEIPT_MAX_LINES).map((id) => `- ${id}`).join("\n")}${ids.length > RECEIPT_MAX_LINES ? `\n… 还有 ${ids.length - RECEIPT_MAX_LINES} 张（cardIds 里有全量）` : ""}${(value.skippedReasons ?? []).length === 0 ? "" : `\n跳过原因：\n${(value.skippedReasons ?? []).map((r) => `- ${r}`).join("\n")}`}\n库：${value.libraryRoot ?? ""}`;
 }
+function renderChainDraft(value) {
+	if (value.ok !== true) {
+		const hints = (value.hints ?? []).length === 0 ? "" : `\n${(value.hints ?? []).map((hint) => `- ${hint}`).join("\n")}`;
+		return `❌ 链草稿生成失败（${value.code}）：${value.error}${hints}`;
+	}
+	const head = `🧩 链草稿 ${value.site} / ${value.flow}${value.domain === void 0 ? "" : `（${value.domain}）`}
+节点 ${value.chain.nodes.length} ｜ 边 ${value.chain.edges.length} ｜ 输入 ${value.chain.inputs.length} ｜ 输出候选 ${value.outputs.length} ｜ 绑定覆盖率 ${value.coverage.bindingCoverage} ｜ 校验 ${value.validation.ok ? "通过（未落盘）" : "未通过"}`;
+	const nodes = value.chain.nodes.slice(0, 10).map((node) => `- ${node.id} → ${node.card ?? "?"}${Object.keys(node.constants).length === 0 ? "" : ` · 常量 ${Object.keys(node.constants).length}`}`);
+	const warnings = value.warnings.slice(0, 10).map((warning) => `- ${warning.message}`);
+	return `${head}\n节点：\n${nodes.join("\n")}${value.chain.nodes.length > 10 ? "\n…" : ""}\n草稿提示：\n${warnings.length === 0 ? "- 无" : warnings.join("\n")}\n\n未落盘：确认后用 dataforge_chain_upsert 保存；不要直接执行草稿。`;
+}
+function defineChainDraftTool(deps) {
+	return defineTool({
+		name: "dataforge_chain_draft",
+		description: `从采集 trace 生成 interface-chain 草稿（S3）。
+
+流程：trace_get/analyze → 按 mergeKey 匹配接口库卡 → 节点/绑定边/输入/断言 → 现有链校验。
+- 草稿不执行、不落正式版本；确认后用 dataforge_chain_upsert 保存；
+- 卡不在接口库 → 该节点跳过并 warning（先 dataforge_library_import）；
+- 业务值不写死：未绑定字段变成 \$inputs.<name>，由 agent/用户填写；
+- 低置信度绑定、缺失必填入参、卡模板缺字段都进 warnings，不能静默当成功。
+
+失败码：no-workspace / no-cards / no-nodes / capture-*（同 trace_get）。`,
+		parameters: {
+			capture_id: {
+				type: "string",
+				required: true,
+				description: "采集 run id"
+			},
+			site: {
+				type: "string",
+				description: "链 meta.site（缺省取 entryUrl host）"
+			},
+			flow: {
+				type: "string",
+				description: "链 meta.flow（缺省 trace-<captureId>）"
+			},
+			domain: {
+				type: "string",
+				description: "业务域（可选）"
+			},
+			note: {
+				type: "string",
+				description: "版本说明（可选）"
+			},
+			limit: {
+				type: "number",
+				description: "最多分析样本数（1..2000，缺省 1000）"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					code: { type: "string" },
+					error: { type: "string" },
+					hints: {
+						type: "array",
+						items: { type: "string" }
+					},
+					captureId: { type: "string" },
+					site: { type: "string" },
+					flow: { type: "string" },
+					domain: { type: "string" },
+					yaml: { type: "string" },
+					chain: {
+						type: "object",
+						additionalProperties: true
+					},
+					warnings: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								code: { type: "string" },
+								message: { type: "string" },
+								nodeId: { type: "string" },
+								path: { type: "string" }
+							}
+						}
+					},
+					validation: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							ok: { type: "boolean" },
+							issues: {
+								type: "array",
+								items: {
+									type: "object",
+									additionalProperties: true
+								}
+							}
+						}
+					},
+					outputs: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: true
+						}
+					},
+					coverage: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							candidateLeaves: { type: "number" },
+							boundLeaves: { type: "number" },
+							bindingCoverage: { type: "number" },
+							callCoverage: { type: "number" }
+						}
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderChainDraft(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(await chainDraftForTool(deps, exec, args));
+		}
+	});
+}
+function renderLookup(value) {
+	if (value.ok !== true) {
+		const hints = (value.hints ?? []).length === 0 ? "" : `\n${(value.hints ?? []).map((hint) => `- ${hint}`).join("\n")}`;
+		return `❌ lookup 失败（${value.code}）：${value.error}${hints}`;
+	}
+	const head = `🔎 lookup ${value.name}（${value.site}）｜ query=${value.query} ｜ cache=${value.cache} ｜ ${value.fetchedAt}`;
+	const lines = value.candidates.slice(0, 10).map((candidate) => `- ${candidate.label}: ${Object.entries(candidate.values).map(([key, val]) => `${key}=${String(val)}`).join("  ")}`);
+	const more = value.candidates.length > 10 ? `\n… 还有 ${value.candidates.length - 10} 条` : "";
+	const warnings = value.warnings.length === 0 ? "" : `\n提示：\n${value.warnings.map((warning) => `- ${warning}`).join("\n")}`;
+	return `${head}\n${lines.length === 0 ? "- 没有匹配项" : lines.join("\n")}${more}${warnings}\n来源：${value.source.description}`;
+}
+function defineLookupTool(deps) {
+	return defineTool({
+		name: "dataforge_lookup",
+		description: `运行时查业务映射（组织/供应商/物料等），不把映射写死。
+
+配置在 <workspace>/.dsh/dataforge/lookups/<name>.yaml：只声明源、匹配/映射字段，不存业务值。
+运行时取值 → 缓存 + TTL → 按 query 匹配 → 返回值 + source/fetchedAt。
+- api：GET/HEAD，items/match/map（JSON 路径）；
+- page：Playwright 只读选择器，items/label/map（text 或 attr:<name>）；不注入登录态；
+- 凭证用 \${ENV} 注入，不把 token/cookie 写进 YAML；
+- 缓存落 dataRoot/lookups/<site>/<name>.json；refresh=true 强制刷新。
+
+失败码：lookup-not-found / lookup-invalid / lookup-http-error / lookup-items-not-array / lookup-unusable / page-lookup-unavailable / no-workspace。`,
+		parameters: {
+			name: {
+				type: "string",
+				required: true,
+				description: "lookup 名称（对应 lookups/<name>.yaml）"
+			},
+			query: {
+				type: "string",
+				required: true,
+				description: "业务词，如生态链；与配置里的 match 字段比较"
+			},
+			site: {
+				type: "string",
+				description: "缓存/来源 site（缺省用配置 site 或 default）"
+			},
+			refresh: {
+				type: "boolean",
+				description: "true = 跳过缓存强制刷新"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					code: { type: "string" },
+					error: { type: "string" },
+					hints: {
+						type: "array",
+						items: { type: "string" }
+					},
+					name: { type: "string" },
+					site: { type: "string" },
+					query: { type: "string" },
+					cache: { type: "string" },
+					fetchedAt: { type: "string" },
+					source: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							kind: { type: "string" },
+							description: { type: "string" }
+						}
+					},
+					candidates: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								label: { type: "string" },
+								values: {
+									type: "object",
+									additionalProperties: true
+								}
+							}
+						}
+					},
+					warnings: {
+						type: "array",
+						items: { type: "string" }
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderLookup(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(await lookupForTool(deps, exec, args));
+		}
+	});
+}
+function renderDatasetExport(value) {
+	if (value.ok !== true) {
+		const hints = (value.hints ?? []).length === 0 ? "" : `\n${(value.hints ?? []).map((hint) => `- ${hint}`).join("\n")}`;
+		return `❌ 导出失败（${value.code}）：${value.error}${hints}`;
+	}
+	const fields = Object.keys(value.businessData).length;
+	return `📦 ${value.runId}｜${value.kind}｜${value.status}｜businessData ${fields} 个字段
+dataset：${value.datasetPath}
+evidence：${value.reportPath}`;
+}
+function defineDatasetExportTool(dataRoot) {
+	return defineTool({
+		name: "dataforge_dataset_export",
+		description: `把一次运行留痕导出为 dataset + evidence 报告（不重新执行）。
+
+- dataset：dataRoot/datasets/<runId>.json（链运行含 businessData/链身份；UI 运行含步骤/断言/截图）；
+- evidence：dataRoot/evidence/<runId>/report.html（业务数据或 UI 步骤 + 截图，不含请求头/凭证原文）；
+- 先 dataforge_chain_run 成功（或失败有留痕）再导出；失败也会导出已有摘要。
+
+失败码：run-not-found / run-unreadable。`,
+		parameters: { run_id: {
+			type: "string",
+			required: true,
+			description: "运行 id（chain_run / ui_run 回执里的 runId）"
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					code: { type: "string" },
+					error: { type: "string" },
+					hints: {
+						type: "array",
+						items: { type: "string" }
+					},
+					runId: { type: "string" },
+					datasetPath: { type: "string" },
+					reportPath: { type: "string" },
+					kind: { type: "string" },
+					status: { type: "string" },
+					businessData: {
+						type: "object",
+						additionalProperties: true
+					},
+					chain: {
+						type: "object",
+						additionalProperties: true
+					},
+					ui: {
+						type: "object",
+						additionalProperties: true
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderDatasetExport(tighten(value))
+			}]
+		},
+		async execute(args) {
+			return lossless(exportRunArtifacts(dataRoot, args.run_id));
+		}
+	});
+}
+function renderTraceGet(value) {
+	if (value.ok !== true) {
+		const hints = (value.hints ?? []).length === 0 ? "" : `\n${(value.hints ?? []).map((hint) => `- ${hint}`).join("\n")}`;
+		return `❌ trace 读取失败（${value.code}）：${value.error}${hints}`;
+	}
+	const head = `🧭 trace ${value.captureId}｜${value.entryUrl}${value.status === void 0 ? "" : ` · ${value.status}`}
+样本 ${value.stats.returnedSamples}/${value.stats.totalSamples} ｜ 接口 ${value.stats.interfaces} ｜ 写操作 ${value.stats.writes} ｜ 页面 ${value.stats.pages} ｜ 正文截断 ${value.stats.truncatedBodies}`;
+	const lines = value.samples.slice(0, RECEIPT_MAX_LINES).map((sample) => {
+		const target = `${sample.method} ${sample.path}`;
+		const status = sample.status === void 0 ? "" : ` ${sample.status}`;
+		const body = sample.responseBodySource === "none" ? "" : ` · resp:${sample.responseBodySource}${sample.responseBodyTruncated ? "(截断)" : ""}`;
+		return `- #${sample.seq} ${target}${status}${body}`;
+	});
+	const more = value.samples.length > RECEIPT_MAX_LINES ? `\n… 还有 ${value.samples.length - RECEIPT_MAX_LINES} 条（samples 里有全量）` : "";
+	const warnings = value.warnings.length === 0 ? "" : `\n提示：\n${value.warnings.slice(0, 5).map((item) => `- ${item.message}`).join("\n")}`;
+	return `${head}\n${lines.join("\n")}${more}${warnings}`;
+}
+function renderTraceAnalyze(value) {
+	if (value.ok !== true) {
+		const hints = (value.hints ?? []).length === 0 ? "" : `\n${(value.hints ?? []).map((hint) => `- ${hint}`).join("\n")}`;
+		return `❌ trace 分析失败（${value.code}）：${value.error}${hints}`;
+	}
+	const a = value.analysis;
+	const head = `🧠 trace 分析 ${value.captureId}｜节点 ${a.stats.nodes} ｜ 绑定 ${a.bindings.length} ｜ 输入 ${a.inputs.length} ｜ 输出 ${a.outputs.length} ｜ 覆盖率 ${a.coverage.bindingCoverage}`;
+	const nodes = a.nodes.slice(0, 12).map((node) => `- ${node.id} ${node.method} ${node.path}${node.write ? " [写]" : ""}${node.polling ? ` [polling×${node.occurrences}]` : ""}`);
+	const bindings = a.bindings.slice(0, 12).map((binding) => `- ${binding.from.nodeId}.${binding.from.path} → ${binding.to.nodeId}.${binding.to.path}（${binding.confidence}）`);
+	const warnings = a.warnings.slice(0, 8).map((warning) => `- ${warning.message}`);
+	return `${head}\n节点：\n${nodes.join("\n")}${a.nodes.length > 12 ? "\n…" : ""}\n绑定：\n${bindings.length === 0 ? "- 无" : bindings.join("\n")}${a.bindings.length > 12 ? "\n…" : ""}\n提示：\n${warnings.length === 0 ? "- 无" : warnings.join("\n")}`;
+}
+function defineTraceGetTool(deps) {
+	return defineTool({
+		name: "dataforge_trace_get",
+		description: `读取一条采集 run 的 trace（有序请求/响应样本）。
+
+用途：在自动编排前看清真实操作产生了哪些接口调用。
+- 顺序以采集 seq 为准；正文来自落盘文件或 DB 预览，截断会标 truncated；
+- 敏感头（authorization/cookie/token 等）只返回名字，值永不返回；
+- 默认 limit=200、body_limit=8192；大 trace 请分页/提高 limit，不要一次拉全量。
+
+失败码：capture-not-found / capture-empty / capture-unreadable / bad-capture-id。`,
+		parameters: {
+			capture_id: {
+				type: "string",
+				required: true,
+				description: "采集 run id（dataforge_capture / 面板的 captureId）"
+			},
+			limit: {
+				type: "number",
+				description: "最多返回样本数（1..2000，缺省 200）"
+			},
+			body_limit: {
+				type: "number",
+				description: "单条正文最多返回字符数（256..65536，缺省 8192）"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					code: { type: "string" },
+					error: { type: "string" },
+					hints: {
+						type: "array",
+						items: { type: "string" }
+					},
+					captureId: { type: "string" },
+					entryUrl: { type: "string" },
+					status: { type: "string" },
+					stats: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							totalSamples: { type: "number" },
+							returnedSamples: { type: "number" },
+							interfaces: { type: "number" },
+							writes: { type: "number" },
+							pages: { type: "number" },
+							truncatedBodies: { type: "number" }
+						}
+					},
+					samples: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								id: { type: "string" },
+								seq: { type: "number" },
+								ts: { type: "number" },
+								method: { type: "string" },
+								url: { type: "string" },
+								path: { type: "string" },
+								query: {
+									type: "object",
+									additionalProperties: true
+								},
+								status: { type: "number" },
+								pageUrl: { type: "string" },
+								requestHeaders: {
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										values: {
+											type: "object",
+											additionalProperties: true
+										},
+										sensitive: {
+											type: "array",
+											items: { type: "string" }
+										}
+									}
+								},
+								requestBody: { type: "string" },
+								requestBodySource: { type: "string" },
+								requestBodyTruncated: { type: "boolean" },
+								responseHeaders: {
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										values: {
+											type: "object",
+											additionalProperties: true
+										},
+										sensitive: {
+											type: "array",
+											items: { type: "string" }
+										}
+									}
+								},
+								responseBody: { type: "string" },
+								responseBodySource: { type: "string" },
+								responseBodyTruncated: { type: "boolean" },
+								truncated: { type: "boolean" },
+								cardId: { type: "string" },
+								mergeKey: { type: "string" },
+								actionLabel: { type: "string" }
+							}
+						}
+					},
+					warnings: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								code: { type: "string" },
+								message: { type: "string" },
+								sampleId: { type: "string" }
+							}
+						}
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderTraceGet(tighten(value))
+			}]
+		},
+		async execute(args) {
+			return lossless(traceGetForTool(deps, args));
+		}
+	});
+}
+function defineTraceAnalyzeTool(deps) {
+	return defineTool({
+		name: "dataforge_trace_analyze",
+		description: `分析一条 trace：自动推断调用顺序、写操作、字段流转、输入/输出与覆盖率。
+
+规则只用 HTTP 方法 / 采集序号 / JSON 值匹配 / 路径提取，不含业务名称/URL/字段硬编码。
+产出是“草稿 + warning”：低置信度绑定、动态值、未解析正文都要 agent 审阅，不能直接当最终编排。
+- 连续重复调用会合并并标 polling；
+- 绑定 from/to 路径相对节点（如 body.data[0].id → body.orgId），供下一步生成 interface-chain。
+
+失败码同 dataforge_trace_get。`,
+		parameters: {
+			capture_id: {
+				type: "string",
+				required: true,
+				description: "采集 run id"
+			},
+			limit: {
+				type: "number",
+				description: "最多分析样本数（1..2000，缺省 1000）"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					code: { type: "string" },
+					error: { type: "string" },
+					hints: {
+						type: "array",
+						items: { type: "string" }
+					},
+					captureId: { type: "string" },
+					entryUrl: { type: "string" },
+					analysis: {
+						type: "object",
+						additionalProperties: true
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderTraceAnalyze(tighten(value))
+			}]
+		},
+		async execute(args) {
+			return lossless(traceAnalyzeForTool(deps, args));
+		}
+	});
+}
 function defineLibraryImportTool(deps) {
 	return defineTool({
 		name: "dataforge_library_import",
@@ -11498,12 +16660,14 @@ function renderPlan(plan) {
 		return `- ${node.nodeId}${write}：${node.method} ${node.url}${deps}`;
 	});
 	const writes = plan.writeNodes.length === 0 ? "无（整链只读）" : `${plan.writeNodes.join("、")}（已发出无法撤销）`;
+	const cleanup = plan.cleanup === void 0 ? "" : `\n清理（主链后 ${plan.cleanup.when}）：${plan.cleanup.site} / ${plan.cleanup.flow}${plan.cleanup.version === void 0 ? "" : ` v${plan.cleanup.version}`}（${plan.cleanup.nodeCount} 节点，写 ${plan.cleanup.writeCount} 个）`;
+	const verify = plan.verify === void 0 ? "" : `\n验收（主链后 ${plan.verify.when}）：${plan.verify.site} / ${plan.verify.flow}${plan.verify.version === void 0 ? "" : ` v${plan.verify.version}`}`;
 	return [
 		`🎯 目标：${plan.host}`,
 		...lines,
 		`写类节点：${writes}`,
 		...plan.notices.length === 0 ? [] : [`提醒：${plan.notices.join("；")}`]
-	].join("\n");
+	].join("\n") + cleanup + verify;
 }
 function renderChainRun(value) {
 	if (value.accepted !== true) {
@@ -11526,6 +16690,8 @@ function renderChainRun(value) {
 		`🏁 链已跑完（前台）：${value.summary?.status ?? "unknown"} ${value.summary?.stepsDone ?? 0}/${value.summary?.totalSteps ?? 0} 步`,
 		...lines,
 		...value.failedNode === void 0 ? [] : [`断在：${value.failedNode}`],
+		...value.verify === void 0 ? [] : [`验收 ${value.verify.site}/${value.verify.flow}：${value.verify.skipped ?? value.verify.status ?? (value.verify.success === true ? "success" : value.verify.message ?? "unknown")}${value.verify.runId === void 0 ? "" : `（${value.verify.runId}）`}${value.verify.reportPath === void 0 ? "" : `；证据 ${value.verify.reportPath}`}`],
+		...value.cleanup === void 0 ? [] : [`清理 ${value.cleanup.site}/${value.cleanup.flow}：${value.cleanup.skipped ?? value.cleanup.status ?? value.cleanup.message ?? "unknown"}${value.cleanup.runId === void 0 ? "" : `（${value.cleanup.runId}）`}`],
 		degraded
 	].join("\n");
 }
@@ -11540,6 +16706,9 @@ function defineChainRunTool(deps) {
 - 闸1 计划：首次调用不带 confirm 时返回**计划卡**（拓扑序 + 每节点方法/URL 骨架 + 写类节点 + 目标 host），不发任何请求、不建运行；
 - 闸2 确认：向用户转述计划卡，得到确认后带 confirm=true 重调才真跑；
 - 闸3 dry-run 优先：只想留档或先验证连接参数时用 dry_run=true——同一份计划、永不发请求，但会落一条 dryRun 留痕。
+
+链里声明 cleanup 时，清理链会出现在同一张计划卡里一起确认；主链结束后按 onFailure/always 执行，清理失败不覆盖主链结果。
+链里声明 verify 时，UI 验收会在主链后、cleanup 前执行（onSuccess/onFailure/always），失败不覆盖主链结果。
 
 缺参判据不看卡的 required：卡模板里出现的入参，只要有常量或绑定边覆盖就不缺，否则预检直接 missing-params（回执逐条「节点 · 字段 · 类型」），整链不执行。
 
@@ -11685,6 +16854,28 @@ function defineChainRunTool(deps) {
 							notices: {
 								type: "array",
 								items: { type: "string" }
+							},
+							cleanup: {
+								type: "object",
+								additionalProperties: false,
+								properties: {
+									site: { type: "string" },
+									flow: { type: "string" },
+									version: { type: "number" },
+									when: { type: "string" },
+									nodeCount: { type: "number" },
+									writeCount: { type: "number" }
+								}
+							},
+							verify: {
+								type: "object",
+								additionalProperties: false,
+								properties: {
+									site: { type: "string" },
+									flow: { type: "string" },
+									version: { type: "number" },
+									when: { type: "string" }
+								}
 							}
 						}
 					},
@@ -11760,6 +16951,40 @@ function defineChainRunTool(deps) {
 						type: "object",
 						additionalProperties: true,
 						description: "运行摘要（前台/dry-run）"
+					},
+					cleanup: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							site: { type: "string" },
+							flow: { type: "string" },
+							version: { type: "number" },
+							when: { type: "string" },
+							nodeCount: { type: "number" },
+							writeCount: { type: "number" },
+							runId: { type: "string" },
+							status: { type: "string" },
+							message: { type: "string" },
+							skipped: { type: "string" }
+						}
+					},
+					verify: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							site: { type: "string" },
+							flow: { type: "string" },
+							version: { type: "number" },
+							when: { type: "string" },
+							runId: { type: "string" },
+							success: { type: "boolean" },
+							status: { type: "string" },
+							screenshot: { type: "string" },
+							datasetPath: { type: "string" },
+							reportPath: { type: "string" },
+							message: { type: "string" },
+							skipped: { type: "string" }
+						}
 					}
 				}
 			},
@@ -12567,6 +17792,810 @@ function defineChainRunsTool(deps) {
 		}
 	});
 }
+function renderUiScriptGet(value) {
+	if (!value.ok) {
+		const versions = (value.availableVersions ?? []).map((n) => `v${n}`).join(" / ");
+		return `❌ 读 UI 脚本失败（${value.code ?? "unknown"}）：${value.message ?? ""}${versions === "" ? "" : `\n可用版本：${versions}`}${renderChainIssues(value.issues?.map((item) => ({
+			...item,
+			code: item.code
+		})))}`;
+	}
+	const scripts = value.scripts ?? [];
+	if (value.doc === void 0) {
+		if (scripts.length === 0) return "📂 还没有 UI 脚本。先 dataforge_ui_record_open → record_start 录制，或用 dataforge_ui_script_upsert 手写。";
+		const lines = scripts.map((script) => {
+			const versions = script.versions.map((n) => `v${n}`).join("/");
+			return `- ${script.site} / ${script.flow} ｜ ${versions} ｜ 最新 v${script.latest}${script.unreadable === void 0 ? "" : ` ⚠ ${script.unreadable}`}`;
+		});
+		return `🧪 UI 脚本 ${scripts.length} 个：\n${lines.join("\n")}`;
+	}
+	const doc = value.doc;
+	const steps = doc.steps.map((step, index) => {
+		const target = step.selector ?? step.url ?? step.key ?? "";
+		const expects = step.expect === void 0 ? "" : ` ｜ 断言 ${step.expect.length}`;
+		return `${index + 1}. ${step.kind}${step.value === void 0 ? "" : ` = ${step.value}`}${target === "" ? "" : ` @ ${target}`}${expects}`;
+	});
+	return `${`🧪 ${doc.meta.site} / ${doc.meta.flow} v${value.version ?? doc.meta.version} ｜ 起点 ${doc.meta.startUrl} ｜ ${doc.steps.length} 步`}${doc.inputs.length === 0 ? "" : `\n入参：${doc.inputs.map((input) => `${input.name}(${input.type}${input.required ? ",必填" : ""})`).join("、")}`}\n${steps.join("\n")}\n\`\`\`yaml\n${value.yaml ?? ""}\`\`\``;
+}
+function defineUiScriptGetTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_script_get",
+		description: `读 UI 测试脚本（浏览器录制/回放用）：给 site+flow 回某版本的步骤 + YAML 原文；不给就列全部脚本。
+
+UI 脚本与接口链（interface-chain）是两条执行面：链发 HTTP、断言响应字段；UI 脚本开真浏览器、
+断言页面状态（元素/文本/URL）。脚本落在工作区 .dsh/dataforge/ui-tests/<site>/<flow>/vN.yaml。
+
+返回 false 的失败码：ui-script-not-found / invalid-ui-script（坏文件带 issues 与可用版本）。`,
+		parameters: {
+			site: {
+				type: "string",
+				description: "站点名；与 flow 一起给才回详情"
+			},
+			flow: {
+				type: "string",
+				description: "流程名；与 site 一起给才回详情"
+			},
+			version: {
+				type: "number",
+				description: "脚本版本；缺省最新"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					code: { type: "string" },
+					message: { type: "string" },
+					scripts: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								site: { type: "string" },
+								flow: { type: "string" },
+								latest: { type: "number" },
+								versions: {
+									type: "array",
+									items: { type: "number" }
+								},
+								domain: { type: "string" },
+								updatedAt: { type: "string" },
+								unreadable: { type: "string" }
+							}
+						}
+					},
+					site: { type: "string" },
+					flow: { type: "string" },
+					version: { type: "number" },
+					availableVersions: {
+						type: "array",
+						items: { type: "number" }
+					},
+					yaml: { type: "string" },
+					doc: {
+						type: "object",
+						additionalProperties: true
+					},
+					issues: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								target: { type: "string" },
+								code: { type: "string" },
+								reason: { type: "string" }
+							}
+						}
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderUiScriptGet(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(await getUiScriptForTool(deps, exec, {
+				...args.site === void 0 ? {} : { site: args.site },
+				...args.flow === void 0 ? {} : { flow: args.flow },
+				...args.version === void 0 ? {} : { version: args.version }
+			}));
+		}
+	});
+}
+function renderUiScriptUpsert(value) {
+	if (!value.ok) return `❌ 保存失败：${value.message ?? ""}${renderChainIssues(value.issues?.map((item) => ({
+		...item,
+		code: item.code
+	})))}`;
+	return `✅ 已保存 UI 脚本 ${value.site} / ${value.flow} → v${value.version}（${value.path ?? ""}）`;
+}
+function defineUiScriptUpsertTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_script_upsert",
+		description: `写入 UI 测试脚本（agent 手写/编辑的唯一入口）：YAML 全文进，校验全过才落**新版本**（vN+1，旧版本不覆盖）。
+
+YAML 形状（apiVersion: dataforge/v1）：
+\`\`\`yaml
+kind: ui-script
+meta: { site, flow, version: 1, created, startUrl, viewport? }
+inputs: [{ name, type: string|number|boolean, required, example? }]
+steps:
+  - id: s1
+    kind: goto | click | fill | press | select | submit | wait | upload
+    selector: '#kw'            # 或 candidates: [...]（有序候选，回放取第一个唯一命中）
+    value: '{{keyword}}'       # fill/select；{{input}} 是入参槽位
+    key: Enter                 # press
+    ms: 300                    # wait（0..60000）
+    url: 'https://…'           # goto
+    files: ['/tmp/a.txt']      # upload（回放机路径）
+    expect: [{ kind: visible|hidden|text|value|url|count, selector?, equals?, contains? }]
+\`\`\`
+校验不过一律不落盘（缺步骤/缺 selector/断言不完整/入参引用未声明/声明了没用都会拒）。
+
+**另存为新流程**：改 YAML 的 meta.site / meta.flow 再 upsert，就会在新站点/流程下写 v1（原流程不受影响）——
+适合「同一套操作、只改选择的类型/选项」的变体；同一流程多组值优先用入参槽位 {{name}}。
+
+失败码：invalid-ui-script（issues 逐条 target：reason）。`,
+		parameters: {
+			yaml: {
+				type: "string",
+				required: true,
+				description: "ui-script 的完整 YAML 文本"
+			},
+			source: {
+				type: "string",
+				description: "版本来源标注（缺省 agent；可选 agent/canvas/record）"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					site: { type: "string" },
+					flow: { type: "string" },
+					version: { type: "number" },
+					path: { type: "string" },
+					message: { type: "string" },
+					issues: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								target: { type: "string" },
+								code: { type: "string" },
+								reason: { type: "string" }
+							}
+						}
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderUiScriptUpsert(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			const source = args.source === "canvas" || args.source === "record" ? args.source : "agent";
+			return lossless(await upsertUiScriptForTool(deps, exec, {
+				yaml: args.yaml,
+				source
+			}));
+		}
+	});
+}
+function renderUiRecordOpen(value) {
+	if (!value.ok) return `❌ 打开录制会话失败：${value.error ?? ""}`;
+	return `🖥 已打开录制浏览器（sessionId ${value.sessionId ?? "?"}，当前页 ${value.pageUrl ?? ""}）。\n${value.notice ?? "先登录/导航，再 dataforge_ui_record_start 开始录制。"}`;
+}
+function defineUiRecordOpenTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_record_open",
+		description: `打开一个**可见** Chrome 窗口用于 UI 录制（此时还没开始录，登录动作不会进脚本）。
+
+用法：open → 用户在窗口里登录/导航 → dataforge_ui_record_start → 用户操作业务 → dataforge_ui_record_stop。
+录制时密码输入与文件选择会被跳过（凭证/本地路径不落脚本，回执如实计数）。
+**站点名/流程名留空会自动命名**：站点取 og:site_name 或域名，流程取页面标题（去站点后缀）；
+open 回执会带 suggestedSite/suggestedFlow，可用作预填。
+回放登录态靠录制结束时持久化的 cookie（dataRoot/credentials/cookies.json，0600）。
+
+失败：record-open-failed（Chrome 起不来/URL 非法）。`,
+		parameters: {
+			start_url: {
+				type: "string",
+				required: true,
+				description: "录制起点（http/https）"
+			},
+			headless: {
+				type: "boolean",
+				description: "谨慎使用：true = 无头（只适合无需登录的站点，缺省可见）"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					sessionId: { type: "string" },
+					pageUrl: { type: "string" },
+					engine: { type: "string" },
+					notice: { type: "string" },
+					suggestedSite: { type: "string" },
+					suggestedFlow: { type: "string" },
+					error: { type: "string" }
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderUiRecordOpen(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			const owner = ownerOf(exec);
+			return lossless(await openRecordingForTool(deps, {
+				startUrl: args.start_url,
+				...args.headless === void 0 ? {} : { headless: args.headless },
+				...owner === void 0 ? {} : { ownerSessionId: owner }
+			}));
+		}
+	});
+}
+function defineUiRecordStartTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_record_start",
+		description: `在已打开的录制会话上开始录制（注入事件监听，捕获 click/fill/select/submit/press）。
+开始前请让用户完成登录/导航；之后的业务操作才会进脚本。
+
+回放会沿用录制时的视口与起点 URL；录制结束用 dataforge_ui_record_stop 取步骤。`,
+		parameters: { session_id: {
+			type: "string",
+			required: true,
+			description: "dataforge_ui_record_open 返回的 sessionId"
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					sessionId: { type: "string" },
+					pageUrl: { type: "string" },
+					alreadyRecording: { type: "boolean" },
+					error: { type: "string" }
+				}
+			},
+			render: (_args, value) => {
+				const v = tighten(value);
+				if (!v.ok) return [{
+					type: "text",
+					text: `❌ 开始录制失败：${v.error ?? ""}`
+				}];
+				return [{
+					type: "text",
+					text: `🔴 已开始录制（sessionId ${v.sessionId ?? "?"}，页 ${v.pageUrl ?? ""}）。用户在浏览器里操作，完成后调 dataforge_ui_record_stop。${v.alreadyRecording === true ? "（此前已在录制）" : ""}`
+				}];
+			}
+		},
+		async execute(args) {
+			return lossless(await startRecordingForTool(deps, { sessionId: args.session_id }));
+		}
+	});
+}
+function renderUiRecordStop(value) {
+	if (!value.ok) return `❌ 停止录制失败：${value.error ?? ""}`;
+	const steps = value.steps ?? [];
+	const lines = steps.slice(0, 20).map((step, index) => {
+		const target = step.selector ?? step.url ?? step.key ?? "";
+		return `${index + 1}. ${step.kind}${step.value === void 0 ? "" : ` = ${step.value}`}${target === "" ? "" : ` @ ${target}`}`;
+	});
+	const saved = value.saved === void 0 ? "未保存为脚本（给 site/flow 再 stop 才会落新版本）" : `已保存为 ${value.saved.site} / ${value.saved.flow} v${value.saved.version}`;
+	const notice = value.notice === void 0 ? "" : `\n⚠ ${value.notice}`;
+	return `⏹ 录制结束：${value.stepCount ?? steps.length} 步 ｜ 跳过密码 ${value.skippedSecrets ?? 0} 次 / 上传 ${value.skippedUploads ?? 0} 次 ｜ cookie 持久化 ${value.persistedCookies ?? 0} 条\n${saved}${notice}\n${lines.join("\n")}${steps.length > 20 ? `\n… 还有 ${steps.length - 20} 步` : ""}`;
+}
+function defineUiRecordStopTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_record_stop",
+		description: `停止录制并取步骤；给了 site+flow 默认保存为新版本（save=false 可只看不存）。
+
+- 密码输入不录（凭证不入脚本）；文件选择不录（浏览器不给本地路径，upload 步骤请手写）；
+- **站点名/流程名留空会自动命名**（站点名/域名 + 页面标题；回执说明用了哪个）；
+- 录制会话保留，可继续录下一个流程；不用了调 dataforge_ui_record_close；
+- 会话 cookie 会持久化到本地凭证 jar（回执只有条数），回放直接带登录态。`,
+		parameters: {
+			session_id: {
+				type: "string",
+				required: true
+			},
+			site: {
+				type: "string",
+				description: "站点名（与 flow 一起给才保存）"
+			},
+			flow: {
+				type: "string",
+				description: "流程名（与 site 一起给才保存）"
+			},
+			domain: {
+				type: "string",
+				description: "业务域（可选，列表分组用）"
+			},
+			note: {
+				type: "string",
+				description: "版本说明（可选）"
+			},
+			save: {
+				type: "boolean",
+				description: "缺省 true；false = 只回步骤不落盘"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					sessionId: { type: "string" },
+					startUrl: { type: "string" },
+					steps: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: true
+						}
+					},
+					stepCount: { type: "number" },
+					skippedSecrets: { type: "number" },
+					skippedUploads: { type: "number" },
+					notice: { type: "string" },
+					saved: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							site: { type: "string" },
+							flow: { type: "string" },
+							version: { type: "number" },
+							path: { type: "string" }
+						}
+					},
+					persistedCookies: { type: "number" },
+					error: { type: "string" }
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderUiRecordStop(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(await stopRecordingForTool(deps, exec, {
+				sessionId: args.session_id,
+				...args.site === void 0 ? {} : { site: args.site },
+				...args.flow === void 0 ? {} : { flow: args.flow },
+				...args.domain === void 0 ? {} : { domain: args.domain },
+				...args.note === void 0 ? {} : { note: args.note },
+				...args.save === void 0 ? {} : { save: args.save }
+			}));
+		}
+	});
+}
+function defineUiRecordCloseTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_record_close",
+		description: `关闭录制会话（浏览器窗口）。未停止的录制会被取消，不产出步骤。`,
+		parameters: { session_id: {
+			type: "string",
+			required: true
+		} },
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					error: { type: "string" }
+				}
+			},
+			render: (_args, value) => {
+				const v = tighten(value);
+				return [{
+					type: "text",
+					text: v.ok ? "🖥 录制会话已关闭" : `❌ ${v.error ?? "关闭失败"}`
+				}];
+			}
+		},
+		async execute(args) {
+			return lossless(await closeRecordingForTool(deps, { sessionId: args.session_id }));
+		}
+	});
+}
+function renderUiRun(value) {
+	const plan = value.plan;
+	if (!value.ok) {
+		const missing = value.missing === void 0 ? "" : `\n缺：${value.missing.join("、")}`;
+		const versions = value.availableVersions === void 0 ? "" : `\n可用版本：${value.availableVersions.map((n) => `v${n}`).join(" / ")}`;
+		return `❌ ${value.message ?? "回放未执行"}（${value.gate ?? value.code ?? "unknown"}）${missing}${versions}`;
+	}
+	if (value.gate === "confirm-required" || value.gate === "dry-run") return plan?.card ?? "🧪 回放计划（缺详情）";
+	const result = value.result;
+	if (result === void 0) return plan?.card ?? "🧪 回放完成（缺结果）";
+	const head = result.success ? `✅ UI 回放通过：${result.site} / ${result.flow} v${result.version}（${result.stepsDone}/${result.totalSteps} 步 ${result.elapsedMs}ms）` : `❌ UI 回放失败：${result.site} / ${result.flow} v${result.version} ｜ 断在 ${result.failedStep?.id ?? "?"}（${result.stepsDone}/${result.totalSteps} 步）`;
+	const lines = result.steps.map((step) => {
+		const mark = step.ok ? "✓" : "✗";
+		const asserts = step.assertions.length === 0 ? "" : ` ｜ 断言 ${step.assertions.filter((item) => item.ok).length}/${step.assertions.length}`;
+		return `${mark} ${step.id} ${step.kind}${step.target === void 0 ? "" : ` @ ${step.target}`}（${step.elapsedMs}ms）${asserts}${step.error === void 0 ? "" : `\n   ${step.error}`}`;
+	});
+	return `${head}${result.screenshot === void 0 ? "" : `\n📸 失败截图：${result.screenshot}${result.dom === void 0 ? "" : `\n📄 现场 HTML：${result.dom}`}`}${result.cookiesApplied > 0 ? `\n🔐 已注入 ${result.cookiesApplied} 条会话 cookie（值不入回执）` : ""}\n${lines.join("\n")}`;
+}
+function defineUiRunTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_run",
+		description: `回放一个 UI 测试脚本（浏览器操作 + 页面断言）。**唯一执行入口**。
+
+三道闸（与链路执行同款）：
+- 必填：脚本 required 入参缺一 → missing-inputs，浏览器都不起；
+- 确认：不带 confirm 只回计划卡（步骤 + 写操作数 + 起点），起浏览器前必须让用户确认；
+- 开关：uiTestEnabled=false → ui-test-disabled（脚本读写/历史回看照常）。
+
+执行：headless Chrome 打开 meta.startUrl → 逐步动作（选择器候选取第一个唯一命中）→ 每步断言
+（visible/hidden/text/value/url/count，轮询到步骤超时）→ 失败即停，截 failure.png + 存 failure.html。
+登录态：自动按起点域名从本地凭证 jar 注入 cookie（只报条数）。
+
+运行记录：dataRoot/ui-runs/<runId>/（run.json + events.ndjson），用 dataforge_ui_runs 回看。
+慢放：slow_mo_ms 给每步之间加延迟（0..10000），headless=false 可看窗口；两者不改变步超时预算。
+点击动画：highlight_clicks（缺省 true）在点击落点画脉冲光圈，便于人工观察；批量可关掉。
+幂等性：**不幂等**（真浏览器操作，click/submit 可能产生业务写入）。`,
+		parameters: {
+			site: {
+				type: "string",
+				required: true
+			},
+			flow: {
+				type: "string",
+				required: true
+			},
+			version: {
+				type: "number",
+				description: "脚本版本；缺省最新"
+			},
+			inputs: {
+				type: "object",
+				additionalProperties: true,
+				description: "入参槽位运行值（键必须是脚本 inputs 声明过的）"
+			},
+			confirm: {
+				type: "boolean",
+				description: "闸2：用户确认后才允许 true；缺省只出计划卡"
+			},
+			dry_run: {
+				type: "boolean",
+				description: "只出计划卡并落 dry-run 说明，不起浏览器"
+			},
+			headless: {
+				type: "boolean",
+				description: "缺省 true；false = 可见窗口（联调首跑用）"
+			},
+			slow_mo_ms: {
+				type: "number",
+				description: "每步之间的慢放延迟（毫秒，0..10000）；人工观察回放过程用"
+			},
+			highlight_clicks: {
+				type: "boolean",
+				description: "点击时在页面落点画脉冲光圈（缺省 true；批量可关）"
+			},
+			hold_ms: {
+				type: "number",
+				description: "回放结束后停留多久再关浏览器（毫秒，0..30000；缺省 1200）"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					gate: { type: "string" },
+					code: { type: "string" },
+					message: { type: "string" },
+					missing: {
+						type: "array",
+						items: { type: "string" }
+					},
+					availableVersions: {
+						type: "array",
+						items: { type: "number" }
+					},
+					issues: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								target: { type: "string" },
+								code: { type: "string" },
+								reason: { type: "string" }
+							}
+						}
+					},
+					plan: {
+						type: "object",
+						additionalProperties: true
+					},
+					result: {
+						type: "object",
+						additionalProperties: true
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderUiRun(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(await runUiScriptForTool(deps, exec, {
+				site: args.site,
+				flow: args.flow,
+				...args.version === void 0 ? {} : { version: args.version },
+				...args.inputs === void 0 ? {} : { inputs: normalizeStringMap(args.inputs) },
+				...args.confirm === void 0 ? {} : { confirm: args.confirm },
+				...args.dry_run === void 0 ? {} : { dryRun: args.dry_run },
+				...args.headless === void 0 ? {} : { headless: args.headless }
+			}));
+		}
+	});
+}
+function normalizeStringMap(raw) {
+	const out = {};
+	for (const [key, value] of Object.entries(raw)) if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") out[key] = String(value);
+	return out;
+}
+function renderUiRuns(value) {
+	if (!value.ok) return `❌ ${value.message ?? "读取 UI 运行失败"}`;
+	if (value.run !== void 0) {
+		const run = value.run;
+		const lines = (value.events ?? []).flatMap((event) => {
+			if (event.event === "step") return [`${event.status === "done" ? "✓" : event.status === "error" ? "✗" : "…"} ${event.id ?? "?"} ${event.kind ?? ""}${event.elapsed === void 0 ? "" : `（${event.elapsed}ms）`}${event.error === void 0 ? "" : ` ｜ ${event.error}`}`];
+			if (event.event === "assert") return [`  断言 ${event.kind ?? ""} ${event.status === "ok" ? "✓" : "✗"}${event.error === void 0 ? "" : ` ｜ ${event.error}`}`];
+			if (event.event === "terminal") return [`终态：${event.success === true ? "成功" : "失败"}${event.message === void 0 ? "" : ` · ${event.message}`}`];
+			return [];
+		});
+		return `🧪 ${run.site} / ${run.flow} v${run.version} ｜ ${run.status} ｜ ${run.startedAt === void 0 ? "" : new Date(run.startedAt).toLocaleString()}${run.screenshot === void 0 ? "" : `\n📸 ${run.screenshot}`}\n${lines.join("\n")}`;
+	}
+	const runs = value.runs ?? [];
+	if (runs.length === 0) return "📭 还没有 UI 回放记录";
+	const lines = runs.map((run) => `- ${run.runId} ｜ ${run.site} / ${run.flow} v${run.version} ｜ ${run.status}${run.failedStep === void 0 ? "" : ` ｜ 断在 ${run.failedStep}`}`);
+	return `🧪 UI 运行 ${runs.length} 条：\n${lines.join("\n")}`;
+}
+function defineUiRunsTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_runs",
+		description: `查 UI 回放运行记录：给 run_id 回详情（事件流：每步状态/断言/终态/失败证据）；不给列最近运行。
+
+状态以盘上为准（dataRoot/ui-runs/<runId>/run.json + events.ndjson），运行中途也能看到已完成步骤。`,
+		parameters: {
+			run_id: {
+				type: "string",
+				description: "缺省 = 列最近运行"
+			},
+			limit: {
+				type: "number",
+				description: "列表条数（缺省 20，上限 200）"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					message: { type: "string" },
+					runs: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: true
+						}
+					},
+					run: {
+						type: "object",
+						additionalProperties: true
+					},
+					events: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: true
+						}
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderUiRuns(tighten(value))
+			}]
+		},
+		async execute(args) {
+			return lossless(runsForTool(deps, {
+				...args.run_id === void 0 ? {} : { runId: args.run_id },
+				...args.limit === void 0 ? {} : { limit: args.limit }
+			}));
+		}
+	});
+}
+function renderUiBatch(value) {
+	if (!value.ok) return `❌ 批量回放未执行（${value.gate ?? value.code ?? "unknown"}）：${value.message ?? ""}`;
+	if (value.gate === "confirm-required" || value.gate === "dry-run") return value.plan?.card ?? "🧪 批量回放计划（缺详情）";
+	const result = value.result;
+	if (result === void 0) return value.plan?.card ?? "🧪 批量回放完成（缺结果）";
+	const head = result.failed === 0 && result.skipped === 0 ? `✅ UI 批量回归通过：${result.total} 条（${Math.round(result.elapsedMs / 1e3)}s）` : `❌ UI 批量回归：${result.total} 条 ｜ 通过 ${result.passed} / 失败 ${result.failed} / 跳过 ${result.skipped}（${Math.round(result.elapsedMs / 1e3)}s）`;
+	const lines = result.items.filter((item) => item.success !== true).map((item) => {
+		const where = item.skipped === true ? "跳过" : item.failedStep === void 0 ? "失败" : `断在 ${item.failedStep}`;
+		return `- ${item.site} / ${item.flow}：${where}${item.error === void 0 ? "" : ` ｜ ${item.error}`}${item.runId === void 0 ? "" : ` ｜ run ${item.runId}`}${item.screenshot === void 0 ? "" : ` ｜ 📸 ${item.screenshot}`}`;
+	});
+	return `${head}${`\n📄 报告：${result.report}\n🧾 报告 JSON：${result.reportJson}`}${lines.length === 0 ? "" : `\n${lines.join("\n")}`}`;
+}
+function defineUiBatchRunTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_batch_run",
+		description: `批量回放 UI 脚本（回归）：选一组脚本逐条跑，汇总通过/失败并落报告。
+
+选择方式（三选一，flows 优先）：
+- flows: ["站点/流程", "站点/流程@版本"]（显式列表）；
+- site: 某站点的全部脚本（取最新版本）；
+- 都不给：工作区全部 UI 脚本（最多 limit 条，缺省 20，上限 50）。
+
+三道闸：开关（ui-test-disabled）→ 计划（不带 confirm 只回计划卡，列出缺参保姆）→ confirm=true 执行。
+执行默认**串行**（UI 回归要稳不要快）；每条脚本复用单次回放（runId/断言/截图一致），
+缺必填入参的脚本记"跳过 + 原因"而不是悄悄消失；某条失败不中断整批。
+
+报告落 dataRoot/ui-batches/<batchId>/：report.md（人看）+ report.json（CI 消费）。
+幂等性：**不幂等**（真浏览器操作，click/submit/upload 可能产生业务写入）。`,
+		parameters: {
+			site: {
+				type: "string",
+				description: "按站点选脚本（与 flows 互斥，flows 优先）"
+			},
+			flows: {
+				type: "array",
+				items: { type: "string" },
+				description: "显式流程列表：site/flow 或 site/flow@3"
+			},
+			inputs: {
+				type: "object",
+				additionalProperties: true,
+				description: "所有脚本共用的入参槽位运行值"
+			},
+			limit: {
+				type: "number",
+				description: "最多跑多少条（缺省 20，硬上限 50）"
+			},
+			confirm: {
+				type: "boolean",
+				description: "闸2：用户确认后才允许 true；缺省只出计划卡"
+			},
+			dry_run: {
+				type: "boolean",
+				description: "只出计划卡并落 dry-run 说明，不起浏览器"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					gate: { type: "string" },
+					code: { type: "string" },
+					message: { type: "string" },
+					plan: {
+						type: "object",
+						additionalProperties: true,
+						properties: {
+							selection: { type: "string" },
+							site: { type: "string" },
+							total: { type: "number" },
+							limit: { type: "number" },
+							writeSteps: { type: "number" },
+							missingInputs: {
+								type: "array",
+								items: { type: "string" }
+							},
+							card: { type: "string" },
+							items: {
+								type: "array",
+								items: {
+									type: "object",
+									additionalProperties: true
+								}
+							}
+						}
+					},
+					result: {
+						type: "object",
+						additionalProperties: true
+					}
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderUiBatch(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(await batchRunForTool(deps, exec, {
+				...args.site === void 0 ? {} : { site: args.site },
+				...args.flows === void 0 ? {} : { flows: args.flows },
+				...args.inputs === void 0 ? {} : { inputs: normalizeStringMap(args.inputs) },
+				...args.limit === void 0 ? {} : { limit: args.limit },
+				...args.confirm === void 0 ? {} : { confirm: args.confirm },
+				...args.dry_run === void 0 ? {} : { dryRun: args.dry_run }
+			}));
+		}
+	});
+}
+
+//#endregion
+//#region src/lookup/page-reader.ts
+/**
+* page 来源 lookup 的 Playwright 读取器。
+*
+* 只读：打开页面 → 等 items 选择器 → 按配置读取 text/attr → 返回候选；不点按钮、不填表。
+* 登录态暂不注入（page 来源适合公开页面；需要登录时优先用 api 来源）。
+*
+* @module dsh-dataforge/lookup/page-reader
+*/
+/** 构造 page lookup reader；返回值可注入 lookup deps。 */
+function createPageLookupReader(options = {}) {
+	const timeoutMs = Math.min(Math.max(options.timeoutMs ?? 15e3, 1e3), 6e4);
+	return async (source) => {
+		let browser;
+		try {
+			browser = await chromium.launch({
+				headless: true,
+				...options.channel === void 0 || options.channel === "" ? {} : { channel: options.channel }
+			});
+			const page = await browser.newPage();
+			await page.goto(source.url, {
+				waitUntil: "domcontentloaded",
+				timeout: timeoutMs
+			});
+			const selector = source.items;
+			if (!await page.waitForSelector(selector, {
+				state: "attached",
+				timeout: timeoutMs
+			}).then(() => true).catch(() => false)) throw new Error(`page lookup 未找到 items 选择器：${selector}`);
+			const expression = `(function (cfg) {
+        const read = (element, spec) => {
+          if (spec === 'text') return ((element.innerText || element.textContent || '') + '').replace(/\s+/g, ' ').trim()
+          if (spec.startsWith('attr:')) return (element.getAttribute(spec.slice(5)) || '').trim()
+          return ''
+        }
+        return Array.from(document.querySelectorAll(cfg.selector)).map((element) => {
+          const values = {}
+          Object.keys(cfg.map).forEach((key) => {
+            const value = read(element, cfg.map[key])
+            if (value !== '') values[key] = value
+          })
+          return { label: read(element, cfg.label), values: values }
+        }).filter((item) => item.label !== '' && Object.keys(item.values).length > 0)
+      })(${JSON.stringify({
+				selector,
+				label: source.label,
+				map: source.map
+			})})`;
+			return await page.evaluate(expression);
+		} finally {
+			await browser?.close().catch(() => void 0);
+		}
+	};
+}
 
 //#endregion
 //#region src/capture/store.ts
@@ -12601,7 +18630,8 @@ CREATE TABLE IF NOT EXISTS capture_runs (
 );
 CREATE TABLE IF NOT EXISTS pages (
   id TEXT PRIMARY KEY, capture_id TEXT REFERENCES capture_runs(id), url TEXT NOT NULL,
-  depth INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ok', visited_at INTEGER NOT NULL
+  depth INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ok', visited_at INTEGER NOT NULL,
+  title TEXT, site_name TEXT
 );
 CREATE TABLE IF NOT EXISTS request_samples (
   id TEXT PRIMARY KEY, capture_id TEXT REFERENCES capture_runs(id), page_id TEXT, relation_id TEXT,
@@ -12642,6 +18672,7 @@ var CaptureStore = class {
 		this.db.exec(CARDS_INDEX_DDL);
 		this.db.exec(RELATIONS_INDEX_DDL);
 		this.ensureRunsNoticeColumn();
+		this.ensurePagesMetaColumns();
 		this.ensureSamplesRelationColumn();
 		this.backfillLegacyRelations();
 	}
@@ -12701,9 +18732,31 @@ var CaptureStore = class {
 			return run === void 0 ? [] : [run];
 		});
 	}
-	upsertPage(captureId, url, depth, status) {
+	/**
+	* 页面行幂等写入（按 `(capture_id, url)` 唯一）。
+	*
+	* 同一页面会从多条证据重复写入：旁路样本首次见到的 pageUrl（wireToStore）、爬行的 page 事件、
+	* browser 的标题上报（onPageMeta）。早期每次 INSERT 新行，pages 表里同一页会出现多行、
+	* 页数统计虚高；现在把 `(capture_id, url)` 当身份：
+	*   - 已存在 → 只刷新 visited_at/status 与**非空**标题/站点名，不重复 bump 统计；
+	*   - 不存在 → INSERT 并 bump `pages` 统计。
+	*
+	* url 由调用方传页面身份（`shared/page-url`）；历史字面 URL 行保持原样，由出口投影归并。
+	*/
+	upsertPage(captureId, url, depth, status, meta) {
+		const title = cleanMetaText(meta?.title);
+		const siteName = cleanMetaText(meta?.siteName);
+		const existing = this.db.prepare("SELECT id FROM pages WHERE capture_id=? AND url=?").get(captureId, url);
+		if (existing !== void 0) {
+			this.db.prepare(`UPDATE pages SET visited_at=?,
+             status=?,
+             title=CASE WHEN ?<>'' THEN ? ELSE title END,
+             site_name=CASE WHEN ?<>'' THEN ? ELSE site_name END
+           WHERE id=?`).run(Date.now(), status, title, title, siteName, siteName, existing.id);
+			return existing.id;
+		}
 		const id = `pg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-		this.db.prepare("INSERT INTO pages(id,capture_id,url,depth,status,visited_at) VALUES (?,?,?,?,?,?)").run(id, captureId, url, depth, status, Date.now());
+		this.db.prepare("INSERT INTO pages(id,capture_id,url,depth,status,visited_at,title,site_name) VALUES (?,?,?,?,?,?,?,?)").run(id, captureId, url, depth, status, Date.now(), title === "" ? null : title, siteName === "" ? null : siteName);
 		this.appendEvent({
 			kind: "page",
 			captureId,
@@ -12714,14 +18767,106 @@ var CaptureStore = class {
 		this.bumpRunStats(captureId, "pages");
 		return id;
 	}
+	/**
+	* 页面清单（按页面身份去重，最近访问为准）。
+	*
+	* 新写入的 pages.url 本身就是页面身份（见 application 桥）；历史库存的是字面 URL，
+	* 同一 SPA 页面的 hash/反缓存戳变体会是多行 —— 出口按同一口径归并，避免工具回执
+	* 把「同一个页面」报成多页。归并只影响投影，不改历史行（证据仍在 request_samples）。
+	*/
 	listPages(captureId, limit = 50) {
-		return this.db.prepare("SELECT * FROM pages WHERE capture_id=? ORDER BY visited_at DESC LIMIT ?").all(captureId, limit).map((row) => ({
-			id: String(row["id"]),
-			captureId: String(row["capture_id"]),
-			url: String(row["url"]),
-			depth: Number(row["depth"]),
-			status: String(row["status"])
-		}));
+		const rows = this.db.prepare("SELECT * FROM pages WHERE capture_id=? ORDER BY visited_at DESC").all(captureId);
+		const seen = /* @__PURE__ */ new Set();
+		const pages = [];
+		for (const row of rows) {
+			const pageUrl = pageIdentityOf(String(row["url"]));
+			if (seen.has(pageUrl)) continue;
+			seen.add(pageUrl);
+			const title = cleanMetaText(optString(row["title"]));
+			const siteName = cleanMetaText(optString(row["site_name"]));
+			pages.push({
+				id: String(row["id"]),
+				captureId: String(row["capture_id"]),
+				url: pageUrl,
+				depth: Number(row["depth"]),
+				status: String(row["status"]),
+				...title === "" ? {} : { title },
+				...siteName === "" ? {} : { siteName }
+			});
+			if (pages.length >= limit) break;
+		}
+		return pages;
+	}
+	/**
+	* 全库页面元信息（/page-meta 数据面）：按页面身份归并、visitedAt 最新者胜、跳过非 http(s)。
+	*
+	* 多取 `limit × 4` 原始行再归并：历史字面 URL 变体（hash/反缓存戳）会占多行，
+	* 只取 limit 行会让同一身份把后面别的页面挤掉。归并只影响投影，不改历史行。
+	*
+	* 同一身份的旧行只**补缺**标题/站点名（不拿旧值覆盖最新行的非空值）：标题与站点名可能
+	* 分两次上报（先 title 后 siteName，毫秒相同则 SQL 排序不定），纯「取第一行」会让另一个字段丢失。
+	*/
+	listPageMeta(limit = 500) {
+		const fetchLimit = Math.max(1, limit) * 4;
+		const rows = this.db.prepare("SELECT url, title, site_name, visited_at FROM pages ORDER BY visited_at DESC LIMIT ?").all(fetchLimit);
+		const byIdentity = /* @__PURE__ */ new Map();
+		const order = [];
+		for (const row of rows) {
+			const rawUrl = String(row["url"] ?? "");
+			if (!/^https?:/i.test(rawUrl.trim())) continue;
+			const identity = pageIdentityOf(rawUrl);
+			const title = cleanMetaText(optString(row["title"]));
+			const siteName = cleanMetaText(optString(row["site_name"]));
+			const existing = byIdentity.get(identity);
+			if (existing === void 0) {
+				if (order.length >= limit) continue;
+				byIdentity.set(identity, {
+					url: identity,
+					...title === "" ? {} : { title },
+					...siteName === "" ? {} : { siteName },
+					visitedAt: Number(row["visited_at"])
+				});
+				order.push(identity);
+				continue;
+			}
+			if (existing.title === void 0 && title !== "") existing.title = title;
+			if (existing.siteName === void 0 && siteName !== "") existing.siteName = siteName;
+		}
+		return order.flatMap((identity) => {
+			const row = byIdentity.get(identity);
+			return row === void 0 ? [] : [row];
+		});
+	}
+	/**
+	* 按页面身份回写标题/站点名（旧页面补抓的落点）：匹配**所有**同一身份的历史行。
+	*
+	* 空值不覆盖旧值（补抓只补缺：读不到标题时不该把已有标题清空）。
+	* 返回实际被更新的行数（调用方据此判断目标是否在 pages 表里存在）。
+	*/
+	applyPageMeta(url, title, siteName) {
+		const cleanTitle = cleanMetaText(title);
+		const cleanSite = cleanMetaText(siteName);
+		if (cleanTitle === "" && cleanSite === "") return 0;
+		const target = pageIdentityOf(url);
+		if (target === "") return 0;
+		const rows = this.db.prepare("SELECT id, url FROM pages").all();
+		const update = this.db.prepare(`UPDATE pages SET
+         title=CASE WHEN ?<>'' THEN ? ELSE title END,
+         site_name=CASE WHEN ?<>'' THEN ? ELSE site_name END
+       WHERE id=?`);
+		let updated = 0;
+		this.db.transaction(() => {
+			for (const row of rows) {
+				if (pageIdentityOf(row.url) !== target) continue;
+				update.run(cleanTitle, cleanTitle, cleanSite, cleanSite, row.id);
+				updated += 1;
+			}
+		})();
+		return updated;
+	}
+	/** kind='cookie' 的 value_json 原文（补抓复用登录态；值只在服务端内存过手，不出壳）。 */
+	listCookieJson(limit = 500) {
+		return this.db.prepare(`SELECT value_json FROM credential_events WHERE kind='cookie' AND value_json IS NOT NULL ORDER BY obtained_at DESC LIMIT ?`).all(Math.max(1, limit)).map((row) => String(row["value_json"]));
 	}
 	upsertSample(captureId, pageId, input) {
 		const id = `sm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -12953,6 +19098,20 @@ var CaptureStore = class {
 		if (Number(row.n) > 0) return;
 		this.db.exec("ALTER TABLE capture_runs ADD COLUMN notice TEXT");
 	}
+	/**
+	* 老库迁移：pages 无 title/site_name 列（名称数据面引入前建的库）→ ALTER 补齐。
+	*
+	* 只加列、不动历史行：历史页面标题靠面板「补抓名称」动作（TitleBackfillService）重访回填；
+	* 库仍可被旧版本插件打开（新列全为 NULL，旧查询不受影响）。
+	*/
+	ensurePagesMetaColumns() {
+		const hasColumn = (column) => {
+			const row = this.db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('pages') WHERE name=?").get(column);
+			return Number(row.n) > 0;
+		};
+		if (!hasColumn("title")) this.db.exec("ALTER TABLE pages ADD COLUMN title TEXT");
+		if (!hasColumn("site_name")) this.db.exec("ALTER TABLE pages ADD COLUMN site_name TEXT");
+	}
 	bumpRunStats(captureId, key) {
 		this.db.prepare(`UPDATE capture_runs SET stats_json = json_set(stats_json, '$.${key}', COALESCE(json_extract(stats_json, '$.${key}'),0)+1)
          WHERE id=?`).run(captureId);
@@ -12990,6 +19149,11 @@ function parseRecord(raw) {
 function optString(value) {
 	return value === null || value === void 0 ? void 0 : String(value);
 }
+/** 页面元信息清洗：压空白、去首尾；缺席/非字符串 → 空串（调用方统一当「没有值」）。 */
+function cleanMetaText(value) {
+	if (typeof value !== "string") return "";
+	return value.replace(/\s+/g, " ").trim();
+}
 function rowToCard(row) {
 	const auth = optRecord(row["auth_json"]);
 	const authType = typeof auth?.["authType"] === "string" ? auth["authType"] : void 0;
@@ -12999,6 +19163,7 @@ function rowToCard(row) {
 		id: String(row["id"]),
 		captureId: String(row["capture_id"]),
 		name: optString(row["name"]),
+		mergeKey: optString(row["merge_key"]),
 		urlTemplate: String(row["url_template"]),
 		method: String(row["method"]),
 		requestTemplate: optTemplate(row["request_template_json"]),
@@ -13088,7 +19253,7 @@ function parseArray(raw) {
 *
 * @module dsh-dataforge/capture/credentials
 */
-function messageOf(error) {
+function messageOf$2(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 /** 卡来源里的 captureId（去重、保序、去掉空串）。 */
@@ -13097,7 +19262,7 @@ function captureIdsOf(card) {
 	for (const source of card.sources ?? []) if (typeof source.captureId === "string" && source.captureId !== "") ids.add(source.captureId);
 	return [...ids];
 }
-function hostOf(url) {
+function hostOf$1(url) {
 	try {
 		return new URL(url).host;
 	} catch {
@@ -13276,7 +19441,7 @@ function createCaptureCredentialProvider(options) {
 			return {
 				cookieRows: [],
 				tokenRows: [],
-				databaseError: messageOf(error)
+				databaseError: messageOf$2(error)
 			};
 		}
 	};
@@ -13293,7 +19458,7 @@ function createCaptureCredentialProvider(options) {
 		}
 		if (entries.length === 0) {
 			if (captureIds.length === 0) return none(databaseError === void 0 ? "卡没有采集来源（sources[].captureId 为空）" : `采集库不可用：${databaseError}`, []);
-			return databaseError === void 0 ? none(`没有匹配 ${hostOf(need.url)} 的 cookie`, captureIds) : none(`采集库不可用：${databaseError}`, captureIds);
+			return databaseError === void 0 ? none(`没有匹配 ${hostOf$1(need.url)} 的 cookie`, captureIds) : none(`采集库不可用：${databaseError}`, captureIds);
 		}
 		const selection = selectCookies(entries, need.url, now());
 		const header = cookieHeaderOf(selection.selected);
@@ -13305,7 +19470,7 @@ function createCaptureCredentialProvider(options) {
 					expired: selection.matched.length
 				}
 			};
-			return none(`没有匹配 ${hostOf(need.url)} 的 cookie`, captureIds);
+			return none(`没有匹配 ${hostOf$1(need.url)} 的 cookie`, captureIds);
 		}
 		const application = appliedCredentialApplication(selection, captureIds);
 		const persistedUsed = selection.selected.filter((cookie) => cookie.captureId === "persisted").length;
@@ -13377,14 +19542,156 @@ function createCaptureCredentialProvider(options) {
 }
 
 //#endregion
+//#region src/capture/names.ts
+/**
+* 面板三级手工名覆盖（网站 / 页面 / 接口）的持久化。
+*
+* 自动名是「采集时记录 + URL 规则生成」的兜底；用户手工改名要跨重采存活，所以单独落在
+* `dataRoot/capture/names.yaml`（不写采集库：采集库按 run 隔离，重采会生成新行）。
+*
+* 键口径（与面板数据面契约一致）：
+*   - site → 小写 host（`Example.COM` 与 `example.com` 是同一个网站）；
+*   - page → `pageIdentityOf` 页面身份（hash 路由/反缓存戳变体同名）；
+*   - interface → `mergeKey` 原样 trim（值不入键，跨参数值/跨采集稳定）。
+*
+* 写路径：tmp + rename 原子写（半截文件不会被下一次读取当真）；缺文件/坏文件一律降级为空快照，
+* 绝不因为名称覆盖文件坏掉而让面板接口 500 —— 覆盖是可再生的展示增强，不是事实源。
+*
+* @module dsh-dataforge/capture/names
+*/
+/** 手工名长度上限（与面板 POST /names 的 400 校验同一口径）。 */
+const NAME_MAX_CHARS = 80;
+const KINDS = [
+	"site",
+	"page",
+	"interface"
+];
+function isCaptureNameKind(value) {
+	return typeof value === "string" && KINDS.includes(value);
+}
+/** 键归一：site → 小写 host；page → 页面身份；interface → 原样 trim。 */
+function normalizeNameKey(kind, key) {
+	const trimmed = key.trim();
+	if (kind === "site") return trimmed.toLowerCase();
+	if (kind === "page") return pageIdentityOf(trimmed);
+	return trimmed;
+}
+/** 名称清洗：压空白、去首尾（空串 = 删除该条覆盖）。 */
+function cleanName(value) {
+	return value.replace(/\s+/g, " ").trim();
+}
+function emptySnapshot() {
+	return {
+		sites: {},
+		pages: {},
+		interfaces: {}
+	};
+}
+function bucketOf(snapshot, kind) {
+	if (kind === "site") return snapshot.sites;
+	if (kind === "page") return snapshot.pages;
+	return snapshot.interfaces;
+}
+/** YAML 文档 → 快照：非对象/坏段如实丢弃（逐段降级，不整份作废）。 */
+function sanitizeSnapshot(doc) {
+	const snapshot = emptySnapshot();
+	if (doc === null || typeof doc !== "object" || Array.isArray(doc)) return snapshot;
+	const record = doc;
+	const sections = [
+		["sites", record["sites"]],
+		["pages", record["pages"]],
+		["interfaces", record["interfaces"]]
+	];
+	for (const [section, raw] of sections) {
+		if (raw === null || raw === void 0 || typeof raw !== "object" || Array.isArray(raw)) continue;
+		for (const [key, value] of Object.entries(raw)) {
+			if (key.trim() === "" || typeof value !== "string") continue;
+			const name = cleanName(value);
+			if (name === "") continue;
+			snapshot[section][key] = name.slice(0, 80);
+		}
+	}
+	return snapshot;
+}
+var CaptureNamesStore = class {
+	filePath;
+	data;
+	constructor(filePath) {
+		this.filePath = filePath;
+		this.data = this.load();
+	}
+	/** 最新快照（深拷贝：调用方改返回值不会污染存储）。 */
+	snapshot() {
+		return {
+			sites: { ...this.data.sites },
+			pages: { ...this.data.pages },
+			interfaces: { ...this.data.interfaces }
+		};
+	}
+	/**
+	* 写一条覆盖：`name` trim 后为空 = 删除该键；否则覆盖。返回**最新**快照。
+	*
+	* 先算下一份再落盘、成功后才替换内存态：写失败不会留下「内存已改、盘上没改」的半态。
+	*/
+	set(kind, key, name) {
+		const normalizedKey = normalizeNameKey(kind, key);
+		if (normalizedKey === "") return this.snapshot();
+		const next = this.snapshot();
+		const clean = cleanName(name);
+		if (clean === "") delete bucketOf(next, kind)[normalizedKey];
+		else bucketOf(next, kind)[normalizedKey] = clean.slice(0, 80);
+		this.persist(next);
+		this.data = next;
+		return this.snapshot();
+	}
+	/** 读文件：缺文件/坏文件/坏形状一律空快照（不抛）。 */
+	load() {
+		let text;
+		try {
+			text = readFileSync(this.filePath, "utf8");
+		} catch {
+			return emptySnapshot();
+		}
+		try {
+			return sanitizeSnapshot(yaml.load(text));
+		} catch {
+			return emptySnapshot();
+		}
+	}
+	/** 原子写：同目录 tmp 文件写完再 rename（跨进程读取不会看到半截 YAML）。 */
+	persist(snapshot) {
+		mkdirSync(dirname(this.filePath), { recursive: true });
+		const text = yaml.dump(snapshot, {
+			lineWidth: 120,
+			noRefs: true,
+			sortKeys: true
+		});
+		const tmp = `${this.filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+		writeFileSync(tmp, text, "utf8");
+		renameSync(tmp, this.filePath);
+	}
+};
+
+//#endregion
 //#region src/capture/panel-routes.ts
 const PANEL_API_PREFIX = "/dashboard/api/dataforge";
 const DEFAULT_LIST_LIMIT = 30;
 const MAX_LIST_LIMIT = 500;
 const RUN_DETAIL_CARDS_LIMIT = 200;
 const RUN_DETAIL_RELATIONS_LIMIT = 500;
-/** 写入口请求体上限：面板只需要 {taskType, entryUrl}，超过这个尺寸一律 413。 */
-const MAX_CAPTURE_BODY_BYTES = 8192;
+/** /page-meta 缺省与上限（面板一次要全量页面名；采集库页面规模就几百量级）。 */
+const PAGE_META_LIMIT = 500;
+/** 写入口请求体上限（面板只需要小 JSON），超过这个尺寸一律 413。 */
+const MAX_WRITE_BODY_BYTES = 8192;
+/** retitle 未装配时的零状态（GET /retitle/status 不 5xx，如实显示「没在跑」）。 */
+const EMPTY_RETITLE_STATUS = {
+	running: false,
+	targets: 0,
+	tried: 0,
+	updated: 0,
+	failed: 0,
+	skipped: 0
+};
 /**
 * 是不是该交给编排子路由。
 *
@@ -13400,7 +19707,7 @@ function isOrchestrationRequest(url) {
 * 构造面板数据 handler。
 *
 * URL 两种形态都接受：宿主可能传完整路径（前缀含在 url 里）或剥好前缀的剩余路径。
-* GET 面只读；唯一的写入口 POST /captures（发起单页采集），其余方法一律 405。
+* GET 面只读；写入口仅 POST /captures、/names、/retitle，其余方法一律 405。
 */
 function createCapturePanelHandler(deps) {
 	return (req, res) => {
@@ -13413,77 +19720,124 @@ function createCapturePanelHandler(deps) {
 					handleStartCapture(deps, req, res);
 					return;
 				}
-				fail$1(res, 405, `面板路由不支持 ${method} ${suffix}（写入口仅 POST /captures）`, "method-not-allowed");
+				if (suffix === "/names") {
+					handleSetName(deps, req, res);
+					return;
+				}
+				if (suffix === "/retitle") {
+					handleRetitle(deps, res);
+					return;
+				}
+				fail$3(res, 405, `面板路由不支持 ${method} ${suffix}（写入口仅 POST /captures、/names、/retitle）`, "method-not-allowed");
 				return;
 			}
 			if (method !== "GET") {
-				fail$1(res, 405, `面板路由只支持 GET/POST /captures，收到 ${method}`, "method-not-allowed");
+				fail$3(res, 405, `面板路由只支持 GET 与 POST /captures、/names、/retitle，收到 ${method}`, "method-not-allowed");
+				return;
+			}
+			if (suffix === "/page-meta") {
+				const limit = clampLimit$1(url.searchParams.get("limit"), PAGE_META_LIMIT, PAGE_META_LIMIT);
+				ok$3(res, {
+					generatedAt: Date.now(),
+					pages: deps.store.listPageMeta(limit)
+				});
+				return;
+			}
+			if (suffix === "/names") {
+				ok$3(res, deps.names?.snapshot() ?? {
+					sites: {},
+					pages: {},
+					interfaces: {}
+				});
+				return;
+			}
+			if (suffix === "/retitle/status") {
+				ok$3(res, deps.retitle?.status() ?? { ...EMPTY_RETITLE_STATUS });
 				return;
 			}
 			if (suffix === "/runs") {
-				ok$1(res, {
+				ok$3(res, {
 					generatedAt: Date.now(),
-					runs: deps.store.listRuns(clampLimit(url.searchParams.get("limit"), DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT))
+					runs: deps.store.listRuns(clampLimit$1(url.searchParams.get("limit"), DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT))
 				});
 				return;
 			}
 			if (suffix.startsWith("/runs/")) {
 				const id = decodeURIComponent(suffix.slice(6));
 				if (id.length === 0 || id.includes("/")) {
-					fail$1(res, 404, `不认识的路径：${suffix}`, "unknown-path");
+					fail$3(res, 404, `不认识的路径：${suffix}`, "unknown-path");
 					return;
 				}
 				const run = deps.store.getRun(id);
 				if (run === void 0) {
-					fail$1(res, 404, `采集运行 ${id} 不存在`, "not-found");
+					fail$3(res, 404, `采集运行 ${id} 不存在`, "not-found");
 					return;
 				}
-				ok$1(res, {
+				ok$3(res, {
 					generatedAt: Date.now(),
 					run,
 					pages: deps.store.listPages(id, MAX_LIST_LIMIT),
 					samples: deps.store.listSamples(id, MAX_LIST_LIMIT).map(sanitizeSample),
 					credentials: deps.store.listCredentials(id, MAX_LIST_LIMIT).map(({ valueJson: _valueStaysInDb, ...rest }) => rest),
-					cards: deps.store.listCards(id, RUN_DETAIL_CARDS_LIMIT),
+					cards: deps.store.listCards(id, RUN_DETAIL_CARDS_LIMIT).map((card) => projectCard(card, deps.names?.snapshot())),
 					relations: deps.store.listRelations(id, RUN_DETAIL_RELATIONS_LIMIT)
 				});
 				return;
 			}
 			if (suffix === "/cards") {
-				ok$1(res, {
+				const names = deps.names?.snapshot();
+				ok$3(res, {
 					generatedAt: Date.now(),
-					cards: deps.store.listAllCards(clampLimit(url.searchParams.get("limit"), DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT), clampOffset(url.searchParams.get("offset"))),
+					cards: deps.store.listAllCards(clampLimit$1(url.searchParams.get("limit"), DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT), clampOffset(url.searchParams.get("offset"))).map((card) => projectCard(card, names)),
 					total: deps.store.countAllCards()
 				});
 				return;
 			}
-			fail$1(res, 404, `不认识的路径：${suffix}`, "unknown-path");
+			fail$3(res, 404, `不认识的路径：${suffix}`, "unknown-path");
 		} catch (err) {
-			fail$1(res, 500, String(err?.message ?? err), "internal");
+			fail$3(res, 500, String(err?.message ?? err), "internal");
 		}
+	};
+}
+/**
+* 卡片出口投影：mergeKey / name / nameSource。
+*
+* name = 手工覆盖（按 mergeKey，来自 names.yaml）?? 改进后的 semanticName（方法+模板实时生成）。
+* 注意**不用**卡行上落库的 name 字段：那是采集期旧口径（v1 语义名），会与改进后的规则长期不一致；
+* 卡行 name 仍保留作审计，展示以本投影为准。
+*/
+function projectCard(card, names) {
+	const mergeKey = card.mergeKey !== void 0 && card.mergeKey !== "" ? card.mergeKey : mergeKeyOf(card.method, card.urlTemplate);
+	const manual = names?.interfaces[mergeKey];
+	const manualName = manual !== void 0 && manual !== "" ? manual : void 0;
+	return {
+		...card,
+		mergeKey,
+		name: manualName ?? semanticName(card.method, card.urlTemplate),
+		nameSource: manualName === void 0 ? "auto" : "manual"
 	};
 }
 /** POST /captures：发起单页采集。FR-7.6 边界在闸内：body 里 taskType 只认 single_page，其余 400。 */
 async function handleStartCapture(deps, req, res) {
 	let body;
 	try {
-		body = JSON.parse(await readBody$1(req, MAX_CAPTURE_BODY_BYTES) || "{}");
+		body = JSON.parse(await readBody$2(req, MAX_WRITE_BODY_BYTES) || "{}");
 	} catch (err) {
-		if (err instanceof BodyTooLargeError) {
-			fail$1(res, 413, `请求体超过 ${MAX_CAPTURE_BODY_BYTES} 字节`, "body-too-large");
+		if (err instanceof BodyTooLargeError$1) {
+			fail$3(res, 413, `请求体超过 ${MAX_WRITE_BODY_BYTES} 字节`, "body-too-large");
 			return;
 		}
-		fail$1(res, 400, "请求体不是合法 JSON", "bad-json");
+		fail$3(res, 400, "请求体不是合法 JSON", "bad-json");
 		return;
 	}
 	const record = typeof body === "object" && body !== null ? body : {};
 	const taskType = record["taskType"] === void 0 ? "single_page" : record["taskType"];
 	if (taskType !== "single_page") {
-		fail$1(res, 400, `面板只能发起 single_page 采集，收到 ${String(taskType)}（写操作/爬取走 agent 入口 dataforge_capture）`, "bad-task-type");
+		fail$3(res, 400, `面板只能发起 single_page 采集，收到 ${String(taskType)}（写操作/爬取走 agent 入口 dataforge_capture）`, "bad-task-type");
 		return;
 	}
 	if (typeof record["entryUrl"] !== "string" || record["entryUrl"].length === 0) {
-		fail$1(res, 400, "缺少 entryUrl（字符串）", "bad-entry-url");
+		fail$3(res, 400, "缺少 entryUrl（字符串）", "bad-entry-url");
 		return;
 	}
 	const entryUrl = record["entryUrl"];
@@ -13491,25 +19845,25 @@ async function handleStartCapture(deps, req, res) {
 	try {
 		entry = new URL(entryUrl);
 	} catch {
-		fail$1(res, 400, `entryUrl 不是合法 URL：${entryUrl.slice(0, 200)}`, "bad-entry-url");
+		fail$3(res, 400, `entryUrl 不是合法 URL：${entryUrl.slice(0, 200)}`, "bad-entry-url");
 		return;
 	}
 	if (entry.protocol !== "http:" && entry.protocol !== "https:") {
-		fail$1(res, 400, `只支持 http/https 入口，收到 ${entry.protocol}`, "bad-entry-url");
+		fail$3(res, 400, `只支持 http/https 入口，收到 ${entry.protocol}`, "bad-entry-url");
 		return;
 	}
 	const blocked = blockedTargetReason(entry.hostname);
 	if (blocked !== void 0) {
-		fail$1(res, 400, `拒绝采集 ${entry.hostname}：${blocked}`, "blocked-target");
+		fail$3(res, 400, `拒绝采集 ${entry.hostname}：${blocked}`, "blocked-target");
 		return;
 	}
 	const busy = deps.store.listRuns(200).find((run) => run.status === "running" && sameHost(run.entryUrl, entry));
 	if (busy !== void 0) {
-		fail$1(res, 409, `该站点已有进行中的采集（${busy.id}），等它收口后再发起`, "host-busy");
+		fail$3(res, 409, `该站点已有进行中的采集（${busy.id}），等它收口后再发起`, "host-busy");
 		return;
 	}
 	if (deps.startCapture === void 0) {
-		fail$1(res, 503, "采集发起未装配（startCapture 未注入）", "capture-not-wired");
+		fail$3(res, 503, "采集发起未装配（startCapture 未注入）", "capture-not-wired");
 		return;
 	}
 	let result;
@@ -13519,16 +19873,97 @@ async function handleStartCapture(deps, req, res) {
 			entryUrl
 		});
 	} catch (err) {
-		fail$1(res, 500, String(err?.message ?? err), "capture-start-failed");
+		fail$3(res, 500, String(err?.message ?? err), "capture-start-failed");
 		return;
 	}
-	ok$1(res, {
+	ok$3(res, {
 		accepted: result.accepted,
 		gate: result.gate,
 		captureId: result.captureId,
 		...result.degradedNotice === void 0 ? {} : { degradedNotice: result.degradedNotice },
 		card: result.card
 	});
+}
+/**
+* POST /names：写一条三级手工名覆盖。
+*
+* body `{kind:'site'|'page'|'interface', key:string, name:string}`；name trim 后空串 = 删除该条覆盖。
+* 校验：kind 合法、key 非空字符串、name 字符串且 ≤80 字符，否则 400 信封错误。
+* 回执 data `{kind,key,name?}`：key 是**归一后**的键（site 小写 / page 身份 / interface trim）。
+*/
+async function handleSetName(deps, req, res) {
+	let body;
+	try {
+		body = JSON.parse(await readBody$2(req, MAX_WRITE_BODY_BYTES) || "{}");
+	} catch (err) {
+		if (err instanceof BodyTooLargeError$1) {
+			fail$3(res, 413, `请求体超过 ${MAX_WRITE_BODY_BYTES} 字节`, "body-too-large");
+			return;
+		}
+		fail$3(res, 400, "请求体不是合法 JSON", "bad-json");
+		return;
+	}
+	const record = typeof body === "object" && body !== null ? body : {};
+	const kindRaw = record["kind"];
+	if (!isCaptureNameKind(kindRaw)) {
+		fail$3(res, 400, `kind 非法：${String(kindRaw)}（可选 site/page/interface）`, "bad-name-kind");
+		return;
+	}
+	const keyRaw = record["key"];
+	if (typeof keyRaw !== "string" || keyRaw.trim() === "") {
+		fail$3(res, 400, "缺少 key（非空字符串）", "bad-name-key");
+		return;
+	}
+	const nameRaw = record["name"];
+	if (typeof nameRaw !== "string") {
+		fail$3(res, 400, "name 必须是字符串（空串 = 删除该条覆盖）", "bad-name-value");
+		return;
+	}
+	const name = cleanName(nameRaw);
+	if (name.length > 80) {
+		fail$3(res, 400, `name 超过 ${80} 字符`, "name-too-long");
+		return;
+	}
+	const normalizedKey = normalizeNameKey(kindRaw, keyRaw);
+	if (normalizedKey === "") {
+		fail$3(res, 400, `key 归一后为空：${keyRaw.slice(0, 200)}`, "bad-name-key");
+		return;
+	}
+	if (deps.names === void 0) {
+		fail$3(res, 503, "名称覆盖存储未装配（names 未注入）", "names-not-wired");
+		return;
+	}
+	try {
+		deps.names.set(kindRaw, keyRaw, name);
+	} catch (err) {
+		fail$3(res, 500, `名称覆盖写入失败：${String(err?.message ?? err)}`, "names-write-failed");
+		return;
+	}
+	ok$3(res, name === "" ? {
+		kind: kindRaw,
+		key: normalizedKey
+	} : {
+		kind: kindRaw,
+		key: normalizedKey,
+		name
+	});
+}
+/**
+* POST /retitle：启动旧页面标题补抓。
+*
+* 操作反馈用 200 信封表达（accepted=false + reason='busy'|'no-targets'|'capture-running'），
+* 不用 4xx/5xx —— 这些不是请求错误，而是「现在不能跑」。未装配属装配问题，才回 503。
+*/
+function handleRetitle(deps, res) {
+	if (deps.retitle === void 0) {
+		fail$3(res, 503, "标题补抓未装配（retitle 未注入）", "retitle-not-wired");
+		return;
+	}
+	try {
+		ok$3(res, deps.retitle.start());
+	} catch (err) {
+		fail$3(res, 500, `标题补抓启动失败：${String(err?.message ?? err)}`, "retitle-start-failed");
+	}
 }
 /** 本机 / 链路本地 / 云元数据地址：面板写入口不接受（agent 工具面不受此限，便于本地调试）。 */
 function blockedTargetReason(hostname) {
@@ -13545,15 +19980,15 @@ function sameHost(left, right) {
 		return false;
 	}
 }
-var BodyTooLargeError = class extends Error {};
-function readBody$1(req, maxBytes) {
+var BodyTooLargeError$1 = class extends Error {};
+function readBody$2(req, maxBytes) {
 	return new Promise((resolve, reject) => {
 		let total = 0;
 		const chunks = [];
 		req.on("data", (chunk) => {
 			total += chunk.length;
 			if (total > maxBytes) {
-				reject(new BodyTooLargeError("request body too large"));
+				reject(new BodyTooLargeError$1("request body too large"));
 				if (typeof req.resume === "function") req.resume();
 				return;
 			}
@@ -13572,8 +20007,12 @@ function readBody$1(req, maxBytes) {
 function registerCapturePanelRoutes(webServer, deps) {
 	const captureHandler = createCapturePanelHandler(deps);
 	const orchestration = deps.orchestration;
-	const handler = orchestration === void 0 ? captureHandler : (req, res) => {
-		if (isOrchestrationRequest(req.url)) orchestration(req, res);
+	const uiTest = deps.uiTest;
+	const artifacts = deps.artifacts;
+	const handler = orchestration === void 0 && uiTest === void 0 && artifacts === void 0 ? captureHandler : (req, res) => {
+		if (artifacts !== void 0 && artifacts(req, res) === true) return;
+		if (uiTest !== void 0 && uiTest(req, res) === true) return;
+		if (orchestration !== void 0 && isOrchestrationRequest(req.url)) orchestration(req, res);
 		else captureHandler(req, res);
 	};
 	const dispose = webServer.register({
@@ -13588,8 +20027,8 @@ function registerCapturePanelRoutes(webServer, deps) {
 		dispose();
 	};
 }
-function ok$1(res, data) {
-	send$1(res, 200, {
+function ok$3(res, data) {
+	send$2(res, 200, {
 		success: true,
 		data
 	});
@@ -13610,8 +20049,8 @@ function sanitizeSample(sample) {
 		ts: sample.ts
 	};
 }
-function fail$1(res, status, error, code) {
-	send$1(res, status, code === void 0 ? {
+function fail$3(res, status, error, code) {
+	send$2(res, status, code === void 0 ? {
 		success: false,
 		error
 	} : {
@@ -13620,14 +20059,14 @@ function fail$1(res, status, error, code) {
 		code
 	});
 }
-function send$1(res, status, body) {
+function send$2(res, status, body) {
 	res.writeHead(status, {
 		"content-type": "application/json; charset=utf-8",
 		"cache-control": "no-store"
 	});
 	res.end(JSON.stringify(body));
 }
-function clampLimit(raw, fallback, max) {
+function clampLimit$1(raw, fallback, max) {
 	const parsed = Number.parseInt(raw ?? "", 10);
 	if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
 	return Math.min(parsed, max);
@@ -13636,6 +20075,245 @@ function clampOffset(raw) {
 	const parsed = Number.parseInt(raw ?? "", 10);
 	if (!Number.isFinite(parsed) || parsed < 0) return 0;
 	return parsed;
+}
+
+//#endregion
+//#region src/capture/retitle.ts
+/** 单轮补抓目标上限（旧页面很多时只补最需要的，不无限开浏览器）。 */
+const RETITLE_MAX_TARGETS = 60;
+const RUN_SCAN_LIMIT = 500;
+const PAGE_META_SCAN_LIMIT = 1e3;
+const CARD_SCAN_LIMIT = 2e3;
+const COOKIE_LIMIT = 1e3;
+const NAV_TIMEOUT_MS = 15e3;
+const NETWORK_IDLE_TIMEOUT_MS = 3e3;
+var TitleBackfillService = class {
+	data = emptyStatus();
+	deps;
+	constructor(deps) {
+		this.deps = deps;
+	}
+	status() {
+		return { ...this.data };
+	}
+	/**
+	* 启动一轮补抓（异步：立即返回受理结果，浏览器在后台跑）。
+	*
+	* 闸顺序：已有补抓在跑 → busy；目标里没有可跑的（全被 host 级采集闸挡下/本来就没有）时，
+	* 有 running 采集 → capture-running，否则 → no-targets。
+	* host 级采集闸：正在采集的 host 本轮跳过（避免同站抢浏览器/登录态），其余 host 照常跑。
+	*/
+	start() {
+		if (this.data.running) return {
+			accepted: false,
+			targets: 0,
+			hosts: 0,
+			reason: "busy"
+		};
+		const runningHosts = new Set(this.deps.store.listRuns(RUN_SCAN_LIMIT).filter((run) => run.status === "running").map((run) => hostOf(run.entryUrl)).filter((host) => host !== ""));
+		const plan = this.plan(runningHosts);
+		if (plan.targets.length === 0) return {
+			accepted: false,
+			targets: 0,
+			hosts: 0,
+			reason: runningHosts.size > 0 ? "capture-running" : "no-targets"
+		};
+		this.data = {
+			running: true,
+			targets: plan.targets.length,
+			tried: 0,
+			updated: 0,
+			failed: 0,
+			skipped: 0,
+			startedAt: Date.now()
+		};
+		this.run(plan.targets).catch(() => void 0);
+		return {
+			accepted: true,
+			targets: plan.targets.length,
+			hosts: plan.hosts
+		};
+	}
+	/** 计划补抓目标：入口页 → 卡上页面引用 → pages 表，按身份去重；只取缺标题/缺站点名的入口页。 */
+	plan(runningHosts) {
+		const runs = this.deps.store.listRuns(RUN_SCAN_LIMIT);
+		const metaRows = this.deps.store.listPageMeta(PAGE_META_SCAN_LIMIT);
+		const titleByIdentity = /* @__PURE__ */ new Map();
+		const siteNameHosts = /* @__PURE__ */ new Set();
+		for (const row of metaRows) {
+			const host = hostOf(row.url);
+			titleByIdentity.set(row.url, row.title !== void 0 && row.title !== "");
+			if (host !== "" && row.siteName !== void 0 && row.siteName !== "") siteNameHosts.add(host);
+		}
+		const candidates = [];
+		for (const run of runs) candidates.push({
+			raw: run.entryUrl,
+			isEntry: true
+		});
+		for (const card of this.deps.store.listAllCards(CARD_SCAN_LIMIT, 0)) for (const pageUrl of card.relatedPageUrls) candidates.push({
+			raw: pageUrl,
+			isEntry: false
+		});
+		for (const row of metaRows) candidates.push({
+			raw: row.url,
+			isEntry: false
+		});
+		const seen = /* @__PURE__ */ new Set();
+		const hosts = /* @__PURE__ */ new Set();
+		const targets = [];
+		for (const candidate of candidates) {
+			if (targets.length >= 60) break;
+			const raw = candidate.raw.trim();
+			if (!/^https?:/i.test(raw)) continue;
+			const identity = pageIdentityOf(raw);
+			if (identity === "" || seen.has(identity)) continue;
+			const host = hostOf(identity);
+			if (host === "") continue;
+			if (runningHosts.has(host)) continue;
+			seen.add(identity);
+			const hasTitle = titleByIdentity.get(identity) === true;
+			const needsSiteName = candidate.isEntry && !siteNameHosts.has(host);
+			if (hasTitle && !needsSiteName) continue;
+			targets.push({
+				identity,
+				url: raw,
+				host
+			});
+			hosts.add(host);
+		}
+		return {
+			targets,
+			hosts: hosts.size
+		};
+	}
+	/** 后台执行体：一次浏览器、逐目标导航；无论成败 finally 关浏览器并收口状态。 */
+	async run(targets) {
+		let handle;
+		let currentHost = "";
+		try {
+			const cookies = this.loadCookies();
+			handle = await this.deps.openPage(this.deps.channel, () => void 0, { headless: true });
+			for (const target of targets) {
+				if (target.host !== currentHost) {
+					currentHost = target.host;
+					if (typeof handle.context.clearCookies === "function") await handle.context.clearCookies().catch(() => void 0);
+					const matched = cookies.filter((cookie) => cookieMatchesHost(cookie.domain, target.host));
+					if (matched.length > 0 && typeof handle.context.addCookies === "function") await handle.context.addCookies(matched).catch(() => void 0);
+				}
+				this.data.tried += 1;
+				await this.backfillOne(handle, target);
+			}
+		} catch (err) {
+			this.data.error = errText(err);
+		} finally {
+			await handle?.browser.close().catch(() => void 0);
+			this.data.skipped = Math.max(0, this.data.targets - this.data.tried);
+			this.data.running = false;
+			this.data.finishedAt = Date.now();
+		}
+	}
+	/** 单目标：导航 → 读 meta → 身份校验 → 回写（所有异常落 failed，不打断整轮）。 */
+	async backfillOne(handle, target) {
+		try {
+			await handle.page.goto(target.url, {
+				waitUntil: "domcontentloaded",
+				timeout: NAV_TIMEOUT_MS
+			}).catch(() => void 0);
+			await handle.page.waitForLoadState("networkidle", { timeout: NETWORK_IDLE_TIMEOUT_MS }).catch(() => void 0);
+			const meta = await readPageMeta(handle.page);
+			if (meta.url === "" || pageIdentityOf(meta.url) !== target.identity) {
+				this.data.failed += 1;
+				return;
+			}
+			if (meta.title === void 0 && meta.siteName === void 0) {
+				this.data.failed += 1;
+				return;
+			}
+			let updatedRows = this.deps.store.applyPageMeta(meta.url, meta.title, meta.siteName);
+			if (updatedRows === 0) {
+				const captureId = this.latestCaptureIdOfHost(target.host);
+				if (captureId !== void 0) {
+					this.deps.store.upsertPage(captureId, target.identity, 0, "ok", {
+						...meta.title === void 0 ? {} : { title: meta.title },
+						...meta.siteName === void 0 ? {} : { siteName: meta.siteName }
+					});
+					updatedRows = 1;
+				}
+			}
+			if (updatedRows > 0) this.data.updated += 1;
+			else this.data.failed += 1;
+		} catch {
+			this.data.failed += 1;
+		}
+	}
+	/** 从 credential_events 读已存 cookie（同 domain/path/name 以最近一次为准，过期丢弃）。 */
+	loadCookies() {
+		const nowSeconds = Date.now() / 1e3;
+		const byKey = /* @__PURE__ */ new Map();
+		for (const json of this.deps.store.listCookieJson(COOKIE_LIMIT)) {
+			let raw;
+			try {
+				raw = JSON.parse(json);
+			} catch {
+				continue;
+			}
+			if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+			const record = raw;
+			const name = typeof record["name"] === "string" ? record["name"] : "";
+			const value = typeof record["value"] === "string" ? record["value"] : "";
+			const domain = typeof record["domain"] === "string" ? record["domain"] : "";
+			if (name === "" || domain === "") continue;
+			const expires = typeof record["expires"] === "number" && Number.isFinite(record["expires"]) ? record["expires"] : -1;
+			if (expires > 0 && expires < nowSeconds) continue;
+			const path = typeof record["path"] === "string" && record["path"] !== "" ? record["path"] : "/";
+			const sameSiteRaw = typeof record["sameSite"] === "string" ? record["sameSite"] : "Lax";
+			const sameSite = sameSiteRaw === "Strict" || sameSiteRaw === "Lax" || sameSiteRaw === "None" ? sameSiteRaw : "Lax";
+			const cookie = {
+				name,
+				value,
+				domain,
+				path,
+				expires,
+				httpOnly: record["httpOnly"] === true,
+				secure: record["secure"] === true,
+				sameSite
+			};
+			byKey.set(`${domain}|${path}|${name}`, cookie);
+		}
+		return [...byKey.values()];
+	}
+	/** 该 host 最近一次采集的 captureId（目标不在 pages 表时补行用）；没有则 undefined。 */
+	latestCaptureIdOfHost(host) {
+		return this.deps.store.listRuns(RUN_SCAN_LIMIT).find((run) => hostOf(run.entryUrl) === host)?.id;
+	}
+};
+/** URL → host（解析失败返回空串，调用方按无 host 跳过）。 */
+function hostOf(url) {
+	try {
+		return new URL(url).host.toLowerCase();
+	} catch {
+		return "";
+	}
+}
+/** cookie domain（可带前导点）是否覆盖 host：`example.com` 覆盖 `a.example.com`。 */
+function cookieMatchesHost(cookieDomain, host) {
+	const domain = cookieDomain.trim().toLowerCase().replace(/^\./, "");
+	const target = host.trim().toLowerCase();
+	return domain !== "" && (target === domain || target.endsWith(`.${domain}`));
+}
+function errText(err) {
+	const message = err?.message;
+	return (typeof message === "string" && message.length > 0 ? message : String(err)).slice(0, 300);
+}
+function emptyStatus() {
+	return {
+		running: false,
+		targets: 0,
+		tried: 0,
+		updated: 0,
+		failed: 0,
+		skipped: 0
+	};
 }
 
 //#endregion
@@ -13653,7 +20331,7 @@ async function handle(deps, req, res) {
 	try {
 		const method = (req.method ?? "GET").toUpperCase();
 		const url = new URL(req.url ?? "/", "http://panel.localhost");
-		const suffix = stripPrefix(url.pathname);
+		const suffix = stripPrefix$2(url.pathname);
 		if (method === "POST") {
 			if (suffix === "/graph") {
 				await handleSave(deps, req, res, url);
@@ -13663,15 +20341,15 @@ async function handle(deps, req, res) {
 				await handleRename(deps, req, res, url);
 				return;
 			}
-			fail(res, 405, `编排路由不支持 POST ${suffix}（写入口仅 /graph 与 /rename）`, "method-not-allowed");
+			fail$2(res, 405, `编排路由不支持 POST ${suffix}（写入口仅 /graph 与 /rename）`, "method-not-allowed");
 			return;
 		}
 		if (method !== "GET") {
-			fail(res, 405, `编排路由只支持 GET/POST，收到 ${method}`, "method-not-allowed");
+			fail$2(res, 405, `编排路由只支持 GET/POST，收到 ${method}`, "method-not-allowed");
 			return;
 		}
 		if (suffix === "/overview") {
-			ok(res, await buildOverview(deps, url));
+			ok$2(res, await buildOverview(deps, url));
 			return;
 		}
 		if (suffix === "/graph") {
@@ -13679,16 +20357,16 @@ async function handle(deps, req, res) {
 			return;
 		}
 		if (suffix === "/palette") {
-			ok(res, await buildPalette(deps, url));
+			ok$2(res, await buildPalette(deps, url));
 			return;
 		}
-		fail(res, 404, `不认识的路径：${suffix}`, "unknown-path");
+		fail$2(res, 404, `不认识的路径：${suffix}`, "unknown-path");
 	} catch (error) {
-		fail(res, 500, error instanceof Error ? error.message : String(error), "internal");
+		fail$2(res, 500, error instanceof Error ? error.message : String(error), "internal");
 	}
 }
 /** 前缀剥离：宿主可能传含前缀的完整路径，也可能传已剥好的剩余路径。 */
-function stripPrefix(pathname) {
+function stripPrefix$2(pathname) {
 	const full = `/dashboard/api/dataforge${ORCHESTRATION_API_PREFIX}`;
 	if (pathname.startsWith(full)) return pathname.slice(full.length) || "/";
 	if (pathname.startsWith("/orchestration")) return pathname.slice(14) || "/";
@@ -13702,15 +20380,21 @@ function stripPrefix(pathname) {
 * （现象：面板永远显示「还没有任何编排流程」）。所以面板显式带 `?workspace=<绝对路径>`；
 * 只接受「绝对路径 + 真实存在的目录」，其余一律回落宿主解析器，不做路径注入的入口。
 */
-async function resolveRoot(deps, url) {
+async function resolveRoot$1(deps, url) {
 	const raw = url.searchParams.get("workspace")?.trim();
 	if (raw !== void 0 && raw.length > 0 && isAbsolute(raw)) try {
-		if (statSync(raw).isDirectory()) return raw;
+		if (statSync(raw).isDirectory()) {
+			if (deps.fallbackWorkspaceRoot !== void 0 && !existsSync(join(raw, ".dsh", "dataforge"))) {
+				const fallback = await deps.fallbackWorkspaceRoot();
+				if (fallback !== void 0 && fallback !== "") return fallback;
+			}
+			return raw;
+		}
 	} catch {}
 	return deps.resolveWorkspaceRoot();
 }
 async function buildOverview(deps, url) {
-	const workspaceRoot = await resolveRoot(deps, url);
+	const workspaceRoot = await resolveRoot$1(deps, url);
 	const siteFilter = url.searchParams.get("site");
 	const chains = listChains(workspaceRoot);
 	const flows = [];
@@ -13781,22 +20465,22 @@ async function handleGraph(deps, url, res) {
 	const rawVersion = url.searchParams.get("version");
 	const version = rawVersion === null || rawVersion.length === 0 ? void 0 : Number.parseInt(rawVersion, 10);
 	if (site.length === 0 || flow.length === 0) {
-		fail(res, 400, "缺少 site / flow 查询参数（链按「站点 / 流程」归档）", "missing-param");
+		fail$2(res, 400, "缺少 site / flow 查询参数（链按「站点 / 流程」归档）", "missing-param");
 		return;
 	}
 	if (version !== void 0 && (!Number.isInteger(version) || version < 1)) {
-		fail(res, 400, `version 必须是正整数，收到 ${rawVersion}`, "bad-param");
+		fail$2(res, 400, `version 必须是正整数，收到 ${rawVersion}`, "bad-param");
 		return;
 	}
-	const workspaceRoot = await resolveRoot(deps, url);
+	const workspaceRoot = await resolveRoot$1(deps, url);
 	const loaded = loadChain(workspaceRoot, site, flow, version === void 0 ? {} : { version });
 	if (!loaded.ok) {
-		fail(res, loaded.code === "chain-not-found" ? 404 : 422, loaded.message, loaded.code);
+		fail$2(res, loaded.code === "chain-not-found" ? 404 : 422, loaded.message, loaded.code);
 		return;
 	}
 	const text = readChainText(workspaceRoot, site, flow, loaded.version);
 	const { meta } = loaded.doc;
-	ok(res, {
+	ok$2(res, {
 		site: loaded.doc.meta.site,
 		flow: loaded.doc.meta.flow,
 		version: loaded.version,
@@ -13814,15 +20498,19 @@ async function handleGraph(deps, url, res) {
 const MAX_PALETTE_CARDS = 500;
 const MAX_PALETTE_PAGES = 200;
 async function buildPalette(deps, url) {
-	const workspaceRoot = await resolveRoot(deps, url);
+	const workspaceRoot = await resolveRoot$1(deps, url);
 	let cards = [];
 	try {
 		cards = listCards(workspaceRoot);
 	} catch {
 		cards = [];
 	}
-	const pages = /* @__PURE__ */ new Set();
-	for (const card of cards) for (const source of card.sources ?? []) for (const page of source.pages ?? []) if (page.length > 0) pages.add(page);
+	const pages = /* @__PURE__ */ new Map();
+	for (const card of cards) for (const source of card.sources ?? []) for (const page of source.pages ?? []) {
+		if (page.length === 0) continue;
+		const key = pageIdentityOf(page);
+		if (!pages.has(key)) pages.set(key, page);
+	}
 	const truncated = cards.length > MAX_PALETTE_CARDS ? `接口库有 ${cards.length} 张卡，调色板只列前 ${MAX_PALETTE_CARDS} 张（用搜索框缩小范围）` : void 0;
 	return {
 		cards: cards.slice(0, MAX_PALETTE_CARDS).map((card) => ({
@@ -13833,7 +20521,7 @@ async function buildPalette(deps, url) {
 			inputCount: card.inputs.length,
 			outputCount: card.outputs.length
 		})),
-		pages: [...pages].slice(0, MAX_PALETTE_PAGES),
+		pages: [...pages.values()].slice(0, MAX_PALETTE_PAGES),
 		...truncated === void 0 ? {} : { truncated }
 	};
 }
@@ -13864,9 +20552,9 @@ function resolveCardIdentities(workspaceRoot, doc) {
 }
 /** 画布保存：只接受链 YAML 文本，交给 saveChain（唯一写入口），来源标 canvas。 */
 async function handleSave(deps, req, res, url) {
-	const body = await readBody(req);
+	const body = await readBody$1(req);
 	if (body === void 0) {
-		fail(res, 413, `请求体超过 ${MAX_SAVE_BODY_BYTES} 字节上限`, "payload-too-large");
+		fail$2(res, 413, `请求体超过 ${MAX_SAVE_BODY_BYTES} 字节上限`, "payload-too-large");
 		return;
 	}
 	let input;
@@ -13876,29 +20564,29 @@ async function handleSave(deps, req, res, url) {
 		if (typeof parsed.chainYaml === "string" && parsed.chainYaml.trim().length > 0) input = parsed.chainYaml;
 		else if (parsed.doc !== null && typeof parsed.doc === "object") input = parsed.doc;
 		else {
-			fail(res, 400, "请求体必须形如 {\"doc\": {…链文档…}} 或 {\"chainYaml\": \"<链 YAML 文本>\"}", "bad-param");
+			fail$2(res, 400, "请求体必须形如 {\"doc\": {…链文档…}} 或 {\"chainYaml\": \"<链 YAML 文本>\"}", "bad-param");
 			return;
 		}
 		if (parsed.source === "import") source = "import";
 		else if (parsed.source !== void 0 && parsed.source !== "canvas") {
-			fail(res, 400, `source 只接受 canvas / import，收到 ${String(parsed.source)}`, "bad-param");
+			fail$2(res, 400, `source 只接受 canvas / import，收到 ${String(parsed.source)}`, "bad-param");
 			return;
 		}
 	} catch {
-		fail(res, 400, "请求体不是合法 JSON", "bad-json");
+		fail$2(res, 400, "请求体不是合法 JSON", "bad-json");
 		return;
 	}
-	const workspaceRoot = await resolveRoot(deps, url);
+	const workspaceRoot = await resolveRoot$1(deps, url);
 	const saved = saveChain(workspaceRoot, input, { source });
 	if (!saved.ok) {
-		ok(res, {
+		ok$2(res, {
 			ok: false,
 			code: saved.issues.some((issue) => issue.code === "card-not-imported") ? "card-not-imported" : "invalid-chain",
 			issues: toIssues(saved.issues)
 		});
 		return;
 	}
-	ok(res, {
+	ok$2(res, {
 		ok: true,
 		version: saved.version,
 		path: saved.path,
@@ -13912,29 +20600,29 @@ async function handleSave(deps, req, res, url) {
 * 改名语义与「不改内容、不改版本号」的边界见 `chains/store.ts` 的 renameChainFlow / renameChainDomain。
 */
 async function handleRename(deps, req, res, url) {
-	const body = await readBody(req);
+	const body = await readBody$1(req);
 	if (body === void 0) {
-		fail(res, 413, `请求体超过 ${MAX_SAVE_BODY_BYTES} 字节`, "too-large");
+		fail$2(res, 413, `请求体超过 ${MAX_SAVE_BODY_BYTES} 字节`, "too-large");
 		return;
 	}
 	let parsed;
 	try {
 		parsed = JSON.parse(body);
 	} catch {
-		fail(res, 400, "请求体不是合法 JSON", "bad-json");
+		fail$2(res, 400, "请求体不是合法 JSON", "bad-json");
 		return;
 	}
 	const site = typeof parsed.site === "string" ? parsed.site.trim() : "";
 	const newName = typeof parsed.newName === "string" ? parsed.newName.trim() : "";
 	if (site === "" || newName === "") {
-		fail(res, 400, "site 与 newName 必须是非空字符串", "bad-param");
+		fail$2(res, 400, "site 与 newName 必须是非空字符串", "bad-param");
 		return;
 	}
-	const workspaceRoot = await resolveRoot(deps, url);
+	const workspaceRoot = await resolveRoot$1(deps, url);
 	if (parsed.kind === "flow") {
 		const flow = typeof parsed.flow === "string" ? parsed.flow.trim() : "";
 		if (flow === "") {
-			fail(res, 400, "kind=flow 时必须给 flow", "bad-param");
+			fail$2(res, 400, "kind=flow 时必须给 flow", "bad-param");
 			return;
 		}
 		const result = renameChainFlow(workspaceRoot, site, flow, newName);
@@ -13942,13 +20630,13 @@ async function handleRename(deps, req, res, url) {
 			failRename(res, result);
 			return;
 		}
-		ok(res, result);
+		ok$2(res, result);
 		return;
 	}
 	if (parsed.kind === "domain") {
 		const domain = typeof parsed.domain === "string" ? parsed.domain.trim() : "";
 		if (domain === "") {
-			fail(res, 400, "kind=domain 时必须给 domain", "bad-param");
+			fail$2(res, 400, "kind=domain 时必须给 domain", "bad-param");
 			return;
 		}
 		const result = renameChainDomain(workspaceRoot, site, domain, newName);
@@ -13956,10 +20644,10 @@ async function handleRename(deps, req, res, url) {
 			failRename(res, result);
 			return;
 		}
-		ok(res, result);
+		ok$2(res, result);
 		return;
 	}
-	fail(res, 400, `kind 只接受 flow / domain，收到 ${String(parsed.kind)}`, "bad-param");
+	fail$2(res, 400, `kind 只接受 flow / domain，收到 ${String(parsed.kind)}`, "bad-param");
 }
 /** 改名失败码 → HTTP 状态（错误的可读消息原样透出给面板）。 */
 function failRename(res, result) {
@@ -13979,7 +20667,7 @@ function toIssues(issues) {
 		reason: issue.reason
 	}));
 }
-function readBody(req) {
+function readBody$1(req) {
 	return new Promise((resolve, reject) => {
 		const chunks = [];
 		let size = 0;
@@ -13996,14 +20684,14 @@ function readBody(req) {
 		req.on("error", reject);
 	});
 }
-function ok(res, data) {
-	send(res, 200, {
+function ok$2(res, data) {
+	send$1(res, 200, {
 		success: true,
 		data
 	});
 }
-function fail(res, status, error, code) {
-	send(res, status, code === void 0 ? {
+function fail$2(res, status, error, code) {
+	send$1(res, status, code === void 0 ? {
 		success: false,
 		error
 	} : {
@@ -14012,12 +20700,2510 @@ function fail(res, status, error, code) {
 		code
 	});
 }
-function send(res, status, body) {
+function send$1(res, status, body) {
 	res.writeHead(status, {
 		"content-type": "application/json; charset=utf-8",
 		"cache-control": "no-store"
 	});
 	res.end(JSON.stringify(body));
+}
+
+//#endregion
+//#region src/uitest/panel-routes.ts
+/**
+* UI 测试面板数据面：`/dashboard/api/dataforge/ui-tests/*`。
+*
+* 与采集/编排同一前缀、同一套信封（200 {success:true,data} / 4xx {success:false,error,code}），
+* 由同一份 `PanelRouteRegistrar` 注册；入口在采集 handler 里分派（见 capture/panel-routes 的
+* 说明：同一前缀只注册一次，子路径在自己代码里分派）。
+*
+* 路由面（读为主 + 用户显式操作）：
+*   GET  /ui-tests/overview                     网站/流程/版本摘要 + 最近运行 + 录制会话
+*   GET  /ui-tests/script?site&flow&version     单版本脚本（doc + yaml + 版本列表）
+*   POST /ui-tests/script                       手写/导入脚本（只经 saveUiScript 落新版本）
+*   POST /ui-tests/record/open                  开可见 Chrome（不开始录，先登录）
+*   POST /ui-tests/record/start                 开始录制
+*   POST /ui-tests/record/stop                  停止录制（可选保存为脚本）
+*   POST /ui-tests/record/close                 关闭录制会话
+*   GET  /ui-tests/record/sessions              录制会话列表
+*   POST /ui-tests/run                          回放：不带 confirm 只回计划卡
+*   GET  /ui-tests/runs                         最近运行
+*   GET  /ui-tests/runs/:id                     运行详情（事件流）
+*   GET  /ui-tests/runs/:id/evidence?name=…     失败截图/现场 HTML（白名单文件名）
+*
+* 纪律：脚本落盘只经 saveUiScript（校验全过才落新版本）；cookie 值永不出壳；
+* 运行证据只允许 failure.png / failure.html（防路径穿越）。
+*
+* @module dsh-dataforge/uitest/panel-routes
+*/
+const UI_TEST_API_PREFIX = "/ui-tests";
+/** 脚本 YAML 可能不小；录制/回放请求都是小 JSON。 */
+const MAX_SCRIPT_BODY_BYTES = 1048576;
+const MAX_SMALL_BODY_BYTES = 65536;
+/** 是否本模块的请求（两种 URL 形态都认）。 */
+function isUiTestRequest(url) {
+	const pathname = new URL(url ?? "/", "http://panel.localhost").pathname;
+	return pathname.includes("/dataforge/ui-tests") || pathname.startsWith("/ui-tests");
+}
+/**
+* 构造 UI 测试面板 handler。
+*
+* 返回 true = 本 handler 已接管（含 405/404），false = 不是本模块路径，交回上层分派。
+*/
+function createUiTestPanelHandler(deps) {
+	return (req, res) => {
+		const url = new URL(req.url ?? "/", "http://panel.localhost");
+		if (!isUiTestRequest(req.url)) return false;
+		const suffix = stripPrefix$1(url.pathname);
+		try {
+			dispatch(deps, req, res, url, suffix, (req.method ?? "GET").toUpperCase());
+		} catch (error) {
+			fail$1(res, 500, String(error?.message ?? error), "internal");
+		}
+		return true;
+	};
+}
+async function dispatch(panel, req, res, url, suffix, method) {
+	const workspaceRoot = await resolveRoot(panel, url);
+	const deps = {
+		...panel.deps,
+		resolveWorkspaceRoot: async () => workspaceRoot
+	};
+	if (method === "POST") {
+		if (suffix === "/script") {
+			const body = await readJson(req, MAX_SCRIPT_BODY_BYTES);
+			if (body === void 0) return fail$1(res, 400, "请求体不是合法 JSON", "bad-json");
+			const record = asRecord(body);
+			const yamlRaw = record["yaml"];
+			const docRaw = record["doc"];
+			let saved;
+			if (typeof yamlRaw === "string" && yamlRaw.trim() !== "") saved = await saveUiScriptForPanel(deps, workspaceRoot, yamlRaw, "agent");
+			else if (docRaw !== void 0) saved = saveUiScriptDocForPanel(workspaceRoot, docRaw, "canvas");
+			else return fail$1(res, 400, "缺 yaml 或 doc 字段", "bad-body");
+			if (!saved.ok) return fail$1(res, 400, `脚本未通过校验：${saved.issues.map((item) => `${item.target}：${item.reason}`).join("；")}`, "invalid-ui-script");
+			return ok$1(res, {
+				site: saved.doc.meta.site,
+				flow: saved.doc.meta.flow,
+				version: saved.version,
+				path: saved.path
+			});
+		}
+		if (suffix === "/record/pick") {
+			const record = asRecord(await readJson(req, MAX_SMALL_BODY_BYTES));
+			const sessionId = stringField(record, "sessionId");
+			if (sessionId === void 0) return fail$1(res, 400, "缺 sessionId", "bad-body");
+			const timeout = typeof record["timeoutMs"] === "number" && record["timeoutMs"] > 0 ? Math.min(record["timeoutMs"], 6e5) : void 0;
+			return ok$1(res, await pickSelectorForTool(deps, {
+				sessionId,
+				...timeout === void 0 ? {} : { timeoutMs: timeout }
+			}));
+		}
+		if (suffix === "/record/open") {
+			const record = asRecord(await readJson(req, MAX_SMALL_BODY_BYTES));
+			const startUrl = typeof record["startUrl"] === "string" ? record["startUrl"] : "";
+			if (startUrl === "") return fail$1(res, 400, "缺 startUrl", "bad-body");
+			const sessionOwner = url.searchParams.get("session")?.trim();
+			const opened = await openRecordingForTool(deps, {
+				startUrl,
+				...typeof record["headless"] === "boolean" ? { headless: record["headless"] } : {},
+				...sessionOwner === void 0 || sessionOwner === "" ? {} : { ownerSessionId: sessionOwner }
+			});
+			return opened.ok ? ok$1(res, opened) : fail$1(res, 400, opened.error ?? "打开录制会话失败", "record-open-failed");
+		}
+		if (suffix === "/record/start") {
+			const sessionId = stringField(asRecord(await readJson(req, MAX_SMALL_BODY_BYTES)), "sessionId");
+			if (sessionId === void 0) return fail$1(res, 400, "缺 sessionId", "bad-body");
+			const started = await startRecordingForTool(deps, { sessionId });
+			return started.ok ? ok$1(res, started) : fail$1(res, 400, started.error ?? "开始录制失败", "record-start-failed");
+		}
+		if (suffix === "/record/stop") {
+			const record = asRecord(await readJson(req, MAX_SMALL_BODY_BYTES));
+			const sessionId = stringField(record, "sessionId");
+			if (sessionId === void 0) return fail$1(res, 400, "缺 sessionId", "bad-body");
+			const stopped = await stopRecordingForTool(deps, void 0, {
+				sessionId,
+				...stringField(record, "site") === void 0 ? {} : { site: stringField(record, "site") },
+				...stringField(record, "flow") === void 0 ? {} : { flow: stringField(record, "flow") },
+				...stringField(record, "domain") === void 0 ? {} : { domain: stringField(record, "domain") },
+				...stringField(record, "note") === void 0 ? {} : { note: stringField(record, "note") },
+				...typeof record["save"] === "boolean" ? { save: record["save"] } : {}
+			});
+			return stopped.ok ? ok$1(res, stopped) : fail$1(res, 400, stopped.error ?? "停止录制失败", "record-stop-failed");
+		}
+		if (suffix === "/record/close") {
+			const sessionId = stringField(asRecord(await readJson(req, MAX_SMALL_BODY_BYTES)), "sessionId");
+			if (sessionId === void 0) return fail$1(res, 400, "缺 sessionId", "bad-body");
+			const closed = await closeRecordingForTool(deps, { sessionId });
+			return closed.ok ? ok$1(res, closed) : fail$1(res, 400, closed.error ?? "关闭失败", "record-close-failed");
+		}
+		if (suffix === "/batch/run") {
+			const record = asRecord(await readJson(req, MAX_SMALL_BODY_BYTES));
+			const inputsRaw = record["inputs"];
+			const inputs = {};
+			if (typeof inputsRaw === "object" && inputsRaw !== null && !Array.isArray(inputsRaw)) {
+				for (const [key, value] of Object.entries(inputsRaw)) if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") inputs[key] = String(value);
+			}
+			const flowsRaw = record["flows"];
+			const flows = Array.isArray(flowsRaw) ? flowsRaw.filter((item) => typeof item === "string") : void 0;
+			return ok$1(res, await batchRunForTool(deps, void 0, {
+				...stringField(record, "site") === void 0 ? {} : { site: stringField(record, "site") },
+				...flows === void 0 ? {} : { flows },
+				inputs,
+				...typeof record["limit"] === "number" ? { limit: record["limit"] } : {},
+				confirm: record["confirm"] === true,
+				...record["dryRun"] === true ? { dryRun: true } : {}
+			}));
+		}
+		if (suffix === "/run") {
+			const record = asRecord(await readJson(req, MAX_SMALL_BODY_BYTES));
+			const site = stringField(record, "site");
+			const flow = stringField(record, "flow");
+			if (site === void 0 || flow === void 0) return fail$1(res, 400, "缺 site / flow", "bad-body");
+			const inputsRaw = record["inputs"];
+			const inputs = {};
+			if (typeof inputsRaw === "object" && inputsRaw !== null && !Array.isArray(inputsRaw)) {
+				for (const [key, value] of Object.entries(inputsRaw)) if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") inputs[key] = String(value);
+			}
+			const sessionOwner = url.searchParams.get("session")?.trim();
+			return ok$1(res, await runUiScriptForTool(deps, void 0, {
+				site,
+				flow,
+				...typeof record["version"] === "number" ? { version: record["version"] } : {},
+				inputs,
+				confirm: record["confirm"] === true,
+				...record["dryRun"] === true ? { dryRun: true } : {},
+				...typeof record["headless"] === "boolean" ? { headless: record["headless"] } : {},
+				...typeof record["slowMoMs"] === "number" ? { slowMoMs: record["slowMoMs"] } : {},
+				...typeof record["highlightClicks"] === "boolean" ? { highlightClicks: record["highlightClicks"] } : {},
+				...typeof record["holdMs"] === "number" ? { holdMs: record["holdMs"] } : {},
+				...sessionOwner === void 0 || sessionOwner === "" ? {} : { ownerSessionId: sessionOwner }
+			}));
+		}
+		return fail$1(res, 405, `UI 测试面板不支持 ${method} ${suffix}`, "method-not-allowed");
+	}
+	if (method !== "GET") return fail$1(res, 405, `UI 测试面板只支持 GET 与 POST，收到 ${method}`, "method-not-allowed");
+	if (suffix === "/overview") {
+		const scripts = listUiScripts(workspaceRoot);
+		return ok$1(res, {
+			generatedAt: Date.now(),
+			scripts: scripts.map((script) => ({
+				...script,
+				versions: uiVersionInfosForPanel(workspaceRoot, script.site, script.flow)
+			})),
+			runs: listUiRuns(deps.dataRoot, 10),
+			sessions: recordingSessionsOf(deps),
+			uiTestsRootHint: `${workspaceRoot}/.dsh/dataforge/ui-tests`,
+			browser: (() => {
+				const selection = deps.resolveEngine();
+				return {
+					engine: selection.engine.kind,
+					label: selection.engine.label,
+					available: selection.engine.available(),
+					...selection.degraded === void 0 ? {} : { degraded: selection.degraded },
+					installCommand: "dsh plugin --profile desktop add dsh-builtin-browser@0.4.13"
+				};
+			})()
+		});
+	}
+	if (suffix === "/record/sessions") return ok$1(res, { sessions: recordingSessionsOf(deps) });
+	if (suffix === "/runs") return ok$1(res, { runs: listUiRuns(deps.dataRoot, clampLimit(url.searchParams.get("limit"), 20, 200)) });
+	if (suffix === "/batch/runs") return ok$1(res, { batches: listUiBatches(deps.dataRoot, clampLimit(url.searchParams.get("limit"), 20, 100)) });
+	if (suffix.startsWith("/batch/")) {
+		const [idRaw, extra] = suffix.slice(7).split("/");
+		const batchId = decodeURIComponent(idRaw ?? "");
+		if (batchId === "") return fail$1(res, 404, "缺 batchId", "unknown-path");
+		if (extra === "report") {
+			const format = url.searchParams.get("format") === "json" ? "json" : "md";
+			const path = batchReportPath(deps.dataRoot, batchId, format);
+			if (path === void 0) return fail$1(res, 404, "报告不存在", "not-found");
+			return serveReport(res, path, format);
+		}
+		if (extra !== void 0) return fail$1(res, 404, `不认识的路径：${suffix}`, "unknown-path");
+		const batch = readUiBatch(deps.dataRoot, batchId);
+		if (batch === void 0) return fail$1(res, 404, `UI 批次 ${batchId} 不存在`, "not-found");
+		return ok$1(res, { batch });
+	}
+	if (suffix.startsWith("/runs/")) {
+		const [runIdRaw, extra] = suffix.slice(6).split("/");
+		const runId = decodeURIComponent(runIdRaw ?? "");
+		if (runId === "") return fail$1(res, 404, "缺 runId", "unknown-path");
+		if (extra === "evidence") {
+			const name = url.searchParams.get("name") ?? "";
+			const path = evidencePathOf(deps.dataRoot, runId, name);
+			if (path === void 0) return fail$1(res, 400, "证据文件名只支持 success.png / failure.png / failure.html", "bad-evidence");
+			return serveEvidence(res, path, name);
+		}
+		if (extra !== void 0) return fail$1(res, 404, `不认识的路径：${suffix}`, "unknown-path");
+		const run = readUiRunRecord(deps.dataRoot, runId);
+		if (run === void 0) return fail$1(res, 404, `UI 运行 ${runId} 不存在`, "not-found");
+		return ok$1(res, {
+			run,
+			events: readUiRunEvents(deps.dataRoot, runId)
+		});
+	}
+	if (suffix === "/script") {
+		const site = url.searchParams.get("site") ?? "";
+		const flow = url.searchParams.get("flow") ?? "";
+		if (site === "" || flow === "") return fail$1(res, 400, "缺 site / flow", "bad-query");
+		const versionRaw = url.searchParams.get("version");
+		const version = versionRaw === null ? void 0 : Number(versionRaw);
+		const loaded = loadUiScriptForPanel(workspaceRoot, site, flow, Number.isFinite(version) ? version : void 0);
+		if (!loaded.ok) return fail$1(res, 404, loaded.message, loaded.code, {
+			availableVersions: loaded.availableVersions,
+			...loaded.issues === void 0 ? {} : { issues: loaded.issues }
+		});
+		return ok$1(res, {
+			site,
+			flow,
+			version: loaded.version,
+			availableVersions: loaded.availableVersions,
+			yaml: loaded.yaml,
+			doc: loaded.doc
+		});
+	}
+	return fail$1(res, 404, `不认识的路径：${suffix}`, "unknown-path");
+}
+/** 前缀剥离：完整路径与剩余路径两种形态。 */
+function stripPrefix$1(pathname) {
+	const full = `/dashboard/api/dataforge${UI_TEST_API_PREFIX}`;
+	if (pathname.startsWith(full)) return pathname.slice(full.length) || "/";
+	if (pathname.startsWith("/ui-tests")) return pathname.slice(9) || "/";
+	return pathname;
+}
+async function resolveRoot(panel, url) {
+	const raw = url.searchParams.get("workspace")?.trim();
+	if (raw !== void 0 && raw.length > 0 && isAbsolute(raw)) try {
+		if (statSync(raw).isDirectory()) return raw;
+	} catch {}
+	return panel.resolveWorkspaceRoot();
+}
+function asRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+}
+function stringField(record, key) {
+	const value = record[key];
+	return typeof value === "string" && value.trim() !== "" ? value.trim() : void 0;
+}
+function clampLimit(raw, fallback, max) {
+	const value = raw === null ? NaN : Number(raw);
+	if (!Number.isFinite(value) || value <= 0) return fallback;
+	return Math.min(Math.floor(value), max);
+}
+function serveEvidence(res, path, name) {
+	let data;
+	try {
+		data = readFileSync(path);
+	} catch {
+		fail$1(res, 404, "证据文件不存在", "not-found");
+		return;
+	}
+	res.statusCode = 200;
+	res.setHeader("content-type", name.endsWith(".png") ? "image/png" : "text/html; charset=utf-8");
+	res.setHeader("cache-control", "no-store");
+	res.end(data);
+}
+function serveReport(res, path, format) {
+	let data;
+	try {
+		data = readFileSync(path);
+	} catch {
+		fail$1(res, 404, "报告不存在", "not-found");
+		return;
+	}
+	res.statusCode = 200;
+	res.setHeader("content-type", format === "md" ? "text/markdown; charset=utf-8" : "application/json; charset=utf-8");
+	res.setHeader("cache-control", "no-store");
+	res.end(data);
+}
+function send(res, status, body) {
+	const text = JSON.stringify(body);
+	res.statusCode = status;
+	res.setHeader("content-type", "application/json; charset=utf-8");
+	res.setHeader("cache-control", "no-store");
+	res.end(text);
+}
+function ok$1(res, data) {
+	send(res, 200, {
+		success: true,
+		data
+	});
+}
+function fail$1(res, status, error, code, extra) {
+	send(res, status, {
+		success: false,
+		error,
+		...code === void 0 ? {} : { code },
+		...extra ?? {}
+	});
+}
+var BodyTooLargeError = class extends Error {};
+function readJson(req, limit) {
+	return readBody(req, limit).then((text) => {
+		try {
+			return JSON.parse(text === "" ? "{}" : text);
+		} catch {
+			return;
+		}
+	}).catch(() => void 0);
+}
+function readBody(req, limit) {
+	return new Promise((resolve, reject) => {
+		let size = 0;
+		const chunks = [];
+		req.on("data", (chunk) => {
+			size += chunk.length;
+			if (size > limit) {
+				reject(new BodyTooLargeError(`请求体超过 ${limit} 字节`));
+				req.destroy();
+				return;
+			}
+			chunks.push(chunk);
+		});
+		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+		req.on("error", reject);
+	});
+}
+
+//#endregion
+//#region src/datasets/panel-routes.ts
+const ARTIFACTS_API_PREFIX = "/artifacts";
+function sendJson(res, status, body) {
+	res.writeHead(status, {
+		"content-type": "application/json; charset=utf-8",
+		"cache-control": "no-store"
+	});
+	res.end(JSON.stringify(body));
+}
+function ok(res, data) {
+	sendJson(res, 200, {
+		success: true,
+		data
+	});
+}
+function fail(res, status, error, code) {
+	sendJson(res, status, {
+		success: false,
+		error,
+		...code === void 0 ? {} : { code }
+	});
+}
+function stripPrefix(pathname) {
+	const full = `/dashboard/api/dataforge${ARTIFACTS_API_PREFIX}`;
+	if (pathname.startsWith(full)) return pathname.slice(full.length) || "/";
+	if (pathname.startsWith("/artifacts")) return pathname.slice(10) || "/";
+}
+function readDataset(dataRoot, runId) {
+	const path = join(dataRoot, "datasets", `${runId}.json`);
+	if (!existsSync(path)) return void 0;
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf8"));
+		return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : void 0;
+	} catch {
+		return;
+	}
+}
+function kindOf(dataset) {
+	const kind = dataset?.["kind"];
+	if (kind === "ui-run-dataset") return "ui";
+	if (kind === "run-dataset") return "chain";
+	return "unknown";
+}
+function listArtifacts(dataRoot) {
+	const runIds = /* @__PURE__ */ new Set();
+	const datasetDir = join(dataRoot, "datasets");
+	if (existsSync(datasetDir)) {
+		for (const name of readdirSync(datasetDir)) if (name.endsWith(".json")) runIds.add(name.slice(0, -5));
+	}
+	const evidenceDir = join(dataRoot, "evidence");
+	if (existsSync(evidenceDir)) for (const name of readdirSync(evidenceDir)) try {
+		if (statSync(join(evidenceDir, name)).isDirectory()) runIds.add(name);
+	} catch {}
+	const rows = [];
+	for (const runId of runIds) {
+		if (!/^[A-Za-z0-9._-]+$/.test(runId)) continue;
+		const dataset = readDataset(dataRoot, runId);
+		let datasetSize;
+		try {
+			datasetSize = statSync(join(datasetDir, `${runId}.json`)).size;
+		} catch {
+			datasetSize = void 0;
+		}
+		const reportPath = join(evidenceDir, runId, "report.html");
+		rows.push({
+			runId,
+			kind: kindOf(dataset),
+			...typeof dataset?.["status"] === "string" ? { status: dataset["status"] } : {},
+			...typeof dataset?.["site"] === "string" ? { site: dataset["site"] } : {},
+			...typeof dataset?.["flow"] === "string" ? { flow: dataset["flow"] } : {},
+			...typeof dataset?.["createdAt"] === "string" ? { createdAt: dataset["createdAt"] } : {},
+			hasDataset: dataset !== void 0,
+			hasReport: existsSync(reportPath),
+			...datasetSize === void 0 ? {} : { datasetSize }
+		});
+	}
+	return rows.sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")));
+}
+function sendFile(res, path, contentType) {
+	if (!existsSync(path)) {
+		fail(res, 404, "产物不存在", "not-found");
+		return;
+	}
+	res.writeHead(200, {
+		"content-type": contentType,
+		"cache-control": "no-store"
+	});
+	res.end(readFileSync(path));
+}
+/**
+* 构造 artifacts handler；返回 true = 已接管，false = 不是 /artifacts 路径。
+*/
+function createArtifactsPanelHandler(deps) {
+	return (req, res) => {
+		const url = new URL(req.url ?? "/", "http://panel.localhost");
+		const suffix = stripPrefix(url.pathname);
+		if (suffix === void 0) return false;
+		if ((req.method ?? "GET").toUpperCase() !== "GET") {
+			fail(res, 405, "运行产物只读：只支持 GET", "method-not-allowed");
+			return true;
+		}
+		if (suffix === "/" || suffix === "") {
+			const all = listArtifacts(deps.dataRoot);
+			const kind = url.searchParams.get("kind");
+			const status = url.searchParams.get("status");
+			const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+			const filtered = all.filter((row) => {
+				if (kind !== null && kind !== "" && row.kind !== kind) return false;
+				if (status !== null && status !== "" && row.status !== status) return false;
+				if (q !== "" && !`${row.runId} ${row.site ?? ""} ${row.flow ?? ""}`.toLowerCase().includes(q)) return false;
+				return true;
+			});
+			const limitRaw = Number(url.searchParams.get("limit") ?? "50");
+			const offsetRaw = Number(url.searchParams.get("offset") ?? "0");
+			const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 200) : 50;
+			const offset = Number.isFinite(offsetRaw) ? Math.max(Math.floor(offsetRaw), 0) : 0;
+			ok(res, {
+				artifacts: filtered.slice(offset, offset + limit),
+				total: filtered.length,
+				limit,
+				offset
+			});
+			return true;
+		}
+		const match = /^\/([A-Za-z0-9._-]+)\/(report|dataset|asset|success\.png|failure\.png|failure\.html)$/.exec(suffix);
+		if (match === null) {
+			fail(res, 404, `不认识的产物路径：${suffix}`, "unknown-path");
+			return true;
+		}
+		const runId = match[1];
+		const kind = match[2];
+		if (kind === "success.png" || kind === "failure.png" || kind === "failure.html") {
+			sendFile(res, join(deps.dataRoot, "evidence", runId, kind), kind.endsWith(".html") ? "text/html; charset=utf-8" : "image/png");
+			return true;
+		}
+		if (kind === "report") {
+			sendFile(res, join(deps.dataRoot, "evidence", runId, "report.html"), "text/html; charset=utf-8");
+			return true;
+		}
+		if (kind === "dataset") {
+			sendFile(res, join(deps.dataRoot, "datasets", `${runId}.json`), "application/json; charset=utf-8");
+			return true;
+		}
+		const name = url.searchParams.get("name") ?? "";
+		if (name !== "success.png" && name !== "failure.png" && name !== "failure.html") {
+			fail(res, 400, "证据文件名只支持 success.png / failure.png / failure.html", "bad-evidence");
+			return true;
+		}
+		sendFile(res, join(deps.dataRoot, "evidence", runId, name), name.endsWith(".html") ? "text/html; charset=utf-8" : "image/png");
+		return true;
+	};
+}
+
+//#endregion
+//#region src/uitest/selector-script.ts
+/**
+* 页面内选择器候选生成器（录制器与点选器共用）。
+*
+* 为什么单独成字符串常量：
+*   - 录制器要它把用户操作的元素变成候选链；
+*   - 面板「从页面点选元素加断言」也要它（否则一套选择器逻辑会分裂成两份，必然漂移）。
+* 页面脚本里挂 `window.__dfUiSelectorCandidates(el)`，幂等（已存在就跳过），
+* 多个模块重复注入不会重复定义。
+*
+* 候选顺序就是回放优先级：testid → id → name → aria-label → 文本 → CSS 路径。
+* 只生成「当前页面唯一命中」的候选；Playwright 专属选择器（`:has-text` / `text=`）
+* 在页面内 `querySelectorAll` 校验不了，由 stopping/回放阶段的 Playwright 引擎二次校验。
+*
+* @module dsh-dataforge/uitest/selector-script
+*/
+const SELECTOR_HELPER_SCRIPT = `(() => {
+  var VERSION = 2
+  if (typeof window.__dfUiSelectorCandidates === 'function' && window.__dfUiSelectorVersion === VERSION) return
+  window.__dfUiSelectorVersion = VERSION
+
+  function esc(value) {
+    if (window.CSS && CSS.escape) return CSS.escape(value)
+    return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\\\$&')
+  }
+  function textOf(el) {
+    return ((el.innerText || el.textContent || '') + '').replace(/\\s+/g, ' ').trim().slice(0, 40)
+  }
+  function unique(selector) {
+    try { return document.querySelectorAll(selector).length === 1 } catch (err) { return false }
+  }
+  function cssPath(el) {
+    var parts = []
+    var cur = el
+    while (cur && cur.nodeType === 1 && cur !== document.documentElement) {
+      if (cur.id && unique('#' + esc(cur.id))) { parts.unshift('#' + esc(cur.id)); break }
+      var part = cur.tagName.toLowerCase()
+      var parent = cur.parentElement
+      if (parent) {
+        var same = []
+        for (var i = 0; i < parent.children.length; i += 1) {
+          if (parent.children[i].tagName === cur.tagName) same.push(parent.children[i])
+        }
+        if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(cur) + 1) + ')'
+      }
+      parts.unshift(part)
+      if (parts.length >= 8) break
+      cur = cur.parentElement
+    }
+    return parts.join(' > ')
+  }
+  function addCandidate(out, selector) {
+    // Playwright 专属选择器（text= / :has-text）页面里校验不了唯一性，先收进来，
+    // 由回放阶段校验；纯 CSS 仍要求当前页唯一，避免录进歧义选择器。
+    var playwrightOnly = /^text=|:has-text\\(/.test(selector)
+    if (selector && out.indexOf(selector) < 0 && (playwrightOnly || unique(selector))) out.push(selector)
+  }
+  function quote(value) {
+    return String(value).replace(/\\\\/g, '\\\\\\\\').replace(/"/g, '\\\\"')
+  }
+  function candidatesFor(el) {
+    var out = []
+    if (!el || el.nodeType !== 1) return out
+    var attrs = ['data-testid', 'data-test-id', 'data-test', 'data-qa']
+    for (var i = 0; i < attrs.length; i += 1) {
+      var testId = el.getAttribute(attrs[i])
+      if (testId) addCandidate(out, '[' + attrs[i] + '="' + quote(testId) + '"]')
+    }
+    if (el.id) addCandidate(out, '#' + esc(el.id))
+    if (el.name && /^(INPUT|SELECT|TEXTAREA|FORM)$/.test(el.tagName)) {
+      addCandidate(out, el.tagName.toLowerCase() + '[name="' + quote(el.name) + '"]')
+    }
+    var aria = el.getAttribute('aria-label')
+    if (aria) addCandidate(out, el.tagName.toLowerCase() + '[aria-label="' + quote(aria) + '"]')
+    var placeholder = el.getAttribute('placeholder')
+    if (placeholder) addCandidate(out, el.tagName.toLowerCase() + '[placeholder="' + quote(placeholder) + '"]')
+    var title = el.getAttribute('title')
+    if (title) addCandidate(out, el.tagName.toLowerCase() + '[title="' + quote(title) + '"]')
+    var alt = el.getAttribute('alt')
+    if (alt && el.tagName === 'IMG') addCandidate(out, 'img[alt="' + quote(alt) + '"]')
+    var href = el.getAttribute('href')
+    if (href && el.tagName === 'A') addCandidate(out, 'a[href="' + quote(href) + '"]')
+    var role = el.getAttribute('role')
+    if (role) addCandidate(out, '[role="' + quote(role) + '"]')
+    var text = textOf(el)
+    if (text !== '' && (/^(BUTTON|A|LABEL)$/.test(el.tagName) || role)) {
+      if (role) addCandidate(out, '[role="' + quote(role) + '"]:has-text("' + quote(text) + '")')
+      addCandidate(out, el.tagName.toLowerCase() + ':has-text("' + quote(text) + '")')
+      addCandidate(out, 'text="' + quote(text) + '"')
+    }
+    var path = cssPath(el)
+    if (path) addCandidate(out, path)
+    return out.slice(0, 8)
+  }
+  window.__dfUiSelectorCandidates = candidatesFor
+})()`;
+/**
+* 点选器：让用户在可见会话里点一个元素，页面返回该元素的候选选择器。
+*
+* 是一个 Promise 表达式（Playwright `evaluate` 会 await 返回的 Promise）：
+*   - 捕获阶段吞掉 click/mousemove/keydown，避免误触页面业务（导航/提交）；
+*   - Esc 取消并 resolve `{ ok: false, cancelled: true }`；
+*   - 清理函数挂在 window 上，Node 侧超时可主动 cancel（避免 evaluate 永远挂着）。
+*/
+const PICKER_SCRIPT = `new Promise((resolve) => {
+  if (typeof window.__dfUiSelectorCandidates !== 'function') {
+    resolve({ ok: false, error: 'selector helper 未注入（请先打开/刷新会话页面）' })
+    return
+  }
+  if (typeof window.__dfUiPickerCancel === 'function') {
+    try { window.__dfUiPickerCancel() } catch (err) {}
+  }
+  var highlighted = null
+  var previousOutline = ''
+  var previousOffset = ''
+
+  function highlight(el) {
+    if (highlighted === el) return
+    restoreHighlight()
+    if (!el || el.nodeType !== 1) return
+    highlighted = el
+    previousOutline = el.style.outline
+    previousOffset = el.style.outlineOffset
+    el.style.outline = '2px solid #2563eb'
+    el.style.outlineOffset = '2px'
+  }
+  function restoreHighlight() {
+    if (!highlighted) return
+    highlighted.style.outline = previousOutline
+    highlighted.style.outlineOffset = previousOffset
+    highlighted = null
+  }
+  function cleanup() {
+    restoreHighlight()
+    window.removeEventListener('click', onClick, true)
+    window.removeEventListener('mousemove', onMove, true)
+    window.removeEventListener('keydown', onKey, true)
+    window.__dfUiPickerCancel = null
+  }
+  function resolveWith(payload) {
+    cleanup()
+    resolve(payload)
+  }
+  function onMove(event) {
+    event.preventDefault()
+    event.stopPropagation()
+    var el = event.target
+    if (typeof el.closest === 'function') {
+      el = el.closest('a,button,input,textarea,select,label,[role="button"],[role="link"],[role="tab"],[role="checkbox"],[role="menuitem"]') || el
+    }
+    highlight(el)
+  }
+  function onClick(event) {
+    event.preventDefault()
+    event.stopPropagation()
+    event.stopImmediatePropagation()
+    var el = event.target
+    if (typeof el.closest === 'function') {
+      el = el.closest('a,button,input,textarea,select,label,[role="button"],[role="link"],[role="tab"],[role="checkbox"],[role="menuitem"]') || el
+    }
+    var candidates = []
+    try { candidates = window.__dfUiSelectorCandidates(el) || [] } catch (err) {}
+    resolveWith({
+      ok: true,
+      pageUrl: location.href,
+      candidates: candidates,
+      selector: candidates.length > 0 ? candidates[0] : '',
+      element: {
+        tag: el.tagName,
+        id: el.id || '',
+        text: ((el.innerText || el.textContent || '') + '').replace(/\\s+/g, ' ').trim().slice(0, 60)
+      }
+    })
+  }
+  function onKey(event) {
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    event.stopPropagation()
+    event.stopImmediatePropagation()
+    resolveWith({ ok: false, cancelled: true })
+  }
+
+  window.__dfUiPickerCancel = function () {
+    resolveWith({ ok: false, cancelled: true })
+  }
+  window.addEventListener('click', onClick, true)
+  window.addEventListener('mousemove', onMove, true)
+  window.addEventListener('keydown', onKey, true)
+})`;
+
+//#endregion
+//#region src/uitest/recorder-core.ts
+var RecorderCore = class {
+	raw = [];
+	seenAt = [];
+	skippedSecrets = 0;
+	skippedUploads = 0;
+	lastSecretAt = 0;
+	singleCandidateSteps = 0;
+	now;
+	constructor(options = {}) {
+		this.now = options.now ?? Date.now;
+	}
+	/** 原始载荷 → 步骤（去重在这里做，页面脚本保持无状态）。 */
+	ingest(payload) {
+		if (typeof payload !== "object" || payload === null) return;
+		const record = payload;
+		const kind = typeof record.kind === "string" ? record.kind : "";
+		if (kind === "skip-secret") {
+			const now = this.now();
+			if (now - this.lastSecretAt > 2e3) this.skippedSecrets += 1;
+			this.lastSecretAt = now;
+			return;
+		}
+		const candidates = normalizeCandidateList(record.candidates);
+		const at = typeof record.at === "string" && record.at.length > 0 ? record.at.slice(0, 2e3) : void 0;
+		const now = this.now();
+		if (kind === "fill") {
+			const value = typeof record.value === "string" ? record.value : "";
+			if (candidates.length === 0) return;
+			const last = this.raw[this.raw.length - 1];
+			if (last !== void 0 && last.kind === "fill" && sameCandidates(normalizeCandidateList(last.candidates), candidates)) {
+				last.value = value;
+				last.at = at;
+				this.seenAt[this.seenAt.length - 1] = now;
+				return;
+			}
+			const fillFeatures = featuresFor(record);
+			this.push({
+				kind: "fill",
+				candidates,
+				value,
+				...fillFeatures === void 0 ? {} : { features: fillFeatures },
+				...at === void 0 ? {} : { at }
+			}, now);
+			return;
+		}
+		if (kind === "click") {
+			if (candidates.length === 0) return;
+			const clickPoint = normalizeClickPoint(record.clickPoint);
+			const features = normalizeFeatures(record.features);
+			const last = this.raw[this.raw.length - 1];
+			if (last !== void 0 && last.kind === "click" && sameCandidates(normalizeCandidateList(last.candidates), candidates) && now - (this.seenAt[this.seenAt.length - 1] ?? 0) < 500) return;
+			this.push({
+				kind: "click",
+				candidates,
+				isSubmitter: record.isSubmitter === true,
+				...clickPoint === void 0 ? {} : { clickPoint },
+				...features === void 0 ? {} : { features },
+				...at === void 0 ? {} : { at }
+			}, now);
+			return;
+		}
+		if (kind === "select") {
+			const value = typeof record.value === "string" ? record.value : "";
+			if (candidates.length === 0) return;
+			const selectFeatures = featuresFor(record);
+			this.push({
+				kind: "select",
+				candidates,
+				value,
+				...selectFeatures === void 0 ? {} : { features: selectFeatures },
+				...at === void 0 ? {} : { at }
+			}, now);
+			return;
+		}
+		if (kind === "submit") {
+			const last = this.raw[this.raw.length - 1];
+			const lastAt = this.seenAt[this.seenAt.length - 1] ?? 0;
+			if (last !== void 0 && last.kind === "click" && last.isSubmitter === true && now - lastAt < 1500) return;
+			const submitter = normalizeCandidateList(record.submitter);
+			this.push({
+				kind: "submit",
+				candidates: candidates.length > 0 ? candidates : submitter,
+				...at === void 0 ? {} : { at }
+			}, now);
+			return;
+		}
+		if (kind === "press") {
+			const key = typeof record.key === "string" ? record.key : "";
+			if (key === "") return;
+			const last = this.raw[this.raw.length - 1];
+			if (last !== void 0 && last.kind === "press" && last.key === key && now - (this.seenAt[this.seenAt.length - 1] ?? 0) < 500) return;
+			this.push({
+				kind: "press",
+				key,
+				candidates,
+				...at === void 0 ? {} : { at }
+			}, now);
+		}
+	}
+	push(payload, now) {
+		this.raw.push(payload);
+		this.seenAt.push(now);
+	}
+	/** 文件选择只计数（浏览器不暴露本地路径）。 */
+	recordUploadSkip() {
+		this.skippedUploads += 1;
+	}
+	/** 已收到的原始事件数（诊断用）。 */
+	get eventCount() {
+		return this.raw.length;
+	}
+	/** 原始事件 → 步骤（候选校验由调用方注入，核心不依赖浏览器实现）。 */
+	async finalize(validate) {
+		const steps = [];
+		let singleCandidate = 0;
+		for (const raw of this.raw) {
+			const kind = raw.kind;
+			if (kind !== "click" && kind !== "fill" && kind !== "select" && kind !== "submit" && kind !== "press") continue;
+			const checked = await validate(normalizeCandidateList(raw.candidates));
+			if (checked.length === 1) singleCandidate += 1;
+			const step = {
+				id: `s${steps.length + 1}`,
+				kind,
+				...checked.length > 0 ? { selector: checked[0] } : {},
+				...checked.length > 0 ? { candidates: checked } : {}
+			};
+			if (kind === "fill" || kind === "select") step.value = typeof raw.value === "string" ? raw.value : "";
+			if (kind === "press") step.key = typeof raw.key === "string" ? raw.key : "";
+			if (typeof raw.at === "string" && raw.at.length > 0) step.at = raw.at;
+			steps.push(step);
+		}
+		this.singleCandidateSteps = singleCandidate;
+		return steps;
+	}
+	/** 生成录制回执（文案与 Playwright 路径共用）。 */
+	result(steps, meta) {
+		const notices = [];
+		if (this.skippedSecrets > 0) notices.push(`跳过 ${this.skippedSecrets} 次密码输入（凭证不入脚本，回放请带 cookie）`);
+		if (this.skippedUploads > 0) notices.push(`跳过 ${this.skippedUploads} 次文件选择（浏览器不暴露本地路径，upload 步骤请手写）`);
+		if (this.raw.length > 0 && steps.length === 0) notices.push("没有录到可回放的步骤（可能只做了聚焦/滚动）");
+		return {
+			startUrl: meta.startUrl,
+			viewport: meta.viewport,
+			steps,
+			skippedSecrets: this.skippedSecrets,
+			skippedUploads: this.skippedUploads,
+			singleCandidateSteps: this.singleCandidateSteps,
+			totalSteps: steps.length,
+			...notices.length === 0 ? {} : { notice: notices.join("；") }
+		};
+	}
+};
+function featuresFor(record) {
+	return normalizeFeatures(record.features);
+}
+/** 收口点击坐标：数字/范围不合法就丢弃（旧客户端没有该字段时不影响录制）。 */
+function normalizeClickPoint(raw) {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return void 0;
+	const value = raw;
+	const num = (key) => {
+		const item = value[key];
+		return typeof item === "number" && Number.isFinite(item) ? item : void 0;
+	};
+	const fx = num("fx");
+	const fy = num("fy");
+	const x = num("x");
+	const y = num("y");
+	const vw = num("vw");
+	const vh = num("vh");
+	if (fx === void 0 || fy === void 0 || x === void 0 || y === void 0) return void 0;
+	if (fx < 0 || fx > 1 || fy < 0 || fy > 1 || vw === void 0 || vh === void 0 || vw <= 0 || vh <= 0) return void 0;
+	const tag = typeof value["tag"] === "string" && value["tag"] !== "" ? value["tag"] : void 0;
+	const bbox = [
+		"bx",
+		"by",
+		"bw",
+		"bh"
+	].map((key) => num(key));
+	const hasBox = bbox.every((item) => item !== void 0);
+	const name = typeof value["name"] === "string" && value["name"].trim() !== "" ? value["name"].trim().slice(0, 120) : void 0;
+	return {
+		fx,
+		fy,
+		x,
+		y,
+		vw,
+		vh,
+		...tag === void 0 ? {} : { tag },
+		...hasBox ? {
+			bx: bbox[0],
+			by: bbox[1],
+			bw: bbox[2],
+			bh: bbox[3]
+		} : {},
+		...name === void 0 ? {} : { name }
+	};
+}
+/** 候选列表清洗：去非字符串/空/重复/超长，最多 8 条。 */
+function normalizeCandidateList(value) {
+	if (!Array.isArray(value)) return [];
+	const out = [];
+	for (const item of value) {
+		if (typeof item !== "string") continue;
+		const candidate = item.trim();
+		if (candidate.length === 0 || candidate.length > 2e3) continue;
+		if (out.includes(candidate)) continue;
+		out.push(candidate);
+		if (out.length >= 8) break;
+	}
+	return out;
+}
+/** 两个候选链是否指向同一元素（以首候选为准——录制器按优先级排序）。 */
+function sameCandidates(left, right) {
+	if (left.length === 0 || right.length === 0) return false;
+	return left[0] === right[0];
+}
+
+//#endregion
+//#region src/uitest/recorder.ts
+/** 页面内记录器：只认 DOM 事件，不碰网络、不碰存储；选择器候选交给共享 helper。 */
+const RECORDER_SCRIPT = `(() => {
+  var VERSION = ${JSON.stringify(4)}
+  var existing = window.__dfUiRecorder
+  // 同版本：只重新激活；旧版本：先停掉旧监听器（它们都检查 state.active），再装新脚本。
+  if (existing !== undefined && existing.version === VERSION) { existing.active = true; return }
+  if (existing !== undefined) { try { existing.active = false } catch (err) {} }
+  var state = { active: true, version: VERSION }
+  window.__dfUiRecorder = state
+
+  function pageUrl() {
+    try { return location.href.slice(0, 2000) } catch (err) { return '' }
+  }
+  var candidatesFor = window.__dfUiSelectorCandidates || function () { return [] }
+
+  function nameOf(el) {
+    var aria = el.getAttribute('aria-label')
+    if (aria && aria.trim()) return aria.trim().slice(0, 80)
+    var text = ((el.innerText || el.textContent || '') + '').replace(/\s+/g, ' ').trim()
+    if (text) return text.slice(0, 80)
+    var value = el.getAttribute('value')
+    if (value && /^(INPUT|BUTTON)$/.test(el.tagName)) return value.trim().slice(0, 80)
+    var title = el.getAttribute('title')
+    if (title && title.trim()) return title.trim().slice(0, 80)
+    var placeholder = el.getAttribute('placeholder')
+    if (placeholder && placeholder.trim()) return placeholder.trim().slice(0, 80)
+    var alt = el.getAttribute('alt')
+    if (alt && alt.trim()) return alt.trim().slice(0, 80)
+    var nameAttr = el.getAttribute('name')
+    if (nameAttr && nameAttr.trim()) return nameAttr.trim().slice(0, 80)
+    return ''
+  }
+
+  function featuresFor(el) {
+    var f = { tag: String(el.tagName || '').toLowerCase() }
+    if (!f.tag) return f
+    var attrs = ['data-testid', 'data-test-id', 'data-test', 'data-qa']
+    for (var i = 0; i < attrs.length; i += 1) {
+      var testId = el.getAttribute(attrs[i])
+      if (testId) { f.testId = testId; break }
+    }
+    if (el.id) f.id = el.id
+    if (el.getAttribute('name')) f.name = el.getAttribute('name')
+    var aria = el.getAttribute('aria-label')
+    if (aria) f.ariaLabel = aria
+    var placeholder = el.getAttribute('placeholder')
+    if (placeholder) f.placeholder = placeholder
+    var role = el.getAttribute('role')
+    if (role) f.role = role
+    var type = el.getAttribute('type')
+    if (type) f.type = type
+    var title = el.getAttribute('title')
+    if (title) f.title = title
+    var alt = el.getAttribute('alt')
+    if (alt) f.alt = alt
+    if (f.tag === 'a' && el.getAttribute('href')) f.href = el.getAttribute('href')
+    if (f.tag === 'canvas') {
+      try {
+        var canvases = document.querySelectorAll('canvas')
+        var index = Array.prototype.indexOf.call(canvases, el)
+        if (index >= 0) f.canvasIndex = index
+      } catch (err) {}
+    }
+    if (/^(BUTTON|A|LABEL|SUMMARY)$/.test(el.tagName) || role) {
+      var text = ((el.innerText || el.textContent || '') + '').replace(/\s+/g, ' ').trim().slice(0, 80)
+      if (text) f.text = text
+    }
+    try {
+      var label = el.labels && el.labels[0]
+      if (!label && el.closest) label = el.closest('label')
+      if (label) {
+        var labelText = ((label.innerText || label.textContent || '') + '').replace(/\s+/g, ' ').trim().slice(0, 80)
+        if (labelText) f.label = labelText
+      }
+    } catch (err) {}
+    return f
+  }
+
+  function interactive(el) {
+    if (!el || el.nodeType !== 1) return null
+    return el.closest('a,button,input,textarea,select,label,[role="button"],[role="link"],[role="tab"],[role="checkbox"],[role="menuitem"]') || el
+  }
+  function isTextInput(el) {
+    if (!el || el.tagName !== 'INPUT') return false
+    var type = (el.type || 'text').toLowerCase()
+    return ['text', 'search', 'email', 'password', 'tel', 'url', 'number', 'date',
+      'datetime-local', 'month', 'week', 'time', 'color', 'range'].indexOf(type) >= 0
+  }
+  function isPassword(el) {
+    return !!el && el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'password'
+  }
+  function isSubmitControl(el) {
+    if (!el || el.nodeType !== 1) return false
+    if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'submit') return true
+    if (el.tagName === 'BUTTON') {
+      var type = (el.getAttribute('type') || 'submit').toLowerCase()
+      return type === 'submit' && el.closest('form') !== null
+    }
+    return false
+  }
+  function send(payload) {
+    try {
+      if (window.__dfUiRecordStep) { window.__dfUiRecordStep(payload); return }
+      // seam 载体（共享浏览器）：没有 binding，事件进页面队列，由宿主轮询 drain。
+      if (!window.__dfUiSeamQueue) window.__dfUiSeamQueue = []
+      window.__dfUiSeamQueue.push(payload)
+      if (window.__dfUiSeamQueue.length > 500) window.__dfUiSeamQueue.splice(0, window.__dfUiSeamQueue.length - 500)
+    } catch (err) {}
+  }
+
+  document.addEventListener('click', function (event) {
+    if (!state.active) return
+    var el = interactive(event.target)
+    if (!el) return
+    if (isPassword(el)) { send({ kind: 'skip-secret', at: pageUrl() }); return }
+    if (isTextInput(el)) return
+    // canvas 图表只能按坐标命中：把真实点击位置（元素内比例 + 视口坐标）一并录下来。
+    var rect = null
+    try { rect = el.getBoundingClientRect() } catch (err) { rect = null }
+    var clickPoint = rect && rect.width > 0 && rect.height > 0 ? {
+      x: event.clientX,
+      y: event.clientY,
+      fx: (event.clientX - rect.left) / rect.width,
+      fy: (event.clientY - rect.top) / rect.height,
+      vw: window.innerWidth,
+      vh: window.innerHeight,
+      tag: el.tagName,
+      bx: rect.left,
+      by: rect.top,
+      bw: rect.width,
+      bh: rect.height,
+      ...(nameOf(el) ? { name: nameOf(el) } : {})
+    } : undefined
+    send({
+      kind: 'click',
+      tag: el.tagName,
+      candidates: candidatesFor(el),
+      features: featuresFor(el),
+      isSubmitter: isSubmitControl(el),
+      ...(clickPoint ? { clickPoint: clickPoint } : {}),
+      at: pageUrl()
+    })
+  }, true)
+
+  document.addEventListener('input', function (event) {
+    if (!state.active) return
+    var el = event.target
+    if (!el || !/^(INPUT|TEXTAREA)$/.test(el.tagName)) return
+    if (isPassword(el)) { send({ kind: 'skip-secret', at: pageUrl() }); return }
+    if (el.tagName === 'INPUT' && isTextInput(el) === false) return
+    // 不做去抖：去抖会让「输入 → 立刻点击」在事件流里倒序（点击先到、输入后到），
+    // 回放时就会先点空表单再填值。连续输入由 Node 侧合并成最后一次值（同元素相邻 fill）。
+    send({ kind: 'fill', tag: el.tagName, candidates: candidatesFor(el), features: featuresFor(el), value: el.value, at: pageUrl() })
+  }, true)
+
+  document.addEventListener('change', function (event) {
+    if (!state.active) return
+    var el = event.target
+    if (!el || el.tagName !== 'SELECT') return
+    send({ kind: 'select', tag: el.tagName, candidates: candidatesFor(el), features: featuresFor(el), value: el.value, at: pageUrl() })
+  }, true)
+
+  document.addEventListener('submit', function (event) {
+    if (!state.active) return
+    var form = event.target
+    if (!form || form.tagName !== 'FORM') return
+    var submitter = event.submitter
+    send({
+      kind: 'submit',
+      tag: 'FORM',
+      candidates: candidatesFor(form),
+      features: featuresFor(form),
+      submitter: submitter ? candidatesFor(submitter) : [],
+      at: pageUrl()
+    })
+  }, true)
+
+  document.addEventListener('keydown', function (event) {
+    if (!state.active) return
+    var target = event.target
+    var key = event.key
+    if (key !== 'Escape' && key !== 'Tab' && key !== 'Enter') return
+    if (key === 'Enter') {
+      if (target && (isTextInput(target) || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) return
+      if (isSubmitControl(target)) return
+    }
+    send({ kind: 'press', key: key, candidates: target ? candidatesFor(target) : [], ...(target ? { features: featuresFor(target) } : {}), at: pageUrl() })
+  }, true)
+})()`;
+/** 录制器实例：一个页面同时只允许一个。 */
+var UiRecorder = class UiRecorder {
+	page;
+	context;
+	startUrl;
+	viewport;
+	core = new RecorderCore();
+	stopped = false;
+	constructor(page, context, startUrl, viewport) {
+		this.page = page;
+		this.context = context;
+		this.startUrl = startUrl;
+		this.viewport = viewport;
+	}
+	/** 开始录制：注入页面脚本 + 绑定事件回传 + 监听文件选择（只计数，不录路径）。 */
+	static async start(page, context) {
+		const state = PAGE_STATE.get(page);
+		if (state?.current !== void 0) return state.current;
+		const ctx = context ?? page.context();
+		let viewport = {
+			width: 1280,
+			height: 720
+		};
+		try {
+			const size = page.viewportSize();
+			if (size !== null && size.width > 0 && size.height > 0) viewport = {
+				width: size.width,
+				height: size.height
+			};
+		} catch {}
+		const recorder = new UiRecorder(page, ctx, safePageUrl(page), viewport);
+		await recorder.install();
+		const installedState = PAGE_STATE.get(page);
+		if (installedState !== void 0) installedState.current = recorder;
+		return recorder;
+	}
+	async install() {
+		let state = PAGE_STATE.get(this.page);
+		if (state === void 0) {
+			state = { installed: false };
+			PAGE_STATE.set(this.page, state);
+		}
+		if (!state.installed) {
+			state.installed = true;
+			await this.page.exposeBinding("__dfUiRecordStep", (_source, payload) => {
+				PAGE_STATE.get(this.page)?.current?.ingest(payload);
+			});
+		}
+		await this.page.evaluate(SELECTOR_HELPER_SCRIPT).catch(() => void 0);
+		await this.page.evaluate(RECORDER_SCRIPT).catch(() => void 0);
+		await this.context.addInitScript(SELECTOR_HELPER_SCRIPT).catch(() => void 0);
+		await this.context.addInitScript(RECORDER_SCRIPT).catch(() => void 0);
+		this.page.on("filechooser", () => {
+			this.core.recordUploadSkip();
+		});
+	}
+	/** 原始载荷 → 核心（去重/脱敏都在 RecorderCore）。 */
+	ingest(payload) {
+		if (this.stopped) return;
+		this.core.ingest(payload);
+	}
+	/** 停止录制：等一拍 → 停用页面监听 → 候选校验 → 生成步骤。 */
+	async stop() {
+		if (this.stopped) return this.core.result([], {
+			startUrl: this.startUrl,
+			viewport: this.viewport
+		});
+		await sleep$1(50);
+		this.stopped = true;
+		if (PAGE_STATE.get(this.page)?.current === this) PAGE_STATE.get(this.page).current = void 0;
+		await this.page.evaluate(`(() => { if (window.__dfUiRecorder) window.__dfUiRecorder.active = false })()`).catch(() => void 0);
+		const steps = await this.core.finalize((candidates) => this.checkCandidates(candidates));
+		return this.core.result(steps, {
+			startUrl: this.startUrl,
+			viewport: this.viewport
+		});
+	}
+	/** 取消录制：不生成步骤（用于异常路径）。 */
+	async cancel() {
+		if (this.stopped) return;
+		this.stopped = true;
+		if (PAGE_STATE.get(this.page)?.current === this) PAGE_STATE.get(this.page).current = void 0;
+		await this.page.evaluate(`(() => { if (window.__dfUiRecorder) window.__dfUiRecorder.active = false })()`).catch(() => void 0);
+	}
+	/** 候选唯一性校验：只留当前页面唯一命中的候选；页面已销毁/选择器非法就保留原样。 */
+	async checkCandidates(candidates) {
+		if (candidates.length === 0) return [];
+		const kept = [];
+		for (const candidate of candidates) try {
+			if (await this.page.locator(candidate).count() === 1) kept.push(candidate);
+		} catch {
+			return candidates;
+		}
+		return kept.length > 0 ? kept : candidates;
+	}
+};
+/** 页面 → 录制器状态（同一页面重复 start 返回同一个实例；binding 只注册一次）。 */
+const PAGE_STATE = /* @__PURE__ */ new WeakMap();
+function sleep$1(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function safePageUrl(page) {
+	try {
+		return page.url();
+	} catch {
+		return "";
+	}
+}
+/** 页面脚本原文（测试编译校验用；业务不要直接 eval）。 */
+const RECORDER_SOURCE = RECORDER_SCRIPT;
+
+//#endregion
+//#region src/uitest/picker.ts
+/** 缺省点选等待（用户手动点，给足时间）。 */
+const PICKER_TIMEOUT_MS = 12e4;
+/**
+* 在页面上等待用户点选一个元素，返回候选选择器。
+*
+* - 页面里按 Esc / 超时 → `{ ok:false, cancelled/error }`；
+* - 页面脚本缺失（页面未打开/重定向到无 helper 的文档）→ 返回 error，不抛；
+* - 点选期间页面点击被捕获阶段吞掉（不会触发业务导航/提交）。
+*/
+async function pickOnPage(page, timeoutMs = PICKER_TIMEOUT_MS) {
+	let timer;
+	const timeout = new Promise((resolve) => {
+		timer = setTimeout(() => {
+			page.evaluate(`(() => { if (typeof window.__dfUiPickerCancel === 'function') window.__dfUiPickerCancel() })()`).catch(() => void 0);
+			resolve({
+				ok: false,
+				error: `点选超时（${Math.round(timeoutMs / 1e3)}s）：请在浏览器里点一个元素，或按 Esc 取消`
+			});
+		}, timeoutMs);
+	});
+	try {
+		return await Promise.race([page.evaluate("new Promise((resolve) => {\n  if (typeof window.__dfUiSelectorCandidates !== 'function') {\n    resolve({ ok: false, error: 'selector helper 未注入（请先打开/刷新会话页面）' })\n    return\n  }\n  if (typeof window.__dfUiPickerCancel === 'function') {\n    try { window.__dfUiPickerCancel() } catch (err) {}\n  }\n  var highlighted = null\n  var previousOutline = ''\n  var previousOffset = ''\n\n  function highlight(el) {\n    if (highlighted === el) return\n    restoreHighlight()\n    if (!el || el.nodeType !== 1) return\n    highlighted = el\n    previousOutline = el.style.outline\n    previousOffset = el.style.outlineOffset\n    el.style.outline = '2px solid #2563eb'\n    el.style.outlineOffset = '2px'\n  }\n  function restoreHighlight() {\n    if (!highlighted) return\n    highlighted.style.outline = previousOutline\n    highlighted.style.outlineOffset = previousOffset\n    highlighted = null\n  }\n  function cleanup() {\n    restoreHighlight()\n    window.removeEventListener('click', onClick, true)\n    window.removeEventListener('mousemove', onMove, true)\n    window.removeEventListener('keydown', onKey, true)\n    window.__dfUiPickerCancel = null\n  }\n  function resolveWith(payload) {\n    cleanup()\n    resolve(payload)\n  }\n  function onMove(event) {\n    event.preventDefault()\n    event.stopPropagation()\n    var el = event.target\n    if (typeof el.closest === 'function') {\n      el = el.closest('a,button,input,textarea,select,label,[role=\"button\"],[role=\"link\"],[role=\"tab\"],[role=\"checkbox\"],[role=\"menuitem\"]') || el\n    }\n    highlight(el)\n  }\n  function onClick(event) {\n    event.preventDefault()\n    event.stopPropagation()\n    event.stopImmediatePropagation()\n    var el = event.target\n    if (typeof el.closest === 'function') {\n      el = el.closest('a,button,input,textarea,select,label,[role=\"button\"],[role=\"link\"],[role=\"tab\"],[role=\"checkbox\"],[role=\"menuitem\"]') || el\n    }\n    var candidates = []\n    try { candidates = window.__dfUiSelectorCandidates(el) || [] } catch (err) {}\n    resolveWith({\n      ok: true,\n      pageUrl: location.href,\n      candidates: candidates,\n      selector: candidates.length > 0 ? candidates[0] : '',\n      element: {\n        tag: el.tagName,\n        id: el.id || '',\n        text: ((el.innerText || el.textContent || '') + '').replace(/\\s+/g, ' ').trim().slice(0, 60)\n      }\n    })\n  }\n  function onKey(event) {\n    if (event.key !== 'Escape') return\n    event.preventDefault()\n    event.stopPropagation()\n    event.stopImmediatePropagation()\n    resolveWith({ ok: false, cancelled: true })\n  }\n\n  window.__dfUiPickerCancel = function () {\n    resolveWith({ ok: false, cancelled: true })\n  }\n  window.addEventListener('click', onClick, true)\n  window.addEventListener('mousemove', onMove, true)\n  window.addEventListener('keydown', onKey, true)\n})"), timeout]) ?? {
+			ok: false,
+			error: "点选没有返回值"
+		};
+	} catch (error) {
+		return {
+			ok: false,
+			error: String(error?.message ?? error).slice(0, 500)
+		};
+	} finally {
+		if (timer !== void 0) clearTimeout(timer);
+	}
+}
+
+//#endregion
+//#region src/uitest/sessions.ts
+/** 录制会话 registry：进程内、关闭即释放；不落盘（脚本才是资产）。 */
+var UiRecordingSessions = class {
+	sessions = /* @__PURE__ */ new Map();
+	openBrowser;
+	constructor(io = {}) {
+		this.openBrowser = io.openBrowser ?? openUiBrowser;
+	}
+	/** 打开一个可见浏览器窗口（不自动开始录制——先让用户登录，再手动开始录）。 */
+	async open(args) {
+		const sessionId = `uis_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+		try {
+			const viewport = args.viewport ?? {
+				width: 1280,
+				height: 720
+			};
+			const opened = await this.openBrowser({
+				headless: args.headless ?? false,
+				viewport,
+				channel: args.channel
+			});
+			this.sessions.set(sessionId, {
+				...opened,
+				startedAt: Date.now()
+			});
+			await opened.page.evaluate(SELECTOR_HELPER_SCRIPT).catch(() => void 0);
+			await opened.context.addInitScript(SELECTOR_HELPER_SCRIPT).catch(() => void 0);
+			if (args.cookies !== void 0 && args.cookies.length > 0) await opened.context.addCookies(args.cookies.map(toPlaywrightCookie)).catch(() => void 0);
+			const timeout = args.navigationTimeoutMs ?? 2e4;
+			await opened.page.goto(args.startUrl, {
+				waitUntil: "domcontentloaded",
+				timeout
+			}).catch(() => void 0);
+			return {
+				ok: true,
+				sessionId,
+				pageUrl: safeUrl(opened.page)
+			};
+		} catch (error) {
+			return {
+				ok: false,
+				error: messageOf$1(error)
+			};
+		}
+	}
+	/** 开始录制（页面脚本注入 + 事件绑定）；重复调用返回已在录。 */
+	async start(sessionId) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return {
+			ok: false,
+			error: `会话 ${sessionId} 不存在（可能已关闭）`
+		};
+		const already = record.recorder !== void 0;
+		try {
+			record.recorder = await UiRecorder.start(record.page, record.context);
+			return {
+				ok: true,
+				pageUrl: safeUrl(record.page),
+				...already ? { alreadyRecording: true } : {}
+			};
+		} catch (error) {
+			return {
+				ok: false,
+				error: messageOf$1(error)
+			};
+		}
+	}
+	/** 停止录制并返回步骤（会话保留，可继续录下一个流程）。 */
+	async stop(sessionId) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return {
+			ok: false,
+			error: `会话 ${sessionId} 不存在（可能已关闭）`
+		};
+		if (record.recorder === void 0) return {
+			ok: false,
+			error: `会话 ${sessionId} 没有在录制`
+		};
+		try {
+			const result = await record.recorder.stop();
+			record.recorder = void 0;
+			return {
+				ok: true,
+				result
+			};
+		} catch (error) {
+			record.recorder = void 0;
+			return {
+				ok: false,
+				error: messageOf$1(error)
+			};
+		}
+	}
+	/**
+	* 在会话页面上点选一个元素（录制结束后补断言/改步骤用）。
+	*
+	* 录制中拒绝：点选也会产生点击，混进录制步骤会污染脚本。
+	*/
+	async pickSelector(sessionId, timeoutMs) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return {
+			ok: false,
+			error: `会话 ${sessionId} 不存在（可能已关闭）`
+		};
+		if (record.recorder !== void 0) return {
+			ok: false,
+			error: "正在录制：先停止录制再点选元素（点选本身也会产生点击）"
+		};
+		return {
+			...await pickOnPage(record.page, timeoutMs),
+			sessionId
+		};
+	}
+	/** 读当前页面的 URL/标题/站点名（自动命名用；读不到就返回空对象，绝不抛）。 */
+	async pageMetaOf(sessionId) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return {};
+		try {
+			const url = safeUrl(record.page);
+			const title = await record.page.title().catch(() => "");
+			const siteName = await record.page.evaluate(`(() => {
+        const contentOf = (selector) => {
+          try { const el = document.querySelector(selector); return el && el.getAttribute('content') ? el.getAttribute('content') : '' } catch (err) { return '' }
+        }
+        return contentOf('meta[property="og:site_name"]') || contentOf('meta[name="application-name"]') || contentOf('meta[name="apple-mobile-web-app-title"]')
+      })()`).catch(() => "");
+			return {
+				url,
+				...typeof title === "string" && title !== "" ? { title } : {},
+				...typeof siteName === "string" && siteName !== "" ? { siteName } : {}
+			};
+		} catch {
+			return {};
+		}
+	}
+	/** 取会话 cookie（录制结束持久化用；值只交给调用方，不回任何回执）。 */
+	async cookiesOf(sessionId) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return [];
+		return (await record.context.cookies().catch(() => [])).map((cookie) => ({
+			name: cookie.name,
+			value: cookie.value,
+			domain: cookie.domain,
+			path: cookie.path,
+			secure: cookie.secure,
+			...cookie.expires > 0 ? { expires: cookie.expires } : {}
+		}));
+	}
+	/** 关闭会话（先取消未结束的录制，再关浏览器）。 */
+	async close(sessionId) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return { ok: false };
+		this.sessions.delete(sessionId);
+		await record.recorder?.cancel().catch(() => void 0);
+		await record.browser.close().catch(() => void 0);
+		return { ok: true };
+	}
+	/** 会话视图（面板轮询录制状态用）。 */
+	list() {
+		return [...this.sessions.entries()].map(([sessionId, record]) => ({
+			sessionId,
+			pageUrl: safeUrl(record.page),
+			recording: record.recorder !== void 0,
+			startedAt: record.startedAt
+		}));
+	}
+	pageUrlOf(sessionId) {
+		const record = this.sessions.get(sessionId);
+		return record === void 0 ? void 0 : safeUrl(record.page);
+	}
+	has(sessionId) {
+		return this.sessions.has(sessionId);
+	}
+	/** 关掉全部会话（插件卸载/测试清理用）。 */
+	async closeAll() {
+		const ids = [...this.sessions.keys()];
+		await Promise.all(ids.map((id) => this.close(id)));
+	}
+};
+function toPlaywrightCookie(cookie) {
+	return {
+		name: cookie.name,
+		value: cookie.value,
+		domain: cookie.domain,
+		path: cookie.path ?? "/",
+		secure: cookie.secure ?? false,
+		...cookie.expires === void 0 ? {} : { expires: cookie.expires }
+	};
+}
+function safeUrl(page) {
+	try {
+		return page.url();
+	} catch {
+		return "";
+	}
+}
+function messageOf$1(error) {
+	return String(error?.message ?? error).slice(0, 500);
+}
+
+//#endregion
+//#region src/uitest/engines/playwright.ts
+var PlaywrightBrowserEngine = class {
+	io;
+	kind = "playwright";
+	label = "独立 Chrome（Playwright）";
+	managesCookies = false;
+	constructor(io) {
+		this.io = io;
+	}
+	available() {
+		return true;
+	}
+	open(args) {
+		return this.io.sessions.open({
+			...args,
+			channel: this.io.channel
+		});
+	}
+	start(sessionId) {
+		return this.io.sessions.start(sessionId);
+	}
+	stop(sessionId) {
+		return this.io.sessions.stop(sessionId);
+	}
+	pickSelector(sessionId, timeoutMs) {
+		return this.io.sessions.pickSelector(sessionId, timeoutMs);
+	}
+	pageMeta(sessionId) {
+		return this.io.sessions.pageMetaOf(sessionId);
+	}
+	cookiesOf(sessionId) {
+		return this.io.sessions.cookiesOf(sessionId);
+	}
+	close(sessionId) {
+		return this.io.sessions.close(sessionId);
+	}
+	list() {
+		return this.io.sessions.list();
+	}
+	pageUrlOf(sessionId) {
+		return this.io.sessions.pageUrlOf(sessionId);
+	}
+	has(sessionId) {
+		return this.io.sessions.has(sessionId);
+	}
+	closeAll() {
+		return this.io.sessions.closeAll();
+	}
+	run(doc, inputs, options) {
+		return this.io.run(doc, inputs, options);
+	}
+};
+
+//#endregion
+//#region src/uitest/engines/shared-run.ts
+/**
+* 共享浏览器引擎的回放器（seam 版 `runUiScript`）。
+*
+* 语义与 Playwright 版逐项对齐（步骤/断言/失败证据/run.json + events.ndjson），
+* 差别只在"动作怎么发出去"：这里走 seam 的 navigate/click/setValue/key/execute/screenshot。
+*
+* 目标解析：ui-script 的候选链是 Playwright 优先的；本引擎把 `text="…"` / `tag:has-text("…")`
+* 映射成 seam 的 text 定位，其余按 CSS。CSS 是页面内 `querySelectorAll`，不支持的选择器
+* 会被跳过验证（录制阶段已尽力保留候选）。
+*
+* 边界：`upload` 步骤在共享引擎上不支持（seam 没有文件选择通道）——失败信息会指回 Playwright 引擎。
+*
+* @module dsh-dataforge/uitest/engines/shared-run
+*/
+const SUPPORTED_KEYS = /* @__PURE__ */ new Set([
+	"Enter",
+	"Tab",
+	"Escape",
+	"Backspace",
+	"Delete",
+	"ArrowUp",
+	"ArrowDown",
+	"ArrowLeft",
+	"ArrowRight",
+	"Home",
+	"End",
+	"PageUp",
+	"PageDown",
+	"Space"
+]);
+/** 目标解析：优先 Playwright 候选，映射成 seam 的 css/text/xpath。 */
+function seamTargetsOf(step) {
+	const inputs = [step.selector, ...step.candidates ?? []].filter((item) => typeof item === "string" && item.trim() !== "");
+	const out = [];
+	const seen = /* @__PURE__ */ new Set();
+	const add = (target) => {
+		const key = `${target.by}:${target.value}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		out.push(target);
+	};
+	for (const candidate of inputs) {
+		if (candidate.startsWith("text=")) {
+			add({
+				by: "text",
+				value: unquote(candidate.slice(5))
+			});
+			continue;
+		}
+		if (candidate.startsWith("xpath=")) {
+			add({
+				by: "xpath",
+				value: candidate.slice(6)
+			});
+			continue;
+		}
+		const hasText = /:has-text\("([\s\S]*)"\)\s*$/.exec(candidate);
+		if (hasText !== null) {
+			add({
+				by: "text",
+				value: unescapeQuoted(hasText[1])
+			});
+			continue;
+		}
+		add({
+			by: "css",
+			value: candidate
+		});
+	}
+	for (const candidate of featureCandidates(step.features)) {
+		if (candidate.startsWith("text=")) {
+			add({
+				by: "text",
+				value: unquote(candidate.slice(5))
+			});
+			continue;
+		}
+		const hasText = /:has-text\("([\s\S]*)"\)\s*$/.exec(candidate);
+		if (hasText !== null) {
+			add({
+				by: "text",
+				value: unescapeQuoted(hasText[1])
+			});
+			continue;
+		}
+		add({
+			by: "css",
+			value: candidate
+		});
+	}
+	const name = step.clickPoint?.name;
+	if (name !== void 0 && name !== "") add({
+		by: "text",
+		value: name
+	});
+	return out;
+}
+function unquote(value) {
+	const trimmed = value.trim();
+	if (trimmed.length >= 2 && (trimmed.startsWith("\"") && trimmed.endsWith("\"") || trimmed.startsWith("'") && trimmed.endsWith("'"))) return trimmed.slice(1, -1);
+	return trimmed;
+}
+function unescapeQuoted(value) {
+	return value.replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
+}
+/** CSS 候选（submit/focus 这类只能用页面内 querySelector 的动作用）。 */
+function cssCandidatesOf(step) {
+	return [step.selector, ...step.candidates ?? []].filter((item) => typeof item === "string").filter((item) => !item.startsWith("text=") && !item.startsWith("xpath=") && !item.includes(":has-text("));
+}
+async function runUiScriptOnSeam(io, doc, inputs, options = {}) {
+	const slowMoMs = Math.min(Math.max(Math.floor(options.slowMoMs ?? 0), 0), 1e4);
+	const holdMs = Math.min(Math.max(Math.floor(io.holdMs ?? options.holdMs ?? 0), 0), 3e4);
+	const runId = `uir_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+	const startUrl = substituteInputs(doc.meta.startUrl, inputs);
+	const startedAt = Date.now();
+	let sessionId;
+	const stepResults = [];
+	startUiRun(io.dataRoot, runId, {
+		site: doc.meta.site,
+		flow: doc.meta.flow,
+		version: doc.meta.version,
+		startUrl,
+		engine: "shared",
+		totalSteps: doc.steps.length
+	});
+	const emit = (event) => appendUiRunEvent(io.dataRoot, runId, event);
+	emit({
+		event: "meta",
+		site: doc.meta.site,
+		flow: doc.meta.flow,
+		version: doc.meta.version,
+		startUrl
+	});
+	try {
+		sessionId = await io.seam.open(io.owner);
+		await io.seam.navigate(sessionId, { url: startUrl });
+		await io.seam.waitFor(sessionId, {
+			url: startUrl,
+			loaded: true,
+			timeoutMs: io.stepTimeoutMs
+		}).catch(() => void 0);
+		for (const step of doc.steps) {
+			if (slowMoMs > 0) await sleep(slowMoMs);
+			const result = await runStep(io, sessionId, step, inputs, emit, doc);
+			stepResults.push(result);
+			if (!result.ok) {
+				const evidence = await captureFailure(io, sessionId, runId);
+				const elapsedMs = Date.now() - startedAt;
+				emit({
+					event: "terminal",
+					success: false,
+					message: result.error,
+					...evidence.screenshot === void 0 ? {} : { screenshot: evidence.screenshot },
+					...evidence.dom === void 0 ? {} : { dom: evidence.dom },
+					elapsed: elapsedMs
+				});
+				finishUiRun(io.dataRoot, runId, {
+					status: "failed",
+					finishedAt: Date.now(),
+					stepsDone: stepResults.length - 1,
+					failedStep: result.id,
+					...result.error === void 0 ? {} : { error: result.error },
+					...evidence.screenshot === void 0 ? {} : { screenshot: evidence.screenshot },
+					elapsedMs
+				});
+				return {
+					runId,
+					site: doc.meta.site,
+					flow: doc.meta.flow,
+					version: doc.meta.version,
+					startUrl,
+					success: false,
+					totalSteps: doc.steps.length,
+					stepsDone: stepResults.length - 1,
+					steps: stepResults,
+					failedStep: result,
+					...evidence.screenshot === void 0 ? {} : { screenshot: evidence.screenshot },
+					...evidence.dom === void 0 ? {} : { dom: evidence.dom },
+					...result.error === void 0 ? {} : { error: result.error },
+					elapsedMs,
+					cookiesApplied: 0,
+					notice: "共享浏览器引擎（dsh-builtin-browser seam）"
+				};
+			}
+		}
+		const elapsedMs = Date.now() - startedAt;
+		emit({
+			event: "terminal",
+			success: true,
+			message: `全部 ${doc.steps.length} 步通过`,
+			elapsed: elapsedMs
+		});
+		finishUiRun(io.dataRoot, runId, {
+			status: "success",
+			finishedAt: Date.now(),
+			stepsDone: stepResults.length,
+			elapsedMs
+		});
+		return {
+			runId,
+			site: doc.meta.site,
+			flow: doc.meta.flow,
+			version: doc.meta.version,
+			startUrl,
+			success: true,
+			totalSteps: doc.steps.length,
+			stepsDone: stepResults.length,
+			steps: stepResults,
+			elapsedMs,
+			cookiesApplied: 0,
+			notice: "共享浏览器引擎（dsh-builtin-browser seam）"
+		};
+	} catch (error) {
+		const message = String(error?.message ?? error).slice(0, 1e3);
+		const elapsedMs = Date.now() - startedAt;
+		emit({
+			event: "terminal",
+			success: false,
+			message,
+			elapsed: elapsedMs
+		});
+		finishUiRun(io.dataRoot, runId, {
+			status: "failed",
+			finishedAt: Date.now(),
+			stepsDone: stepResults.length,
+			error: message,
+			elapsedMs
+		});
+		return {
+			runId,
+			site: doc.meta.site,
+			flow: doc.meta.flow,
+			version: doc.meta.version,
+			startUrl,
+			success: false,
+			totalSteps: doc.steps.length,
+			stepsDone: stepResults.length,
+			steps: stepResults,
+			error: message,
+			elapsedMs,
+			cookiesApplied: 0,
+			notice: "共享浏览器引擎（dsh-builtin-browser seam）"
+		};
+	} finally {
+		if (sessionId !== void 0 && holdMs > 0) await sleep(holdMs);
+		if (sessionId !== void 0) await io.seam.close(sessionId).catch(() => void 0);
+	}
+}
+async function runStep(io, sessionId, step, inputs, emit, doc) {
+	const startedAt = Date.now();
+	const targetText = step.selector ?? step.candidates?.[0] ?? step.url;
+	const result = {
+		id: step.id,
+		kind: step.kind,
+		ok: false,
+		elapsedMs: 0,
+		assertions: []
+	};
+	emit({
+		event: "step",
+		id: step.id,
+		kind: step.kind,
+		status: "start",
+		...targetText === void 0 ? {} : { target: targetText }
+	});
+	try {
+		if (step.kind === "wait") await sleep(Math.min(step.ms ?? 0, io.stepTimeoutMs));
+		else if (step.kind === "goto") {
+			const url = substituteInputs(step.url ?? "", inputs);
+			await io.seam.navigate(sessionId, { url });
+			await io.seam.waitFor(sessionId, {
+				url,
+				loaded: true,
+				timeoutMs: io.stepTimeoutMs
+			}).catch(() => void 0);
+		} else if (step.kind === "upload") throw new Error("共享浏览器引擎不支持 upload 步骤（seam 无文件选择通道）：请把该脚本切回 Playwright 引擎，或手写上传步骤");
+		else if (step.kind === "press" && seamTargetsOf(step).length === 0) {
+			const key = substituteInputs(step.key ?? "", inputs);
+			assertKey(key);
+			await io.seam.key(sessionId, { key });
+		} else if (step.kind === "submit") {
+			const selector = cssCandidatesOf(step)[0];
+			if (selector === void 0) throw new Error("submit 步骤没有 CSS selector（共享引擎只能用 CSS 触发表单提交）");
+			const submitted = await io.seam.execute(sessionId, {
+				script: `return (function (selector) {
+          const form = document.querySelector(selector)
+          if (!form) return 'not-found'
+          if (typeof form.requestSubmit === 'function') { form.requestSubmit(); return 'ok' }
+          if (typeof form.submit === 'function') { form.submit(); return 'submitted' }
+          return 'not-a-form'
+        })(arguments[0])`,
+				args: [selector],
+				timeoutMs: io.stepTimeoutMs
+			});
+			if (!submitted.ok) throw new Error(submitted.exception);
+			if (submitted.value !== "ok" && submitted.value !== "submitted") throw new Error(`提交失败：${String(submitted.value)}`);
+		} else await performTargetedAction(io, sessionId, step, inputs, result);
+		for (const expect of step.expect ?? []) {
+			const assertion = await runExpect(io, sessionId, expect);
+			result.assertions.push(assertion);
+			emit({
+				event: "assert",
+				stepId: step.id,
+				kind: assertion.kind,
+				status: assertion.ok ? "ok" : "error",
+				...assertion.selector === void 0 ? {} : { selector: assertion.selector },
+				...assertion.expected === void 0 ? {} : { expected: assertion.expected },
+				...assertion.actual === void 0 ? {} : { actual: assertion.actual },
+				elapsed: assertion.elapsedMs,
+				...assertion.error === void 0 ? {} : { error: assertion.error }
+			});
+			if (!assertion.ok) {
+				result.error = `断言失败：${assertion.error ?? "未知原因"}`;
+				result.elapsedMs = Date.now() - startedAt;
+				return result;
+			}
+		}
+		result.ok = true;
+		result.elapsedMs = Date.now() - startedAt;
+		return result;
+	} catch (error) {
+		result.error = String(error?.message ?? error).slice(0, 800);
+		result.elapsedMs = Date.now() - startedAt;
+		return result;
+	} finally {
+		emit({
+			event: "step",
+			id: step.id,
+			kind: step.kind,
+			status: result.ok ? "done" : "error",
+			elapsed: result.elapsedMs,
+			...result.target === void 0 ? {} : { target: result.target },
+			...result.error === void 0 ? {} : { error: result.error }
+		});
+	}
+}
+async function performTargetedAction(io, sessionId, step, inputs, result) {
+	const targets = seamTargetsOf(step);
+	if (targets.length === 0) throw new Error(`${step.kind} 步骤没有 selector/candidates`);
+	const attempts = [];
+	const attemptAll = async () => {
+		for (const target of targets) try {
+			if (step.kind === "click") await clickTarget(io, sessionId, step, target);
+			else if (step.kind === "fill") await io.seam.setValue(sessionId, {
+				target,
+				value: substituteInputs(step.value ?? "", inputs)
+			});
+			else if (step.kind === "select") await io.seam.selectOption(sessionId, {
+				target,
+				optionValue: substituteInputs(step.value ?? "", inputs)
+			});
+			else if (step.kind === "press") {
+				await focusTarget(io, sessionId, target);
+				const key = substituteInputs(step.key ?? "", inputs);
+				assertKey(key);
+				await io.seam.key(sessionId, { key });
+			} else throw new Error(`共享引擎不支持步骤类型：${step.kind}`);
+			result.target = target.by === "css" ? target.value : `${target.by}=${target.value}`;
+			return true;
+		} catch (error) {
+			attempts.push(`${target.by}:${target.value}（${String(error?.message ?? error).slice(0, 120)}）`);
+		}
+		return false;
+	};
+	if (await attemptAll()) return;
+	const at = typeof step.at === "string" && /^https?:\/\//.test(step.at) ? step.at : void 0;
+	if (at !== void 0) {
+		if (await activeUrl(io, sessionId) !== at) try {
+			await io.seam.navigate(sessionId, { url: at });
+			await io.seam.waitFor(sessionId, {
+				loaded: true,
+				timeoutMs: 15e3
+			}).catch(() => void 0);
+			attempts.push(`重新导航到录制页 ${at}`);
+			if (await attemptAll()) return;
+		} catch (error) {
+			attempts.push(`导航到 ${at} 失败（${String(error?.message ?? error).slice(0, 120)}）`);
+		}
+	}
+	throw new Error(`找不到可用目标：${attempts.join("；")}`);
+}
+async function activeUrl(io, sessionId) {
+	const tabs = await io.seam.listTabs(sessionId).catch(() => []);
+	return (tabs.find((tab) => tab.active) ?? tabs[0])?.url ?? "";
+}
+/**
+* 点击：canvas 图表必须按坐标点（元素中心落在空白处不会触发图表交互）；
+* 普通元素先走语义点击，失败且录了坐标时按坐标兜底。点完等一小段导航落定。
+*/
+async function clickTarget(io, sessionId, step, target) {
+	const point = step.clickPoint;
+	const info = target.by === "css" ? await elementInfo(io, sessionId, target.value) : void 0;
+	if (point !== void 0) {
+		const tagMatches = info !== void 0 && (step.features?.tag === void 0 || info.tag.toLowerCase() === step.features.tag.toLowerCase());
+		if (info !== void 0 && info.tag === "CANVAS" && tagMatches) {
+			await clickAt(io, sessionId, point, info);
+			await settleAfterClick(io, sessionId);
+			return;
+		}
+		if (info === void 0 || !tagMatches) {
+			const resolved = await featureInfo(io, sessionId, step.features);
+			if (resolved !== void 0) {
+				await clickAt(io, sessionId, point, resolved);
+				await settleAfterClick(io, sessionId);
+				return;
+			}
+		}
+	}
+	if (info !== void 0 && io.highlightClicks !== false) await highlightAt(io, sessionId, info.x + info.w / 2, info.y + info.h / 2);
+	try {
+		await io.seam.click(sessionId, { target });
+	} catch (error) {
+		if (point === void 0) throw error;
+		await clickAt(io, sessionId, point, info);
+	}
+	await settleAfterClick(io, sessionId);
+}
+/**
+* 用录制特征在当前页面找回元素并返回最新几何。
+*
+* 只用于"选择器失效但录了落点"的场景：分数最高且至少命中一个稳定属性才采用，
+* 避免只按 tag 乱点。
+*/
+async function featureInfo(io, sessionId, features) {
+	if (features === void 0) return void 0;
+	const result = await io.seam.execute(sessionId, {
+		script: `return (function (f) {
+      const norm = (value) => String(value === undefined || value === null ? '' : value).replace(/\s+/g, ' ').trim()
+      let nodes = []
+      try { nodes = document.querySelectorAll(f.tag || '*') } catch (err) { nodes = [] }
+      let best = null
+      let bestScore = 0
+      const canvases = document.querySelectorAll('canvas')
+      for (let i = 0; i < nodes.length; i += 1) {
+        const el = nodes[i]
+        let score = 0
+        if (f.id && el.id === f.id) score += 8
+        if (f.testId) {
+          const attrs = ['data-testid', 'data-test-id', 'data-test', 'data-qa']
+          for (let a = 0; a < attrs.length; a += 1) { if (el.getAttribute(attrs[a]) === f.testId) { score += 8; break } }
+        }
+        if (f.name && el.getAttribute('name') === f.name) score += 4
+        if (f.ariaLabel && el.getAttribute('aria-label') === f.ariaLabel) score += 6
+        if (f.placeholder && el.getAttribute('placeholder') === f.placeholder) score += 6
+        if (f.role && el.getAttribute('role') === f.role) score += 2
+        if (f.title && el.getAttribute('title') === f.title) score += 2
+        if (f.alt && el.getAttribute('alt') === f.alt) score += 2
+        if (f.text && norm(el.innerText || el.textContent).indexOf(f.text) >= 0) score += 3
+        if (f.canvasIndex !== undefined && el.tagName === 'CANVAS') {
+          const index = Array.prototype.indexOf.call(canvases, el)
+          if (index === f.canvasIndex) score += 6
+        }
+        if (score > bestScore) { bestScore = score; best = el }
+      }
+      if (!best) return null
+      const r = best.getBoundingClientRect()
+      return { tag: best.tagName, x: r.x, y: r.y, w: r.width, h: r.height, vw: window.innerWidth, vh: window.innerHeight }
+    })(arguments[0])`,
+		args: [features],
+		timeoutMs: io.stepTimeoutMs
+	}).catch(() => void 0);
+	if (result === void 0 || !result.ok || result.value === null || typeof result.value !== "object") return void 0;
+	return readElementInfo(result.value);
+}
+function readElementInfo(value) {
+	if (value === null || typeof value !== "object") return void 0;
+	const record = value;
+	const num = (key) => typeof record[key] === "number" && Number.isFinite(record[key]) ? record[key] : void 0;
+	const tag = typeof record["tag"] === "string" ? record["tag"] : void 0;
+	const x = num("x");
+	const y = num("y");
+	const w = num("w");
+	const h = num("h");
+	const vw = num("vw");
+	const vh = num("vh");
+	if (tag === void 0 || x === void 0 || y === void 0 || w === void 0 || h === void 0 || vw === void 0 || vh === void 0) return void 0;
+	return {
+		tag,
+		x,
+		y,
+		w,
+		h,
+		vw,
+		vh
+	};
+}
+async function elementInfo(io, sessionId, selector) {
+	const result = await io.seam.execute(sessionId, {
+		script: `return (function (selector) {
+      const el = document.querySelector(selector)
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { tag: el.tagName, x: r.x, y: r.y, w: r.width, h: r.height, vw: window.innerWidth, vh: window.innerHeight }
+    })(arguments[0])`,
+		args: [selector],
+		timeoutMs: io.stepTimeoutMs
+	}).catch(() => void 0);
+	if (result === void 0 || !result.ok) return void 0;
+	return readElementInfo(result.value);
+}
+/** 元素内比例坐标 → 视口坐标；元素找不到时按录制视口等比缩放兜底。 */
+async function clickAt(io, sessionId, point, info) {
+	let x;
+	let y;
+	if (info !== void 0 && sameBox(point, info)) {
+		x = point.x;
+		y = point.y;
+	} else if (info !== void 0 && info.w > 0 && info.h > 0) {
+		x = info.x + point.fx * info.w;
+		y = info.y + point.fy * info.h;
+	} else {
+		const viewport = await io.seam.execute(sessionId, {
+			script: "return { vw: window.innerWidth, vh: window.innerHeight }",
+			timeoutMs: io.stepTimeoutMs
+		}).catch(() => void 0);
+		const raw = viewport !== void 0 && viewport.ok && typeof viewport.value === "object" && viewport.value !== null ? viewport.value : {};
+		const vw = typeof raw["vw"] === "number" && raw["vw"] > 0 ? raw["vw"] : point.vw;
+		const vh = typeof raw["vh"] === "number" && raw["vh"] > 0 ? raw["vh"] : point.vh;
+		x = vw > 0 && point.vw > 0 ? point.x * (vw / point.vw) : point.x;
+		y = vh > 0 && point.vh > 0 ? point.y * (vh / point.vh) : point.y;
+	}
+	if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("点击坐标无效");
+	if (io.highlightClicks !== false) await highlightAt(io, sessionId, x, y);
+	await io.seam.click(sessionId, {
+		x: Math.round(x),
+		y: Math.round(y)
+	});
+}
+function sameBox(point, info) {
+	if (point.bx === void 0 || point.by === void 0 || point.bw === void 0 || point.bh === void 0) return false;
+	const near = (left, right) => Math.abs(left - right) <= 1.5;
+	return near(point.bx, info.x) && near(point.by, info.y) && near(point.bw, info.w) && near(point.bh, info.h);
+}
+/** 点击提示：注入脉冲光圈（失败不影响点击）。 */
+async function highlightAt(io, sessionId, x, y) {
+	await io.seam.execute(sessionId, {
+		script: highlightClickExpression(x, y),
+		timeoutMs: 2e3
+	}).catch(() => void 0);
+}
+/** 点击后等页面加载落定（不阻塞失败；导航由下一步的元素等待兜底）。 */
+async function settleAfterClick(io, sessionId) {
+	await io.seam.waitFor(sessionId, {
+		loaded: true,
+		timeoutMs: 1500
+	}).catch(() => void 0);
+}
+function assertKey(key) {
+	if (!SUPPORTED_KEYS.has(key)) throw new Error(`共享浏览器引擎不支持按键 ${key}（支持：${[...SUPPORTED_KEYS].join("/")}）`);
+}
+async function focusTarget(io, sessionId, target) {
+	if (target.by !== "css") return;
+	await io.seam.execute(sessionId, {
+		script: "return (function (selector) { const el = document.querySelector(selector); if (el && typeof el.focus === \"function\") { el.focus(); return true } return false })(arguments[0])",
+		args: [target.value],
+		timeoutMs: io.stepTimeoutMs
+	}).catch(() => void 0);
+}
+/** 页面内断言求值（同一段脚本同时支持 CSS / text= / *:has-text）。 */
+const EVALUATE_EXPECT = `return (function (kind, selector, equals, contains) {
+  const normalize = (value) => String(value == null ? '' : value).replace(/\\s+/g, ' ').trim()
+  const visible = (el) => {
+    if (!el) return false
+    const rect = el.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return false
+    const style = window.getComputedStyle(el)
+    return style.visibility !== 'hidden' && style.display !== 'none'
+  }
+  const matches = (sel) => {
+    if (sel.startsWith('text="') && sel.endsWith('"')) {
+      const text = sel.slice(6, -1)
+      return Array.from(document.querySelectorAll('*')).filter((el) => normalize(el.innerText || el.textContent).includes(text))
+    }
+    const m = /:has-text\\("([\\s\\S]*)"\\)\\s*$/.exec(sel)
+    if (m) {
+      const tag = sel.slice(0, m.index).trim() || '*'
+      return Array.from(document.querySelectorAll(tag)).filter((el) => normalize(el.innerText || el.textContent).includes(m[1]))
+    }
+    try { return Array.from(document.querySelectorAll(sel)) } catch (err) { return [] }
+  }
+  if (kind === 'url') {
+    const url = location.href
+    return { ok: equals != null && equals !== '' ? url === String(equals) : url.includes(String(contains)), actual: url }
+  }
+  if (kind === 'count') {
+    const count = matches(selector).length
+    return { ok: count === Number(equals), actual: String(count) }
+  }
+  const el = matches(selector)[0]
+  if (kind === 'visible') return { ok: visible(el), actual: visible(el) ? 'visible' : 'hidden' }
+  if (kind === 'hidden') return { ok: !visible(el), actual: visible(el) ? 'visible' : 'hidden' }
+  if (kind === 'value') {
+    const value = el ? String(el.value == null ? '' : el.value) : ''
+    return { ok: equals != null ? value === String(equals) : value.includes(String(contains)), actual: value }
+  }
+  const text = el ? normalize(el.innerText || el.textContent) : ''
+  return { ok: equals != null ? text === String(equals) : text.includes(String(contains)), actual: text }
+})(arguments[0], arguments[1], arguments[2], arguments[3])`;
+async function runExpect(io, sessionId, expect) {
+	const startedAt = Date.now();
+	const deadline = startedAt + io.stepTimeoutMs;
+	const selector = expect.selector;
+	const expected = expect.equals === void 0 ? expect.contains : String(expect.equals);
+	const result = {
+		kind: expect.kind,
+		...selector === void 0 ? {} : { selector },
+		ok: false,
+		elapsedMs: 0,
+		...expected === void 0 ? {} : { expected }
+	};
+	let actual = "";
+	for (;;) {
+		const evaluated = await io.seam.execute(sessionId, {
+			script: EVALUATE_EXPECT,
+			args: [
+				expect.kind,
+				selector ?? "",
+				expect.equals ?? null,
+				expect.contains ?? null
+			],
+			timeoutMs: io.stepTimeoutMs
+		}).catch((error) => ({
+			ok: false,
+			exception: String(error?.message ?? error)
+		}));
+		if (evaluated.ok) {
+			const value = evaluated.value;
+			actual = value !== null && typeof value === "object" ? String(value.actual ?? "") : "";
+			if (value !== null && typeof value === "object" && value.ok === true) {
+				result.ok = true;
+				result.elapsedMs = Date.now() - startedAt;
+				return result;
+			}
+		} else actual = evaluated.exception;
+		if (Date.now() >= deadline) break;
+		await sleep(120);
+	}
+	result.elapsedMs = Date.now() - startedAt;
+	result.actual = actual.slice(0, 500);
+	result.error = expect.kind === "url" ? `URL 期望 ${expect.equals === void 0 ? `包含 ${String(expect.contains)}` : `等于 ${String(expect.equals)}`}，实际 ${actual.slice(0, 200)}` : expect.kind === "count" ? `元素数期望 ${String(expect.equals)}，实际 ${actual}` : expect.kind === "visible" || expect.kind === "hidden" ? `元素可见性期望 ${expect.kind}，实际不满足（${selector ?? "?"}）` : `期望 ${expected ?? ""}，实际 ${actual.slice(0, 200)}`;
+	return result;
+}
+async function captureFailure(io, sessionId, runId) {
+	const dir = uiRunDir(io.dataRoot, runId);
+	const evidence = {};
+	try {
+		const payload = (await io.seam.screenshot(sessionId, { format: "png" })).dataUrl.split(",")[1] ?? "";
+		writeFileSync(join(dir, "failure.png"), Buffer.from(payload, "base64"));
+		evidence.screenshot = join("ui-runs", runId, "failure.png");
+	} catch {}
+	try {
+		const dom = await io.seam.execute(sessionId, {
+			script: "return document.documentElement ? document.documentElement.outerHTML : \"\"",
+			timeoutMs: io.stepTimeoutMs
+		});
+		const html = dom.ok ? String(dom.value ?? "") : "";
+		if (html !== "") {
+			writeFileSync(join(dir, "failure.html"), html.slice(0, 2097152), "utf8");
+			evidence.dom = join("ui-runs", runId, "failure.html");
+		}
+	} catch {}
+	return evidence;
+}
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+//#endregion
+//#region src/uitest/engines/shared.ts
+/** 页面里 drain 事件队列 + 返回诊断信息（URL / 是否仍安装）。 */
+const DRAIN_EXPRESSION = `(() => {
+  const queue = window.__dfUiSeamQueue
+  window.__dfUiSeamQueue = []
+  return {
+    installed: !!window.__dfUiRecorder,
+    events: Array.isArray(queue) ? queue : [],
+    url: (() => { try { return location.href } catch (err) { return '' } })()
+  }
+})()`;
+/** 候选唯一性校验（页面内，纯 CSS；Playwright 专属选择器会整体回退原候选）。 */
+const CHECK_CANDIDATES_EXPRESSION = `return (function (candidates) {
+  const kept = []
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i]
+    try {
+      if (document.querySelectorAll(candidate).length === 1) kept.push(candidate)
+    } catch (err) {
+      return candidates
+    }
+  }
+  return kept.length > 0 ? kept : candidates
+})(arguments[0])`;
+/** 共享浏览器引擎：录制/点选走 seam，回放交给 shared-run。 */
+var SharedBrowserEngine = class {
+	io;
+	kind = "shared";
+	label = "共享浏览器（dsh-builtin-browser）";
+	managesCookies = true;
+	sessions = /* @__PURE__ */ new Map();
+	constructor(io) {
+		this.io = io;
+	}
+	available() {
+		return this.io.resolveSeam() !== void 0;
+	}
+	async open(args) {
+		const seam = this.io.resolveSeam();
+		if (seam === void 0) return {
+			ok: false,
+			error: "共享浏览器不可用（宿主没有注册 ctx.browser：请安装/启用 dsh-builtin-browser）"
+		};
+		const owner = args.owner ?? this.io.resolveOwner();
+		if (owner === void 0 || owner === "") return {
+			ok: false,
+			error: "无法确定当前 DSH 对话 id（ctx.agents 不可用）：共享浏览器需要按对话打开右侧栏面板；请改用 uiTestBrowser=playwright，或重启 DSH 后重试"
+		};
+		let sessionId;
+		try {
+			sessionId = await seam.open(owner);
+		} catch (error) {
+			return {
+				ok: false,
+				error: messageOf(error)
+			};
+		}
+		const session = {
+			seam,
+			sessionId,
+			startUrl: args.startUrl,
+			viewport: args.viewport ?? {
+				width: 1280,
+				height: 720
+			},
+			startedAt: Date.now(),
+			lastUrl: args.startUrl,
+			recording: false,
+			lastInjectAt: 0,
+			polling: false
+		};
+		this.sessions.set(sessionId, session);
+		try {
+			await seam.openUrl(sessionId, { url: args.startUrl });
+			await seam.waitFor(sessionId, {
+				loaded: true,
+				timeoutMs: args.navigationTimeoutMs ?? 2e4
+			}).catch(() => void 0);
+			session.lastUrl = await this.activeUrl(seam, sessionId) ?? args.startUrl;
+		} catch (error) {
+			this.sessions.delete(sessionId);
+			await seam.close(sessionId).catch(() => void 0);
+			return {
+				ok: false,
+				error: `共享浏览器打开页面失败：${messageOf(error)}`
+			};
+		}
+		return {
+			ok: true,
+			sessionId,
+			pageUrl: session.lastUrl
+		};
+	}
+	async start(sessionId) {
+		const session = this.sessions.get(sessionId);
+		if (session === void 0) return {
+			ok: false,
+			error: `会话 ${sessionId} 不存在（可能已关闭）`
+		};
+		if (session.recording) return {
+			ok: true,
+			pageUrl: session.lastUrl,
+			alreadyRecording: true
+		};
+		const injected = await this.injectRecorder(session);
+		if (!injected.ok) return {
+			ok: false,
+			error: injected.error
+		};
+		session.core = new RecorderCore();
+		session.recording = true;
+		const interval = Math.max(50, this.io.pollIntervalMs ?? 350);
+		session.timer = setInterval(() => {
+			this.poll(session);
+		}, interval);
+		return {
+			ok: true,
+			pageUrl: session.lastUrl
+		};
+	}
+	async stop(sessionId) {
+		const session = this.sessions.get(sessionId);
+		if (session === void 0) return {
+			ok: false,
+			error: `会话 ${sessionId} 不存在（可能已关闭）`
+		};
+		if (!session.recording) return {
+			ok: false,
+			error: `会话 ${sessionId} 没有在录制`
+		};
+		session.recording = false;
+		if (session.timer !== void 0) clearInterval(session.timer);
+		session.timer = void 0;
+		const idleDeadline = Date.now() + 1e3;
+		while (session.polling && Date.now() < idleDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+		await this.execute(session, "(() => { if (window.__dfUiRecorder) window.__dfUiRecorder.active = false })()").catch(() => void 0);
+		await this.poll(session);
+		const core = session.core ?? new RecorderCore();
+		const steps = await core.finalize((candidates) => this.checkCandidates(session, candidates));
+		const result = core.result(steps, {
+			startUrl: session.startUrl,
+			viewport: session.viewport
+		});
+		session.core = void 0;
+		return {
+			ok: true,
+			result
+		};
+	}
+	async pickSelector(sessionId, timeoutMs) {
+		const session = this.sessions.get(sessionId);
+		if (session === void 0) return {
+			ok: false,
+			error: `会话 ${sessionId} 不存在（可能已关闭）`
+		};
+		if (session.recording) return {
+			ok: false,
+			error: "正在录制：先停止录制再点选元素（点选本身也会产生点击）"
+		};
+		await this.execute(session, SELECTOR_HELPER_SCRIPT).catch(() => void 0);
+		const budget = Math.min(Math.max(timeoutMs ?? 12e4, 1e3), 12e4);
+		const result = await session.seam.execute(session.sessionId, {
+			script: PICKER_SCRIPT,
+			timeoutMs: budget
+		}).catch((error) => ({
+			ok: false,
+			exception: messageOf(error)
+		}));
+		if (!result.ok) return {
+			ok: false,
+			error: result.exception
+		};
+		const value = result.value;
+		if (typeof value !== "object" || value === null) return {
+			ok: false,
+			error: "点选没有返回值"
+		};
+		return value;
+	}
+	async pageMeta(sessionId) {
+		const session = this.sessions.get(sessionId);
+		if (session === void 0) return {};
+		const result = await this.execute(session, `(() => {
+      const contentOf = (selector) => {
+        try { const el = document.querySelector(selector); return el && el.getAttribute('content') ? el.getAttribute('content') : '' } catch (err) { return '' }
+      }
+      return {
+        url: (() => { try { return location.href } catch (err) { return '' } })(),
+        title: (() => { try { return document.title || '' } catch (err) { return '' } })(),
+        siteName: contentOf('meta[property="og:site_name"]') || contentOf('meta[name="application-name"]') || contentOf('meta[name="apple-mobile-web-app-title"]')
+      }
+    })()`);
+		if (!result.ok || typeof result.value !== "object" || result.value === null) return {};
+		const value = result.value;
+		return {
+			...typeof value.url === "string" && value.url !== "" ? { url: value.url } : {},
+			...typeof value.title === "string" && value.title !== "" ? { title: value.title } : {},
+			...typeof value.siteName === "string" && value.siteName !== "" ? { siteName: value.siteName } : {}
+		};
+	}
+	async cookiesOf(sessionId) {
+		return [];
+	}
+	async close(sessionId) {
+		const session = this.sessions.get(sessionId);
+		if (session === void 0) return {
+			ok: false,
+			error: `会话 ${sessionId} 不存在（可能已关闭）`
+		};
+		if (session.timer !== void 0) clearInterval(session.timer);
+		session.recording = false;
+		this.sessions.delete(sessionId);
+		try {
+			await session.seam.close(sessionId);
+			return { ok: true };
+		} catch (error) {
+			return {
+				ok: false,
+				error: messageOf(error)
+			};
+		}
+	}
+	list() {
+		return [...this.sessions.values()].map((session) => ({
+			sessionId: session.sessionId,
+			pageUrl: session.lastUrl,
+			recording: session.recording,
+			startedAt: session.startedAt
+		}));
+	}
+	pageUrlOf(sessionId) {
+		return this.sessions.get(sessionId)?.lastUrl;
+	}
+	has(sessionId) {
+		return this.sessions.has(sessionId);
+	}
+	async closeAll() {
+		for (const sessionId of [...this.sessions.keys()]) await this.close(sessionId);
+	}
+	async run(doc, inputs, options) {
+		const seam = this.io.resolveSeam();
+		if (seam === void 0) throw new Error("共享浏览器不可用（宿主没有注册 ctx.browser）");
+		const owner = options?.owner ?? this.io.resolveOwner();
+		if (owner === void 0 || owner === "") throw new Error("无法确定当前 DSH 对话 id（共享浏览器需要按对话挂右侧栏面板）");
+		return runUiScriptOnSeam({
+			seam,
+			owner,
+			dataRoot: this.io.dataRoot,
+			stepTimeoutMs: this.io.stepTimeoutMs
+		}, doc, inputs, {
+			slowMoMs: options?.slowMoMs ?? 0,
+			highlightClicks: options?.highlightClicks ?? true,
+			...options?.holdMs === void 0 ? {} : { holdMs: options.holdMs }
+		});
+	}
+	async injectRecorder(session) {
+		const helper = await this.execute(session, SELECTOR_HELPER_SCRIPT);
+		if (!helper.ok) return {
+			ok: false,
+			error: `注入选择器脚本失败：${helper.exception}`
+		};
+		const recorder = await this.execute(session, RECORDER_SOURCE);
+		if (!recorder.ok) return {
+			ok: false,
+			error: `注入录制脚本失败：${recorder.exception}`
+		};
+		session.lastInjectAt = Date.now();
+		return { ok: true };
+	}
+	async poll(session) {
+		if (session.polling) return;
+		session.polling = true;
+		try {
+			const result = await this.execute(session, DRAIN_EXPRESSION);
+			if (!result.ok) return;
+			const value = result.value;
+			if (typeof value !== "object" || value === null) return;
+			const record = value;
+			if (typeof record.url === "string" && record.url !== "") session.lastUrl = record.url;
+			const events = Array.isArray(record.events) ? record.events : [];
+			for (const event of events) session.core?.ingest(event);
+			if (session.recording && record.installed !== true && Date.now() - session.lastInjectAt > 1e3) await this.injectRecorder(session);
+		} finally {
+			session.polling = false;
+		}
+	}
+	async checkCandidates(session, candidates) {
+		if (candidates.length === 0) return [];
+		const result = await this.execute(session, CHECK_CANDIDATES_EXPRESSION, [candidates]);
+		if (!result.ok) return candidates;
+		const value = result.value;
+		if (!Array.isArray(value)) return candidates;
+		return normalizeCandidateList(value);
+	}
+	execute(session, script, args) {
+		return session.seam.execute(session.sessionId, {
+			script,
+			...args === void 0 ? {} : { args },
+			timeoutMs: this.io.stepTimeoutMs
+		});
+	}
+	async activeUrl(seam, sessionId) {
+		try {
+			const tabs = await seam.listTabs(sessionId);
+			return tabs.find((tab) => tab.active)?.url ?? tabs[0]?.url;
+		} catch {
+			return;
+		}
+	}
+};
+function messageOf(error) {
+	return String(error?.message ?? error).slice(0, 500);
 }
 
 //#endregion
@@ -14031,10 +23217,16 @@ var SessionRegistry = class {
 	async open(o) {
 		const sessionId = `bs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 		const { browser, context, page } = await this.io.openCapturingPage("chrome", (w) => {
-			this.sessions.get(sessionId)?.sink?.(w);
+			this.sessions.get(sessionId)?.sink?.onSample(w);
 		}, {
 			...o.headless === void 0 ? {} : { headless: o.headless },
-			...o.cookies === void 0 ? {} : { cookies: o.cookies }
+			...o.cookies === void 0 ? {} : { cookies: o.cookies },
+			onPageMeta: (meta) => {
+				const s = this.sessions.get(sessionId);
+				if (s === void 0) return;
+				if (s.sink?.onPageMeta !== void 0) s.sink.onPageMeta(meta);
+				else s.pendingMeta = meta;
+			}
 		});
 		this.sessions.set(sessionId, o.captureId === void 0 ? {
 			page,
@@ -14055,9 +23247,17 @@ var SessionRegistry = class {
 			pageUrl: page.url()
 		};
 	}
+	/** 绑定事件侧；兼容旧调用形态（只给 onSample 函数）与新形态（Sink 对象，含 onPageMeta）。 */
 	bindSink(sessionId, sink) {
 		const s = this.sessions.get(sessionId);
-		if (s !== void 0) s.sink = sink;
+		if (s === void 0) return;
+		const normalized = typeof sink === "function" ? { onSample: sink } : sink;
+		s.sink = normalized;
+		if (s.pendingMeta !== void 0) {
+			const meta = s.pendingMeta;
+			s.pendingMeta = void 0;
+			normalized.onPageMeta?.(meta);
+		}
 	}
 	async act(sessionId, spec) {
 		const s = this.sessions.get(sessionId);
@@ -14201,6 +23401,25 @@ const CAPTURE_POLICY = [
 	"- 采集结果用 dataforge_capture_result(scope=cards|samples|credentials|pages) 取回，报给用户时只说接口名/用途/出入参要点，不贴 token/cookie 原文。",
 	"- 诚实边界：遇风控/验证码/超限截断/外部域名跳过，如实转述 capture_status/capture_result 里的 notice，不隐瞒。"
 ].join("\n");
+/** UI 测试纪律：录制/回放都是真浏览器操作，写操作必须用户确认。 */
+const UI_TEST_POLICY = [
+	"## dataforge-ui-test（浏览器录制 + 回放）",
+	"- 录制分两步：先 dataforge_ui_record_open 让用户登录/导航，再 dataforge_ui_record_start；登录动作不要进脚本。",
+	"- 停止录制用 dataforge_ui_record_stop（给 site/flow 默认落新版本）；密码/上传不进脚本，如实转述回执里的跳过计数。",
+	"- 回放 dataforge_ui_run 不带 confirm 只出计划卡；click/submit/upload 可能产生真实业务写入，必须用户确认后带 confirm=true。",
+	"- 失败先 dataforge_ui_runs(run_id) 看断在哪个步骤/断言，截图与现场 HTML 在回执里；不要盲目重跑写操作。",
+	"- UI 脚本是项目资产（工作区 .dsh/dataforge/ui-tests），改脚本只经 dataforge_ui_script_upsert，不手改运行记录。"
+].join("\n");
+/** Trace → 自动编排纪律：草稿不执行，业务值不写死。 */
+const TRACE_POLICY = [
+	"## dataforge-trace（采集 → 自动编排草稿）",
+	"- 自动编排先 dataforge_trace_get / dataforge_trace_analyze；低置信度绑定、动态值、正文截断都按 warning 如实转述。",
+	"- dataforge_chain_draft 只生成草稿，不落盘、不执行；先审阅 warnings/validation，再让用户确认。",
+	"- 保存用 dataforge_chain_upsert；执行用 dataforge_chain_run，不带 confirm 只出计划卡，写操作必须用户确认。",
+	"- 业务值不写死：未绑定字段用 $inputs.<name>；组织/供应商/物料等映射走 dataforge_lookup，不手编编码。",
+	"- 运行成功后用 dataforge_dataset_export(run_id) 导出 dataset/evidence；失败也要导出已有摘要。",
+	"- UI 验收先 dataforge_ui_run（成功 success.png / 失败 failure.png+failure.html），再 dataset_export(ui_run_id) 生成截图证据。"
+].join("\n");
 /** 探索执行纪律：值来源必须诚实标注，写操作必须用户确认。 */
 const EXPLORE_POLICY = [
 	"## dataforge-explore（首跑试探）",
@@ -14221,6 +23440,23 @@ function apply(ctx, rawConfig) {
 	anyCtx.inject?.(["jobs"], (svc) => {
 		jobsService = svc["jobs"];
 	});
+	let browserService;
+	anyCtx.inject?.(["browser"], (svc) => {
+		browserService = svc["browser"];
+	});
+	let agentsService;
+	anyCtx.inject?.(["agents"], (svc) => {
+		agentsService = svc["agents"];
+	});
+	const currentConversationId = () => {
+		try {
+			const list = agentsService?.list?.();
+			const first = Array.isArray(list) ? list[0] : void 0;
+			return typeof first?.id === "string" && first.id !== "" ? first.id : void 0;
+		} catch {
+			return;
+		}
+	};
 	/**
 	* 面板工作区的服务端兜底（R-2 编排页「白板」修复）。
 	*
@@ -14240,6 +23476,21 @@ function apply(ctx, rawConfig) {
 		valid.sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
 		return typeof valid[0]?.path === "string" ? valid[0].path : void 0;
 	};
+	/**
+	* 面板兜底工作区：优先最近更新、且真的存在 dataforge 数据目录的工作区。
+	*
+	* 只取“最近更新”会把刚有活动的其他项目当成当前工作区，面板于是全空。
+	* 这里只在兜底路径使用（客户端正常会带 workspace）；找不到 dataforge 数据时
+	* 才退回最新工作区，保持诚实而不是猜。
+	*/
+	const latestDataforgeWorkspacePath = () => {
+		const rows = workspaceRegistryService?.list?.();
+		if (!Array.isArray(rows) || rows.length === 0) return latestWorkspacePath();
+		const valid = rows.filter((row) => typeof row?.path === "string" && row.path !== "").filter((row) => existsSync(join(row.path, ".dsh", "dataforge")));
+		if (valid.length === 0) return latestWorkspacePath();
+		valid.sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
+		return typeof valid[0]?.path === "string" ? valid[0].path : latestWorkspacePath();
+	};
 	const dataforgeDeps = buildDataforgeDeps({
 		config,
 		resolveJobs: () => jobsService,
@@ -14255,6 +23506,28 @@ function apply(ctx, rawConfig) {
 		}),
 		openCapturingPage
 	};
+	const traceDeps = {
+		captureDbPath: join(config.dataRoot, "capture", "capture.sqlite"),
+		samplesDir: join(config.dataRoot, "capture", "samples")
+	};
+	const chainDraftDeps = {
+		...traceDeps,
+		resolveWorkspaceRoot
+	};
+	const lookupDeps = {
+		dataRoot: config.dataRoot,
+		resolveWorkspaceRoot,
+		pageReader: createPageLookupReader({
+			channel: config.captureChromeChannel,
+			timeoutMs: 15e3
+		})
+	};
+	const captureNames = new CaptureNamesStore(join(config.dataRoot, "capture", "names.yaml"));
+	const titleBackfill = new TitleBackfillService({
+		store: captureDeps.store,
+		openPage: openCapturingPage,
+		channel: config.captureChromeChannel
+	});
 	const orchestrationDeps = {
 		captureDbPath: join(config.dataRoot, "capture", "capture.sqlite"),
 		resolveWorkspaceRoot
@@ -14278,6 +23551,70 @@ function apply(ctx, rawConfig) {
 		}),
 		...credentialStorePath === void 0 ? {} : { credentialStorePath }
 	};
+	const uiSessions = new UiRecordingSessions();
+	const playwrightEngine = new PlaywrightBrowserEngine({
+		sessions: uiSessions,
+		channel: config.captureChromeChannel,
+		run: (doc, inputs, options) => runUiScript({
+			dataRoot: config.dataRoot,
+			channel: config.captureChromeChannel,
+			stepTimeoutMs: config.uiStepTimeoutSeconds * 1e3,
+			loadCookies: (startUrl) => loadCookiesForStart(uiTestDeps, startUrl)
+		}, {
+			doc,
+			inputs,
+			...options?.headless === void 0 ? {} : { headless: options.headless },
+			...options?.slowMoMs === void 0 ? {} : { slowMoMs: options.slowMoMs },
+			...options?.highlightClicks === void 0 ? {} : { highlightClicks: options.highlightClicks },
+			...options?.holdMs === void 0 ? {} : { holdMs: options.holdMs }
+		})
+	});
+	const sharedEngine = new SharedBrowserEngine({
+		resolveSeam: () => browserService,
+		resolveOwner: currentConversationId,
+		dataRoot: config.dataRoot,
+		stepTimeoutMs: config.uiStepTimeoutSeconds * 1e3
+	});
+	/** 按配置选当前引擎；显式选择不可用/未实现时带回退说明（application 会如实报错或降级）。 */
+	const resolveUiEngine = () => {
+		if (config.uiTestBrowser === "playwright") return { engine: playwrightEngine };
+		if (config.uiTestBrowser === "shared") return sharedEngine.available() ? { engine: sharedEngine } : {
+			engine: sharedEngine,
+			degraded: "共享浏览器不可用：安装/启用 dsh-builtin-browser，或把 uiTestBrowser 改为 playwright"
+		};
+		if (config.uiTestBrowser === "cdp") return {
+			engine: playwrightEngine,
+			degraded: "cdp 引擎尚未实现：已回退 Playwright（实现同一 UiBrowserEngine 契约后在此切换）"
+		};
+		return sharedEngine.available() ? { engine: sharedEngine } : { engine: playwrightEngine };
+	};
+	let uiTestDeps;
+	uiTestDeps = {
+		resolveWorkspaceRoot,
+		dataRoot: config.dataRoot,
+		enabled: config.uiTestEnabled,
+		...credentialStorePath === void 0 ? {} : { credentialStorePath },
+		resolveEngine: resolveUiEngine,
+		batchEngine: playwrightEngine
+	};
+	chainRunDeps.verifyUi = async (request) => {
+		const value = await runUiScriptForTool(uiTestDeps, void 0, {
+			site: request.site,
+			flow: request.flow,
+			...request.version === void 0 ? {} : { version: request.version },
+			inputs: request.inputs,
+			confirm: true,
+			headless: true
+		});
+		const result = value.result;
+		return {
+			...result?.runId === void 0 ? {} : { runId: result.runId },
+			...result === void 0 ? {} : { success: result.success },
+			status: value.ok ? result?.success === true ? "success" : "failed" : "failed",
+			...result?.screenshot === void 0 ? {} : { screenshot: result.screenshot },
+			...value.message === void 0 ? {} : { message: value.message }
+		};
+	};
 	anyCtx.inject?.(["webServer"], (webSvc) => {
 		const effect = webSvc["effect"];
 		const webServer = webSvc["webServer"];
@@ -14288,11 +23625,21 @@ function apply(ctx, rawConfig) {
 		const install = () => registerCapturePanelRoutes(webServer, {
 			store: captureDeps.store,
 			startCapture: (args) => startCapture(captureDeps, args),
-			orchestration: createOrchestrationPanelHandler({ resolveWorkspaceRoot: async () => latestWorkspacePath() ?? await resolveWorkspaceRoot(void 0) ?? process.cwd() })
+			names: captureNames,
+			retitle: titleBackfill,
+			orchestration: createOrchestrationPanelHandler({
+				resolveWorkspaceRoot: async () => latestDataforgeWorkspacePath() ?? await resolveWorkspaceRoot(void 0) ?? process.cwd(),
+				fallbackWorkspaceRoot: async () => latestDataforgeWorkspacePath()
+			}),
+			uiTest: createUiTestPanelHandler({
+				deps: uiTestDeps,
+				resolveWorkspaceRoot: async () => latestDataforgeWorkspacePath() ?? await resolveWorkspaceRoot(void 0) ?? process.cwd()
+			}),
+			artifacts: createArtifactsPanelHandler({ dataRoot: config.dataRoot })
 		});
 		if (typeof effect === "function") effect(install, `${name}: capture panel routes`);
 		else install();
-		logger?.info?.(`采集面板数据路由已注册：${PANEL_API_PREFIX}（runs / cards / captures / orchestration）`);
+		logger?.info?.(`采集面板数据路由已注册：${PANEL_API_PREFIX}（runs / cards / page-meta / names / retitle / captures / orchestration）`);
 	});
 	anyCtx.inject?.(["tools"], (toolsService) => {
 		const tools = toolsService["tools"];
@@ -14309,6 +23656,11 @@ function apply(ctx, rawConfig) {
 			defineCaptureStatusTool(captureDeps),
 			defineCaptureResultTool(captureDeps),
 			defineCaptureCancelTool(captureDeps),
+			defineTraceGetTool(traceDeps),
+			defineTraceAnalyzeTool(traceDeps),
+			defineChainDraftTool(chainDraftDeps),
+			defineLookupTool(lookupDeps),
+			defineDatasetExportTool(config.dataRoot),
 			defineBrowserOpenTool(captureDeps),
 			defineBrowserActTool(captureDeps),
 			defineBrowserSnapshotTool(captureDeps),
@@ -14322,14 +23674,26 @@ function apply(ctx, rawConfig) {
 			defineChainProbeTool(chainRunDeps),
 			defineChainCrystalTool(chainRunDeps),
 			defineChainDiagnoseTool(chainRunDeps),
-			defineChainCompareTool(chainRunDeps)
+			defineChainCompareTool(chainRunDeps),
+			defineUiScriptGetTool(uiTestDeps),
+			defineUiScriptUpsertTool(uiTestDeps),
+			defineUiRecordOpenTool(uiTestDeps),
+			defineUiRecordStartTool(uiTestDeps),
+			defineUiRecordStopTool(uiTestDeps),
+			defineUiRecordCloseTool(uiTestDeps),
+			defineUiRunTool(uiTestDeps),
+			defineUiRunsTool(uiTestDeps),
+			defineUiBatchRunTool(uiTestDeps)
 		]) tools.register(tool);
-		logger?.info?.(`已注册 21 个工具：flows/run/status + capture/status/result/cancel + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_bind/chain_run/chain_runs/chain_probe/chain_crystallize/chain_diagnose/chain_compare（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
+		logger?.info?.(`已注册 35 个工具：flows/run/status + capture/status/result/cancel + trace_get/trace_analyze/chain_draft/lookup/dataset_export + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_bind/chain_run/chain_runs/chain_probe/chain_crystallize/chain_diagnose/chain_compare + ui_script_get/ui_script_upsert/ui_record_open/ui_record_start/ui_record_stop/ui_record_close/ui_run/ui_runs/ui_batch_run（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
+		if (!config.uiTestEnabled) logger?.info?.("UI 回放开关 uiTestEnabled=false：dataforge_ui_run 一律 ui-test-disabled");
+		const selected = resolveUiEngine();
+		logger?.info?.(`UI 测试浏览器引擎：${selected.engine.label}${selected.degraded === void 0 ? "" : `（${selected.degraded}）`}；共享浏览器${sharedEngine.available() ? "已就绪" : "未启用（安装/启用 dsh-builtin-browser 可切换）"}；批量回归固定 Playwright 无头`);
 		if (!config.chainRunEnabled) logger?.info?.("执行开关 chainRunEnabled=false：dataforge_chain_run 一律 execution-disabled");
 	});
 	if (config.injectPolicy) try {
 		const policy = loadPolicyText(config.engineRoot);
-		const combined = `${policy.text}\n\n${CAPTURE_POLICY}\n\n${EXPLORE_POLICY}`;
+		const combined = `${policy.text}\n\n${CAPTURE_POLICY}\n\n${TRACE_POLICY}\n\n${EXPLORE_POLICY}\n\n${UI_TEST_POLICY}`;
 		const sectionName = "tool:dataforge";
 		anyCtx.systemPrompt?.section?.({
 			name: sectionName,

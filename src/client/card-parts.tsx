@@ -9,9 +9,9 @@
 import type { ReactNode } from 'react'
 import {
   AUTH_TYPE_LABELS, LOCATION_LABELS, RELATED_PAGES_DISPLAY_CAP,
-  methodClass, shortSample,
+  methodClass, pagerWindow, shortSample,
 } from './dom.js'
-import { shapeEntries } from './grouping.js'
+import { shapeEntries, uniquePageUrls } from './grouping.js'
 import type { CardRow, RelationRow, Template } from './types.js'
 
 export function MethodBadge({ method }: { method: string }): ReactNode {
@@ -84,7 +84,8 @@ export function AuthBlock({ card }: { card: CardRow }): ReactNode {
 }
 
 export function RelatedPagesBlock({ card }: { card: CardRow }): ReactNode {
-  const pages = card.relatedPageUrls
+  // 按页面身份去重：同一 SPA 页面的 hash/反缓存戳变体在「关联页面」里只算一条
+  const pages = uniquePageUrls(card.relatedPageUrls)
   return (
     <div className="dsh-df-sec">
       <h3>关联页面 <small>{pages.length}</small></h3>
@@ -124,6 +125,61 @@ export function ShapesBlock({ relations }: { relations: RelationRow[] }): ReactN
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 分页条（接口列表 / 页面列表共用）：页码窗口 + 上一页/下一页，`label` 给「第 x–y / 共 N」说明。
+ * 只有一页时仍渲染 label（数量信息有用），按钮组只在多页时出现。
+ */
+export function PagerBar({ page, totalPages, label, onGoto, ariaLabel = '分页' }: {
+  page: number
+  totalPages: number
+  label?: string
+  onGoto: (page: number) => void
+  ariaLabel?: string
+}): ReactNode {
+  return (
+    <div className="dsh-df-pagerbar">
+      {label !== undefined && <span>{label}</span>}
+      {totalPages > 1 && (
+        <span className="dsh-df-pages" role="group" aria-label={ariaLabel}>
+          <button
+            className="dsh-df-pg"
+            type="button"
+            disabled={page <= 0}
+            aria-label="上一页"
+            onClick={() => { onGoto(page - 1) }}
+          >
+            ‹
+          </button>
+          {pagerWindow(page, totalPages).map((item, index) => (
+            item === '…'
+              ? <span className="dsh-df-pg-gap" key={`gap-${index}`}>…</span>
+              : (
+                <button
+                  className="dsh-df-pg"
+                  key={item}
+                  type="button"
+                  aria-current={item === page}
+                  onClick={() => { onGoto(item) }}
+                >
+                  {item + 1}
+                </button>
+              )
+          ))}
+          <button
+            className="dsh-df-pg"
+            type="button"
+            disabled={page >= totalPages - 1}
+            aria-label="下一页"
+            onClick={() => { onGoto(page + 1) }}
+          >
+            ›
+          </button>
+        </span>
       )}
     </div>
   )

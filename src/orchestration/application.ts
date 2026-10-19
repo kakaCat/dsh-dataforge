@@ -34,6 +34,7 @@ import { cookieHeaderFromSetCookies, cookieNamesOf } from '../execute/credential
 import { persistCookies } from '../capture/credential-store.js'
 import { createReloginThrottle } from '../execute/throttle.js'
 import { extractJobId, ownerOf } from '../application.js'
+import { exportRunArtifacts } from '../datasets/export.js'
 
 /**
  * R-4 M3：跨运行换票单飞。key = 主链 origin + 登录链 site/flow。
@@ -74,6 +75,43 @@ export type ChainRunToolDeps = OrchestrationDeps & {
    * 缺省不落盘；装配处按 `config.chainCredentialPersistence` 决定是否给。
    */
   credentialStorePath?: string
+  /** UI 验收执行器（装配处注入；缺席时 verify 如实记录未执行，不阻断主链）。 */
+  verifyUi?: (request: ChainVerifyRequest) => Promise<ChainVerifyCallbackResult>
+}
+
+export type ChainVerifyRequest = {
+  site: string
+  flow: string
+  version?: number
+  inputs: Record<string, string>
+}
+
+export type ChainVerifyPlanValue = {
+  site: string
+  flow: string
+  version?: number
+  when: 'onSuccess' | 'onFailure' | 'always'
+}
+
+export type ChainVerifyCallbackResult = {
+  runId?: string
+  success?: boolean
+  status?: string
+  screenshot?: string
+  message?: string
+  skipped?: string
+}
+
+export type ChainVerifyResultValue = ChainVerifyPlanValue & {
+  runId?: string
+  success?: boolean
+  status?: string
+  screenshot?: string
+  /** verify 的 UI run 自动导出后的产物（dataset/report）。 */
+  datasetPath?: string
+  reportPath?: string
+  message?: string
+  skipped?: string
 }
 
 /** 逐条问题时给模型看的行：`nodes[0]: reason`。 */
@@ -288,6 +326,26 @@ export type ChainRunPlanValue = {
   writeNodes: string[]
   nodes: Array<{ nodeId: string; method: string; url: string; dependsOn: string[]; writes: boolean }>
   notices: string[]
+  /** 声明式 cleanup：进入主链计划卡一起确认，主链结束后执行。 */
+  cleanup?: ChainCleanupPlanValue
+  /** 声明式 UI 验收：进入主链计划卡一起确认，主链成功/失败后执行。 */
+  verify?: ChainVerifyPlanValue
+}
+
+export type ChainCleanupPlanValue = {
+  site: string
+  flow: string
+  version?: number
+  when: 'onFailure' | 'always'
+  nodeCount: number
+  writeCount: number
+}
+
+export type ChainCleanupResultValue = ChainCleanupPlanValue & {
+  runId?: string
+  status?: string
+  message?: string
+  skipped?: string
 }
 
 export type ChainRunNodeValue = {
@@ -336,6 +394,10 @@ export type ChainRunToolValue = {
   nodes?: ChainRunNodeValue[]
   failedNode?: string
   summary?: RunSummary
+  /** 主链结束后的 cleanup 结果（后台路径在 job detail 里）。 */
+  cleanup?: ChainCleanupResultValue
+  /** 主链结束后的 UI 验收结果（后台路径在 job detail 里）。 */
+  verify?: ChainVerifyResultValue
 }
 
 export type ChainRunToolArgs = {
@@ -449,7 +511,7 @@ function hostOf(baseUrl: string): string {
   }
 }
 
-function planValueOf(plan: ExecutionPlan, notices: string[]): ChainRunPlanValue {
+function planValueOf(plan: ExecutionPlan, notices: string[], cleanup?: ChainCleanupPlanValue, verify?: ChainVerifyPlanValue): ChainRunPlanValue {
   return {
     order: [...plan.order],
     totalNodes: plan.totalNodes,
@@ -464,11 +526,13 @@ function planValueOf(plan: ExecutionPlan, notices: string[]): ChainRunPlanValue 
       writes: plan.writeNodes.includes(node.nodeId),
     })),
     notices: [...notices],
+    ...(cleanup === undefined ? {} : { cleanup }),
+    ...(verify === undefined ? {} : { verify }),
   }
 }
 
 /** 确认卡：拓扑序 + 每节点方法/URL 骨架 + 写方法清单 + 目标 host。 */
-function chainConfirmationCard(doc: ChainDoc, plan: ExecutionPlan, notices: string[]): string {
+function chainConfirmationCard(doc: ChainDoc, plan: ExecutionPlan, notices: string[], cleanup?: ChainCleanupPlanValue, verify?: ChainVerifyPlanValue): string {
   const lines = plan.order.map((nodeId, index) => {
     const node = plan.nodes.find((candidate) => candidate.nodeId === nodeId) as ExecutionPlan['nodes'][number]
     const write = plan.writeNodes.includes(nodeId) ? ' ✍️写' : ''
@@ -478,12 +542,220 @@ function chainConfirmationCard(doc: ChainDoc, plan: ExecutionPlan, notices: stri
     ? '写类节点：无（整链只读）'
     : `写类节点：${plan.writeNodes.join('、')}（已发出的写请求无法撤销）`
   const note = notices.length === 0 ? '' : `\n提醒：${notices.join('；')}`
+  const cleanupLine = cleanup === undefined ? '' : `\n清理：${cleanup.site} / ${cleanup.flow}${cleanup.version === undefined ? '' : ` v${cleanup.version}`}（${cleanup.when}，${cleanup.nodeCount} 节点，写 ${cleanup.writeCount} 个）`
+  const verifyLine = verify === undefined ? '' : `\n验收：${verify.site} / ${verify.flow}${verify.version === undefined ? '' : ` v${verify.version}`}（${verify.when}）`
   return [
     `🧭 执行计划（${doc.meta.site} / ${doc.meta.flow} v${doc.meta.version}）→ ${hostOf(plan.baseUrl)}`,
     ...lines,
     writes,
-    `确认后带 confirm=true 重调即真跑；只想留档用 dry_run=true（永不发请求）。${note}`,
+    `确认后带 confirm=true 重调即真跑；只想留档用 dry_run=true（永不发请求）。${note}${cleanupLine}${verifyLine}`,
   ].join('\n')
+}
+
+/** cleanup 计划摘要：只读链/卡，不预检执行，供确认卡展示。 */
+function cleanupPlanOf(
+  workspaceRoot: string,
+  doc: ChainDoc,
+): { ok: true; value?: ChainCleanupPlanValue } | { ok: false; message: string } {
+  if (doc.cleanup === undefined) return { ok: true }
+  const loaded = loadChain(workspaceRoot, doc.cleanup.chain.site, doc.cleanup.chain.flow, {
+    ...(doc.cleanup.chain.version === undefined ? {} : { version: doc.cleanup.chain.version }),
+  })
+  if (!loaded.ok) {
+    return { ok: false, message: `cleanup 链不可用：${loaded.message}` }
+  }
+  const cleanupCards = cardsForChain(workspaceRoot, loaded.doc)
+  let writeCount = 0
+  for (const node of loaded.doc.nodes) {
+    const card = node.card === undefined ? undefined : cleanupCards.get(node.card)
+    if (card !== undefined && card.identity.method !== 'GET' && card.identity.method !== 'HEAD') writeCount += 1
+  }
+  return {
+    ok: true,
+    value: {
+      site: loaded.doc.meta.site,
+      flow: loaded.doc.meta.flow,
+      version: loaded.doc.meta.version,
+      when: doc.cleanup.when,
+      nodeCount: loaded.doc.nodes.length,
+      writeCount,
+    },
+  }
+}
+
+function valueAtPath(root: unknown, path: string): unknown {
+  const clean = path.replace(/^\$\.?/, '')
+  const tokens: Array<string | number> = []
+  for (const part of clean.split('.')) {
+    for (const match of part.matchAll(/([^[\]]+)|\[(\d+)\]/g)) {
+      if (match[1] !== undefined && match[1] !== '') tokens.push(match[1])
+      else if (match[2] !== undefined) tokens.push(Number(match[2]))
+    }
+  }
+  let current = root
+  for (const token of tokens) {
+    if (typeof token === 'number') {
+      if (!Array.isArray(current) || token < 0 || token >= current.length) return undefined
+      current = current[token]
+    } else {
+      if (current === null || typeof current !== 'object' || Array.isArray(current)) return undefined
+      current = (current as Record<string, unknown>)[token]
+    }
+  }
+  return current
+}
+
+function shouldRunCleanup(doc: ChainDoc, summary: RunSummary): boolean {
+  if (doc.cleanup === undefined) return false
+  return doc.cleanup.when === 'always' || summary.status === 'failed'
+}
+
+function resolveBoundInputs(
+  templates: Record<string, string> | undefined,
+  mainInputs: Record<string, unknown>,
+  summary: RunSummary,
+): { ok: true; inputs: Record<string, unknown> } | { ok: false; missing: string } {
+  const inputs: Record<string, unknown> = {}
+  for (const [key, template] of Object.entries(templates ?? {})) {
+    if (template.startsWith('$inputs.')) {
+      const slot = template.slice('$inputs.'.length)
+      if (!(slot in mainInputs)) return { ok: false, missing: template }
+      inputs[key] = mainInputs[slot]
+      continue
+    }
+    if (template.startsWith('$result.outputs.')) {
+      const rest = template.slice('$result.outputs.'.length)
+      const dot = rest.indexOf('.')
+      const nodeId = dot < 0 ? rest : rest.slice(0, dot)
+      const fieldPath = dot < 0 ? '' : rest.slice(dot + 1)
+      const outputs = summary.businessData?.['outputs']
+      const nodeOutputs = outputs !== null && typeof outputs === 'object' && !Array.isArray(outputs)
+        ? (outputs as Record<string, unknown>)[nodeId]
+        : undefined
+      const direct = nodeOutputs !== null && typeof nodeOutputs === 'object' && !Array.isArray(nodeOutputs)
+        ? (nodeOutputs as Record<string, unknown>)[fieldPath]
+        : undefined
+      const value = direct !== undefined ? direct : valueAtPath(nodeOutputs, fieldPath)
+      if (value === undefined) return { ok: false, missing: template }
+      inputs[key] = value
+      continue
+    }
+    if (template.startsWith('$result.')) {
+      const value = valueAtPath(summary.businessData, template.slice('$result.'.length))
+      if (value === undefined) return { ok: false, missing: template }
+      inputs[key] = value
+      continue
+    }
+    inputs[key] = template
+  }
+  return { ok: true, inputs }
+}
+
+function cleanupInputsOf(doc: ChainDoc, mainInputs: Record<string, unknown>, summary: RunSummary) {
+  return resolveBoundInputs(doc.cleanup?.inputs, mainInputs, summary)
+}
+
+function verifyInputsOf(doc: ChainDoc, mainInputs: Record<string, unknown>, summary: RunSummary) {
+  return resolveBoundInputs(doc.verify?.inputs, mainInputs, summary)
+}
+
+function verifyPlanOf(doc: ChainDoc): ChainVerifyPlanValue | undefined {
+  if (doc.verify === undefined) return undefined
+  return {
+    site: doc.verify.ui.site,
+    flow: doc.verify.ui.flow,
+    ...(doc.verify.ui.version === undefined ? {} : { version: doc.verify.ui.version }),
+    when: doc.verify.when,
+  }
+}
+
+function shouldRunVerify(doc: ChainDoc, summary: RunSummary): boolean {
+  if (doc.verify === undefined) return false
+  if (doc.verify.when === 'always') return true
+  if (doc.verify.when === 'onSuccess') return summary.status === 'completed'
+  return summary.status === 'failed'
+}
+
+/** 主链结束后执行 UI 验收；失败只返回错误信息，不覆盖主链结果。 */
+async function runVerifyForTool(
+  deps: ChainRunToolDeps,
+  doc: ChainDoc,
+  summary: RunSummary,
+  mainInputs: Record<string, unknown>,
+): Promise<ChainVerifyResultValue | undefined> {
+  const base = verifyPlanOf(doc)
+  if (base === undefined || !shouldRunVerify(doc, summary)) return undefined
+  const resolved = verifyInputsOf(doc, mainInputs, summary)
+  if (!resolved.ok) return { ...base, skipped: `缺 UI 验收入参 ${resolved.missing}（主链结果/输入里找不到）` }
+  if (deps.verifyUi === undefined) return { ...base, skipped: '未装配 UI 验收执行器（uiTestEnabled / verifyUi）' }
+  try {
+    const result = await deps.verifyUi({
+      site: base.site,
+      flow: base.flow,
+      ...(base.version === undefined ? {} : { version: base.version }),
+      inputs: Object.fromEntries(Object.entries(resolved.inputs).map(([key, value]) => [key, String(value)])),
+    })
+    const merged = { ...base, ...result }
+    if (merged.runId !== undefined) {
+      const exported = exportRunArtifacts(deps.dataRoot, merged.runId)
+      if (exported.ok) return { ...merged, datasetPath: exported.datasetPath, reportPath: exported.reportPath }
+    }
+    return merged
+  } catch (error) {
+    return { ...base, message: `UI 验收执行失败：${messageOf(error)}` }
+  }
+}
+
+/** 主链结束后执行 cleanup；失败只返回错误信息，不覆盖主链结果。 */
+async function runCleanupForTool(
+  deps: ChainRunToolDeps,
+  workspaceRoot: string,
+  doc: ChainDoc,
+  summary: RunSummary,
+  mainInputs: Record<string, unknown>,
+): Promise<ChainCleanupResultValue | undefined> {
+  if (doc.cleanup === undefined || !shouldRunCleanup(doc, summary)) return undefined
+  const planInfo = cleanupPlanOf(workspaceRoot, doc)
+  if (!planInfo.ok || planInfo.value === undefined) {
+    return { site: doc.cleanup.chain.site, flow: doc.cleanup.chain.flow, when: doc.cleanup.when, nodeCount: 0, writeCount: 0, message: planInfo.ok ? 'cleanup 链不可用' : planInfo.message }
+  }
+  const base = planInfo.value
+  const resolved = cleanupInputsOf(doc, mainInputs, summary)
+  if (!resolved.ok) {
+    return { ...base, skipped: `缺 cleanup 入参 ${resolved.missing}（主链结果/输入里找不到）` }
+  }
+  const loaded = loadChain(workspaceRoot, base.site, base.flow, {
+    ...(base.version === undefined ? {} : { version: base.version }),
+  })
+  if (!loaded.ok) return { ...base, message: `cleanup 链不可用：${loaded.message}` }
+  const cards = cardsForChain(workspaceRoot, loaded.doc)
+  const inputCheck = validateChainInputs(loaded.doc, resolved.inputs)
+  if (!inputCheck.ok) return { ...base, message: inputCheck.message }
+  const baseUrl = resolveChainBaseUrl(loaded.doc, cards, undefined)
+  const planned = buildPlan(loaded.doc, cards, resolved.inputs, baseUrl.ok ? baseUrl.baseUrl : undefined)
+  if (!planned.ok) {
+    return { ...base, message: planned.code === 'base-url-unresolved' && !baseUrl.ok ? baseUrl.message : planned.message }
+  }
+  try {
+    const runInput = {
+      doc: loaded.doc,
+      cards,
+      plan: planned.plan,
+      inputs: resolved.inputs,
+      baseUrl: planned.plan.baseUrl,
+      chainPath: chainPathForRecord(workspaceRoot, loaded.path),
+      ...(deps.credentials === undefined ? {} : { credentials: deps.credentials }),
+    }
+    const prepared = prepareChainRun({ dataRoot: deps.dataRoot, config: deps.chain }, runInput)
+    const run = await executeChainRun({ dataRoot: deps.dataRoot, config: deps.chain }, prepared, runInput)
+    return {
+      ...base,
+      runId: prepared.runId,
+      ...(run.ok ? { status: run.summary.status } : { message: run.message }),
+    }
+  } catch (error) {
+    return { ...base, message: `cleanup 执行失败：${messageOf(error)}` }
+  }
 }
 
 /** 链文件路径：工作区内用相对路径（便于回看与迁移），越界则保留绝对路径。 */
@@ -751,7 +1023,13 @@ export async function chainRunForTool(
   }
 
   const plan = planned.plan
-  const planValue = planValueOf(plan, planned.notices)
+  const cleanupPlan = cleanupPlanOf(workspaceRoot, doc)
+  if (!cleanupPlan.ok) {
+    return { ok: false, accepted: false, gate: 'blocked', code: 'invalid-chain', message: cleanupPlan.message }
+  }
+  const cleanupValue = cleanupPlan.value
+  const verifyValue = verifyPlanOf(doc)
+  const planValue = planValueOf(plan, planned.notices, cleanupValue, verifyValue)
 
   // 确认闸：不带 confirm 且不是 dry-run → 只出计划卡；不建 run、不发请求。
   if (args.dryRun !== true && args.confirm !== true) {
@@ -762,7 +1040,7 @@ export async function chainRunForTool(
       code: 'confirm-required',
       message: `计划已编译（${plan.totalNodes} 个节点，写类 ${plan.writeNodes.length} 个，目标 ${planValue.host}）：确认后带 confirm=true 重调`,
       plan: planValue,
-      card: chainConfirmationCard(doc, plan, planned.notices),
+      card: chainConfirmationCard(doc, plan, planned.notices, cleanupValue, verifyValue),
     }
   }
 
@@ -826,11 +1104,28 @@ export async function chainRunForTool(
         job.append(`链 ${doc.meta.site}/${doc.meta.flow} v${doc.meta.version} → ${planValue.host}（${plan.totalNodes} 节点）`)
         return {
           cancel: (reason?: string) => controller.abort(reason),
-          done: task.then((result) => ({
-            status: jobStatusOf(result, controller.signal.aborted),
-            detail: jobDetailOf(result),
-            ...(result.ok ? { result: JSON.stringify(result.summary) } : {}),
-          })),
+          done: task.then(async (result) => {
+            const verify = result.ok
+              ? await runVerifyForTool(deps, doc, result.summary, args.inputs ?? {})
+              : undefined
+            if (verify !== undefined) job.append(`verify ${verify.site}/${verify.flow}：${verify.skipped ?? verify.status ?? (verify.success === true ? 'success' : verify.message ?? 'unknown')}`)
+            const cleanup = result.ok
+              ? await runCleanupForTool(deps, workspaceRoot, doc, result.summary, args.inputs ?? {})
+              : undefined
+            if (cleanup?.skipped !== undefined) job.append(`cleanup 跳过：${cleanup.skipped}`)
+            else if (cleanup !== undefined) job.append(`cleanup ${cleanup.site}/${cleanup.flow}：${cleanup.status ?? cleanup.message ?? 'unknown'}`)
+            return {
+              status: jobStatusOf(result, controller.signal.aborted),
+              detail: jobDetailOf(result),
+              ...(result.ok
+                ? {
+                    result: JSON.stringify(cleanup === undefined && verify === undefined
+                      ? result.summary
+                      : { ...result.summary, ...(verify === undefined ? {} : { verify }), ...(cleanup === undefined ? {} : { cleanup }) }),
+                  }
+                : {}),
+            }
+          }),
         }
       },
     }
@@ -856,6 +1151,12 @@ export async function chainRunForTool(
   watchdog.unref?.()
   try {
     const run = await executeChainRun(chainDeps, prepared, { ...runInput, signal: controller.signal })
+    const verify = run.ok
+      ? await runVerifyForTool(deps, doc, run.summary, args.inputs ?? {})
+      : undefined
+    const cleanup = run.ok
+      ? await runCleanupForTool(deps, workspaceRoot, doc, run.summary, args.inputs ?? {})
+      : undefined
     return {
       ok: true,
       accepted: true,
@@ -865,6 +1166,8 @@ export async function chainRunForTool(
       runDir: prepared.runDir,
       plan: planValue,
       degradedNotice: '宿主未装配 dsh-jobs：本次前台执行（长链会占用对话，且不可 job_kill；建议部署 @deepseek-ai/dsh-jobs + @deepseek-ai/dsh-tool-jobs）',
+      ...(verify === undefined ? {} : { verify }),
+      ...(cleanup === undefined ? {} : { cleanup }),
       ...(run.ok
         ? {
             summary: run.summary,

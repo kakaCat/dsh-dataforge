@@ -1,0 +1,700 @@
+{
+  "captureId": "cap_mvchv4hi_92f020",
+  "entryUrl": "https://www.bilibili.com/",
+  "status": "done",
+  "samples": [
+    {
+      "id": "sm_mvchv5s5_eitpto",
+      "seq": 1,
+      "ts": 1792247463941,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/polaris_web_conf/polaris/webcnf/event.cnf",
+      "path": "/bfs/polaris_web_conf/polaris/webcnf/event.cnf",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"444.8.live-room.chronos.init.before.check\":50,\"333.788.memory.timeline.performance\":50,\"444.8.live-room.uam-player.welcome.failed\":50,\"333.1334.kv-init.error\":1,\"333.1334.kv-init.pv\":1,\"333.40181.secureCollect.collectDeviceInfo\":1,\"333.40181.secureCollect.successReport\":1,\"333.40181.secureCollect.wasmProcessTime\":1,\"444.8.live-room.room-page.live-web-danmaku-tech-report\":20}"
+    },
+    {
+      "id": "sm_mvchv5sd_5jojw3",
+      "seq": 2,
+      "ts": 1792247463949,
+      "method": "GET",
+      "url": "https://api.bilibili.com/x/kv-frontend/namespace/data?appKey=333.1339&nscode=1&unlimit=true",
+      "path": "/x/kv-frontend/namespace/data",
+      "query": {
+        "appKey": "333.1339",
+        "nscode": "1",
+        "unlimit": "true"
+      },
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"code\":0,\"message\":\"\",\"data\":{\"versionId\":\"1779957882343\",\"appVersionId\":\"39150\",\"disableUseLocalCache\":false,\"data\":{\"fallback.dft\":\"5\",\"fallback.i\":\"[1,2,2]\",\"fallback.on\":\"1\",\"fallback.suffixes\":\"{\\\"none\\\":{\\\"on\\\":1,\\\"wl\\\":[1,2,2],\\\"dft\\\":5},\\\"sgp\\\":{\\\"on\\\":1,\\\"wl\\\":[1,2,2],\\\"dft\\\":5}}\"}}}"
+    },
+    {
+      "id": "sm_mvchv5se_zp0djm",
+      "seq": 3,
+      "ts": 1792247463950,
+      "method": "GET",
+      "url": "https://api.bilibili.com/x/kv-frontend/namespace/data?appKey=333.1333&nscode=0&unlimit=true",
+      "path": "/x/kv-frontend/namespace/data",
+      "query": {
+        "appKey": "333.1333",
+        "nscode": "0",
+        "unlimit": "true"
+      },
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"code\":0,\"message\":\"\",\"data\":{\"versionId\":\"1787541432724\",\"appVersionId\":\"38811\",\"disableUseLocalCache\":false,\"data\":{\"bilimirror.minilogin\":\"{\\\"buvid\\\":[\\\"B6771AA6-7CCD-4EF2-BA5B-1FDE9A25F49A49120infoc\\\",\\\"D025573B-8686-0D9D-48DB-0C84BBB5544A45226infoc\\\",\\\"9BD89CEC-4C19-E243-63B3-9A69417B70A458220infoc\\\",\\\"4AD0D8C7-D936-FB67-4C33-7A13C004E84478537infoc\\\",\\\"84AF2B23-9DC9-0717-A474-BCB7A866198994970infoc\\\",\\\"F4373CB5-E491-2C2A-0541-2FFFC3DF2FCC71448infoc\\\"],\\\"rate\\\":0,\\\"pathMatch\\\":{\\\"exact\\\":[\\\"www.bilibil"
+    },
+    {
+      "id": "sm_mvchv5tj_v6b0gi",
+      "seq": 4,
+      "ts": 1792247463991,
+      "method": "POST",
+      "url": "https://data.bilibili.com/v2/log/web?content_type=pbrequest&logid=021436&disable_compression=true",
+      "path": "/v2/log/web",
+      "query": {
+        "content_type": "pbrequest",
+        "logid": "021436",
+        "disable_compression": "true"
+      },
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "text/plain",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "preview",
+      "requestBodyTruncated": true,
+      "responseHeaders": {
+        "values": {
+          "content-type": "text/plain; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "none",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "requestBody": "\n�\u0007\n\u0006021436\u0012\f333.1007.0.0\u001a�\u0007\nv\bd\u0010\u0005\u001a.53D72059-FCC5-0382-852B-C0D968B8B7B163503infoc*\n17922474632\b1280*720:\u0004-480B f8b295bb9328fe083b7f2724e2b6fd61J\u0002pc\u0012�\u0002\n\u00024g\u0012\u0019https://www.bilibili.com/\"\u00051.7.0*�\u0001{\"b_ut\":\"\",\"home_version\":\"V8\",\"in_new_ab\":true,\"ab_version\":{\"for_ai_home_version\":\"V8\",\"rcmd_timeout_config\":\"550\"},\"ab_split_num\":{\"for_ai_home_version\":54,\"rcmd_timeout_config\":49},\"uniq_page_id\":\"1718314762223\",\"is_modern\":true}0\u0001:\b1280*720b\u00142BD0E8D6_1A14A45FFB5\u001a\f333.1007.0.0\"\u0003333(\u00010���Ҕ48���Ҕ4@���Ҕ4Rd\u0018���Ҕ4\"\u001e\n\u0016_B"
+    },
+    {
+      "id": "sm_mvchv5ul_3pc1dp",
+      "seq": 5,
+      "ts": 1792247464029,
+      "method": "GET",
+      "url": "https://api.bilibili.com/x/kv-frontend/namespace/data?appKey=333.1007&nscode=0&unlimit=true",
+      "path": "/x/kv-frontend/namespace/data",
+      "query": {
+        "appKey": "333.1007",
+        "nscode": "0",
+        "unlimit": "true"
+      },
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"code\":0,\"message\":\"\",\"data\":{\"versionId\":\"1784536142895\",\"appVersionId\":\"38498\",\"disableUseLocalCache\":false,\"data\":{\"bilimirror.whitelist\":\"{\\\"white\\\":{\\\"rejection\\\":[\\\"extension\\\",\\\"Reached maximum\\\",\\\"timeout\\\",\\\"failed\\\",\\\"aborted\\\",\\\"network\\\"],\\\"error\\\":[\\\"extension\\\",\\\"log-reporter\\\",\\\"static.geetest.com\\\"],\\\"resource\\\":[\\\"extension\\\",\\\"bfs/archive\\\",\\\"bfs/face\\\",\\\"/bfs/sycp/sanlian/image\\\",\\\"/bfs/banner\\\"],\\\"ua\\\":[\\\"bot\\\",\\\"Bot\\\",\\\"spider\\\",\\\"Spider\\\"]},\\\"limitDomain\\\":[\\\"bilibili.com\\\"],\\\"retry\\\""
+    },
+    {
+      "id": "sm_mvchv5y8_ej36qd",
+      "seq": 6,
+      "ts": 1792247464160,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/archive/233bddb104c95d438c2ea350efa858e826108afc.jpg@.avg_color",
+      "path": "/bfs/archive/233bddb104c95d438c2ea350efa858e826108afc.jpg@.avg_color",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"RGB\": \"#5c4841\"}"
+    },
+    {
+      "id": "sm_mvchv5y9_frt3y9",
+      "seq": 7,
+      "ts": 1792247464161,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/banner/91764e265f81157f66c125f134ecaa5a93ff3a54.png@.avg_color",
+      "path": "/bfs/banner/91764e265f81157f66c125f134ecaa5a93ff3a54.png@.avg_color",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"RGB\": \"#131724\"}"
+    },
+    {
+      "id": "sm_mvchv5y9_tubvmr",
+      "seq": 8,
+      "ts": 1792247464161,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/banner/7d6b652cdc36140cee3373e69343c2207b6a4008.png@.avg_color",
+      "path": "/bfs/banner/7d6b652cdc36140cee3373e69343c2207b6a4008.png@.avg_color",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"RGB\": \"#7a4d44\"}"
+    },
+    {
+      "id": "sm_mvchv5y9_qzyhdp",
+      "seq": 9,
+      "ts": 1792247464161,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/banner/d9adeb2683fa613e885832252ca7dab75a6dac61.jpg@.avg_color",
+      "path": "/bfs/banner/d9adeb2683fa613e885832252ca7dab75a6dac61.jpg@.avg_color",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"RGB\": \"#411d1d\"}"
+    },
+    {
+      "id": "sm_mvchv5ya_ivypye",
+      "seq": 10,
+      "ts": 1792247464162,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/archive/5ccd89e5d6c47c024147ebe9b612261f5d35dc1f.jpg@.avg_color",
+      "path": "/bfs/archive/5ccd89e5d6c47c024147ebe9b612261f5d35dc1f.jpg@.avg_color",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"RGB\": \"#9e928e\"}"
+    },
+    {
+      "id": "sm_mvchv5ya_ct1oyr",
+      "seq": 11,
+      "ts": 1792247464162,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/banner/9525e0c25daa19eeea7afc73b4dd2d2b1a9f5b6f.jpg@.avg_color",
+      "path": "/bfs/banner/9525e0c25daa19eeea7afc73b4dd2d2b1a9f5b6f.jpg@.avg_color",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"RGB\": \"#635f7a\"}"
+    },
+    {
+      "id": "sm_mvchv5ya_3slypw",
+      "seq": 12,
+      "ts": 1792247464162,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/banner/e6e119e6206fc2fc7b29764c216c0048babe604e.png@.avg_color",
+      "path": "/bfs/banner/e6e119e6206fc2fc7b29764c216c0048babe604e.png@.avg_color",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"RGB\": \"#4c4a5f\"}"
+    },
+    {
+      "id": "sm_mvchv5yb_8sz672",
+      "seq": 13,
+      "ts": 1792247464163,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/banner/143338a4403b99fc760be8b66fbf26715ef6a1d2.png@.avg_color",
+      "path": "/bfs/banner/143338a4403b99fc760be8b66fbf26715ef6a1d2.png@.avg_color",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"RGB\": \"#6c6f65\"}"
+    },
+    {
+      "id": "sm_mvchv5yb_5savyp",
+      "seq": 14,
+      "ts": 1792247464163,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/banner/bd673a7c9d42676410ba434b2b7a1ef68dbca173.png@.avg_color",
+      "path": "/bfs/banner/bd673a7c9d42676410ba434b2b7a1ef68dbca173.png@.avg_color",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"RGB\": \"#c1c1c1\"}"
+    },
+    {
+      "id": "sm_mvchv5yy_m8ap59",
+      "seq": 15,
+      "ts": 1792247464186,
+      "method": "GET",
+      "url": "https://api.bilibili.com/x/web-interface/nav",
+      "path": "/x/web-interface/nav",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"code\":-101,\"message\":\"账号未登录\",\"ttl\":1,\"data\":{\"isLogin\":false,\"wbi_img\":{\"img_url\":\"https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png\",\"sub_url\":\"https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png\"},\"ip_region\":\"CN\"}}"
+    },
+    {
+      "id": "sm_mvchv5yz_idzitq",
+      "seq": 16,
+      "ts": 1792247464187,
+      "method": "POST",
+      "url": "https://api.bilibili.com/x/internal/gaia-gateway/ExClimbWuzhi",
+      "path": "/x/internal/gaia-gateway/ExClimbWuzhi",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "application/json;charset=UTF-8",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "preview",
+      "requestBodyTruncated": true,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "requestBody": "{\"payload\":\"{\\\"3064\\\":1,\\\"5062\\\":\\\"1792247463848\\\",\\\"03bf\\\":\\\"https%3A%2F%2Fwww.bilibili.com%2F\\\",\\\"39c8\\\":\\\"333.1007.fp.risk\\\",\\\"34f1\\\":\\\"\\\",\\\"d402\\\":\\\"\\\",\\\"654a\\\":\\\"\\\",\\\"6e7c\\\":\\\"1280x720\\\",\\\"3c43\\\":{\\\"2673\\\":0,\\\"5766\\\":24,\\\"6527\\\":0,\\\"7003\\\":1,\\\"807e\\\":1,\\\"b8ce\\\":\\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36\\\",\\\"641c\\\":0,\\\"07a4\\\":\\\"zh-CN\\\",\\\"1c57\\\":32,\\\"0bd0\\\":14,\\\"748e\\\":[720,1280],\\\"d61f\\\":[720,1280],\\\"fc9d\\\":-480,\\\"6aa9\\",
+      "responseBody": "{\"code\":0,\"message\":\"0\",\"ttl\":1,\"data\":{}}"
+    },
+    {
+      "id": "sm_mvchv5z5_zqk1u8",
+      "seq": 17,
+      "ts": 1792247464193,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/svg-next/homeicon/article_gray/v1.json",
+      "path": "/bfs/svg-next/homeicon/article_gray/v1.json",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"default\":[\"M0 0L24 0L24 24L0 24L0 0z\",\"M18 4.8L6 4.8C5.33726 4.8 4.8 5.33726 4.8 6L4.8 18C4.8 18.66276 5.33726 19.2 6 19.2L18 19.2C18.66276 19.2 19.2 18.66276 19.2 18L19.2 6C19.2 5.33726 18.66276 4.8 18 4.8z\",\"M4 5.99998C4 4.89541 4.89544 3.99997 6 3.99997L18 3.99997C19.1046 3.99997 20.00004 4.89541 20.00004 5.99998L20.00004 18C20.00004 19.1046 19.1046 19.99992 18 19.99992L6 19.99992C4.89544 19.99992 4 19.1046 4 18L4 5.99998zM6 5.59998C5.77909 5.59998 5.6 5.77907 5.6 5.99998L5.6 18C5.6 18.22092 5.77908 18"
+    },
+    {
+      "id": "sm_mvchv5z5_z44i4d",
+      "seq": 18,
+      "ts": 1792247464193,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/svg-next/homeicon/live_gray/v1.json",
+      "path": "/bfs/svg-next/homeicon/live_gray/v1.json",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"default\":[\"M0 0L24 0L24 24L0 24L0 0z\",\"M3.99984 6.40068C3.99984 5.95885 4.35802 5.60069 4.79984 5.60069L15.99984 5.60069C16.44168 5.60069 16.79988 5.95885 16.79988 6.40068L16.79988 10.00068L19.9998 7.60068L19.9998 16.80072L16.79988 14.40072L16.79988 17.60064C16.79988 18.04248 16.44168 18.40068 15.99984 18.40068L4.79984 18.40068C4.35802 18.40068 3.99984 18.04248 3.99984 17.60064L3.99984 6.40068z\",\"M3.19985 6.40066C3.19985 5.517 3.91619 4.80066 4.79984 4.80066L15.99984 4.80066C16.88352 4.80066 17.5998 5.517"
+    },
+    {
+      "id": "sm_mvchv5z6_dg5t8x",
+      "seq": 19,
+      "ts": 1792247464194,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/svg-next/homeicon/activity_gray/v1.json",
+      "path": "/bfs/svg-next/homeicon/activity_gray/v1.json",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"default\":[\"M0.89371 0.57143L23.75086 0.57143L23.75086 23.42857L0.89371 23.42857L0.89371 0.57143z\",\"M4.70841 5.19295C5.2937 5.03613 5.8953 5.38346 6.05213 5.96874L9.42514 18.55703C9.58198 19.14229 9.23464 19.74389 8.64935 19.90069C8.06406 20.0576 7.46246 19.71029 7.30563 19.12491L3.93262 6.53667C3.77578 5.95138 4.12312 5.34978 4.70841 5.19295z\",\"M5.27351 7.30093L10.54989 5.88712L13.46914 6.22925L16.10731 5.52234C16.52366 5.4108 16.94503 5.63347 17.04846 6.01973L18.99543 12.34011C19.09886 12.7264 18.84526 1"
+    },
+    {
+      "id": "sm_mvchv5z6_l7snpx",
+      "seq": 20,
+      "ts": 1792247464194,
+      "method": "GET",
+      "url": "https://i0.hdslb.com/bfs/svg-next/homeicon/cheese_gray/v1.json",
+      "path": "/bfs/svg-next/homeicon/cheese_gray/v1.json",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.bilibili.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.bilibili.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"default\":[\"M19.33943 4.80001L16.25371 4.80001C14.42514 4.80001 13.39657 5.94287 12.82514 6.85715C12.71086 7.08573 12.25371 7.08573 12.13943 6.85715C11.68229 6.05715 10.65371 4.80001 8.71086 4.80001L5.62514 4.80001C4.82514 4.80001 4.13943 5.48573 4.13943 6.28573L4.13943 16C4.13943 16.8 4.82514 17.48571 5.62514 17.48571L8.71086 17.48571C10.53943 17.48571 11.568 18.74286 12.13943 19.54286C12.25371 19.77143 12.71086 19.77143 12.82514 19.54286C13.28229 18.74286 14.31086 17.48571 16.25371 17.48571L19.33943 17.4"
+    }
+  ],
+  "stats": {
+    "totalSamples": 94,
+    "returnedSamples": 20,
+    "interfaces": 18,
+    "writes": 2,
+    "pages": 1,
+    "truncatedBodies": 8
+  },
+  "warnings": [
+    {
+      "code": "trace-limit",
+      "message": "fixture: only first 20 / 94 samples"
+    }
+  ]
+}

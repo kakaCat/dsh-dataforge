@@ -1,0 +1,6 @@
+node_modules/
+.dsh/dataforge/
+.gstack/
+.omo/
+.DS_Store
+*.log

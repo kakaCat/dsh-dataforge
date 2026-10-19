@@ -279,6 +279,7 @@ run 详情现有 pages/samples/credentials 三块独缺 cards；本端点补齐�
 | FR-3.5/3.6 文档六要素 | 数据模型（location、请求头契约）、接口设计 IF-2 | location 标注用例、凭证头脱敏用例 | 不适用 |
 | FR-3.7 鉴权标志 | 数据模型（鉴权标志入卡） | authType 五值探测用例（含 query token 被 VOLATILE 滤后仍标 token-param） | 不适用 |
 | FR-7.1/7.2 采集页 | 接口设计 IF-1/IF-2、交付 M3 | e2e-capture 门 | 不适用 |
+| 名称可读性（2026-10-17 用户反馈：网站/网页/接口都没有名称） | 追记·三级名称 | store 页面标题幂等/投影用例、`semanticName` v2 用例、`/names` 读写用例、补抓身份校验用例、客户端名称解析用例 | 不适用 |
 | NFR 可靠性 | 数据模型（迁移）、失败模式 | 迁移幂等用例 | 不适用 |
 
 ## 常见问题  serves: 全文
@@ -291,6 +292,28 @@ run 详情现有 pages/samples/credentials 三块独缺 cards；本端点补齐�
 | 谁半夜被叫起来、手上有什么 | 本地工具无值班；真出事看 `<dataRoot>/capture/events.ndjson`，每次请求/关系/迁移都在里面 |
 | 数据错了怎么修、修得回来吗 | 关系行错 → 删行重采即可（样本层厚数据是权威，关系与卡都可重建）；迁移只增不删，无修数场景 |
 | 这个决定错了多久能发现 | 指纹规则错（误并/漏并形态）在第一次双形态站点采集的编排单测与 e2e 就会暴露 |
+
+## 追记：三级名称（2026-10-17，v1.3）  serves: FR-7.3、FR-7.5
+
+**问题**：接口库/采集网站里网站只有 host、页面只有 URL、接口名是机械的「GET hotrank」——原型（`docs/prototypes/sites.html`、`api-library.html`）写明「按 Host 自动归档、自动取名」并带「自动取名」标签，但数据面从未记录过标题，面板也没有改名入口。
+
+**一句话方案**：采集期把页面标题/站点名落进 `pages`，读取面按「手工名 > 编排名 > 自动名 > host/URL」投影出三级名称；旧数据由面板「补抓名称」用已存 cookie 重访补齐；接口名另给面板改名入口（按 mergeKey 持久化）。
+
+- **数据模型**：`pages` 加 `title`（`document.title`）与 `site_name`（`og:site_name` / `application-name` / `apple-mobile-web-app-title`），启动迁移只 ALTER 加列；`upsertPage` 按 (capture_id, url) 幂等，标题随 meta 更新、不重复计页。历史行留空 = 当时没记，不回填猜测。
+- **采集落标题**：`browser.ts` 在主 frame 导航/`load` 防抖读标题并经 `onPageMeta` 上报；`session.ts` 的 `Sink` 增加同名回调（open 期先暂存、bindSink 补发，入口页不丢）；single_page / site_crawl / action 三条路径统一 `upsertPage(..., {title, siteName})`。
+- **名称解析（只读投影，不改卡文件）**：
+  - 网站名：手工 `/names` 覆盖 > **编排已有站点名**（链 `meta.site`，经 overview 的 `site × hosts` 投影，保证编排页与采集/接口库显示同一个名字）> 该 host 最新页面的 `site_name` > 入口页标题经 `siteLabelFromTitle` 截断 > host。标题推断来源在 UI 上标「自动取名」；编排名是已 authored 的名字，不标。
+  - 页面名：手工覆盖 > 页面 `title` > 无（退回 URL）。
+  - 接口名：手工覆盖（键 = `mergeKey`）> `semanticName` v2（路径去噪、取末两段 humanize、**不带方法前缀**，方法由徽标单独展示）。
+- **旧数据补抓**：`POST /retitle` 由插件进程用 `credential_events` 里的 cookie 无头重访缺标题页面（入口页优先）；**页面最终身份必须等于目标身份才写回**——登录墙重定向只会记 failed，绝不把登录页标题安到目标页上。单飞；**采集闸按 host**：正在采集的 host 本轮跳过、其余 host 照常补抓，全部目标被挡才回 `capture-running`（一条遗留 running 行不该永久堵死名称补抓）；`GET /retitle/status` 给计数。
+- **手工名存储**：`<dataRoot>/capture/names.yaml`（`sites` = 小写 host、`pages` = 页面身份、`interfaces` = mergeKey），tmp+rename 原子写；`GET/POST /names` 读写。放在 dataRoot 而非工作区：被命名的采集卡/站点本就是 dataRoot 的全局采集库数据。
+- **面板路由**：`GET /page-meta`（按页面身份去重的最新标题投影）、`GET/POST /names`、`POST /retitle`、`GET /retitle/status`；`/cards` 与 `/runs/:id` 的卡片投影补 `mergeKey` / `name` / `nameSource`（`auto`|`manual`）。
+
+**边界与代价**：
+- 名称是**展示投影**：不改链、不改项目接口库 YAML（库里仍是导入时快照）；存量 `interface_cards.name` 不回写，v2 规则只在读取投影与后续采集中生效。
+- 自动名可能不准（没有 `og:site_name` 时靠入口页标题启发式），所以标「自动取名」而不谎称人工确认。
+- 补抓是网络动作：cookie 失效的登录页会被身份校验拦下记 failed；不做后台定时回填，只在用户点按钮时跑。
+- 客户端对 `/page-meta`、`/names` 取数失败必须降级为空（老服务端未更新时页面照常可用，只是没有名称）。
 
 ## 开放问题  serves: 全文
 
@@ -305,4 +328,4 @@ run 详情现有 pages/samples/credentials 三块独缺 cards；本端点补齐�
 - **关联文档**：需求 [../requirement/interface-capture.md](../requirement/interface-capture.md)；MVP-1 设计 [../../superpowers/specs/2026-10-17-interface-capture-design.md](../../superpowers/specs/2026-10-17-interface-capture-design.md)；MVP-1 计划 [../../superpowers/plans/2026-10-17-interface-capture.md](../../superpowers/plans/2026-10-17-interface-capture.md)
 - **现状代码**：[store.ts](../../../src/capture/store.ts)（迁移先例 `migrateLegacyCardScope`）、[normalizer.ts](../../../src/capture/normalizer.ts)（VOLATILE 表与归并键）、[panel-routes.ts](../../../src/capture/panel-routes.ts)（出口闸与 405 纪律）、[board-runs.ts](../../../src/client/board-runs.ts)（轮询与三态先例）
 - **评审记录**：待评审
-- **变更历史**：2026-10-17 v1.0 初稿；2026-10-17 v1.1 补请求头契约（location 增 'header'、凭证头脱敏、content-type 参与指纹）——源于评审追问「content-type 这类的不需要采集吗」；2026-10-17 v1.2 补鉴权标志（authType 五值 + 探测证据 + credentialRefs，探测绕开 VOLATILE 过滤链）——源于评审追问「token 这个需要标志是否接口需要 token」
+- **变更历史**：2026-10-17 v1.0 初稿；2026-10-17 v1.1 补请求头契约（location 增 'header'、凭证头脱敏、content-type 参与指纹）——源于评审追问「content-type 这类的不需要采集吗」；2026-10-17 v1.2 补鉴权标志（authType 五值 + 探测证据 + credentialRefs，探测绕开 VOLATILE 过滤链）——源于评审追问「token 这个需要标志是否接口需要 token」；2026-10-17 v1.3 三级名称（pages.title/site_name、名称解析优先级、旧页面补抓、接口自动名 v2 + 改名）——源于用户反馈「网站和网页没有名称」「接口也需要名称」

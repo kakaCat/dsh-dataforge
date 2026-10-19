@@ -1,0 +1,39 @@
+{
+  "apiVersion": "dataforge/v1",
+  "kind": "ui-run-dataset",
+  "runId": "uir_mvdxghjb_fc3t9v",
+  "createdAt": "2026-10-18T14:35:21.341Z",
+  "status": "success",
+  "site": "JsonPlaceholder",
+  "flow": "查看用户页",
+  "version": 1,
+  "ui": {
+    "runId": "uir_mvdxghjb_fc3t9v",
+    "kind": "ui-run",
+    "status": "success",
+    "startedAt": 1792334119367,
+    "site": "JsonPlaceholder",
+    "flow": "查看用户页",
+    "version": 1,
+    "startUrl": "https://jsonplaceholder.typicode.com/users/1",
+    "headless": true,
+    "totalSteps": 1,
+    "finishedAt": 1792334121151,
+    "stepsDone": 1,
+    "screenshot": "ui-runs/uir_mvdxghjb_fc3t9v/success.png",
+    "elapsedMs": 1759
+  },
+  "steps": [
+    {
+      "id": "open",
+      "kind": "goto",
+      "status": "start"
+    },
+    {
+      "id": "open",
+      "kind": "goto",
+      "status": "done"
+    }
+  ],
+  "screenshot": "success.png"
+}

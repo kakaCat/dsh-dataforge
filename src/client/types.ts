@@ -37,7 +37,16 @@ export type RunRow = {
   notice?: string
 }
 
-export type PageRow = { id: string; url: string; depth: number; status: string }
+export type PageRow = {
+  id: string
+  url: string
+  depth: number
+  status: string
+  /** 采集时记录的 document.title（旧数据没有）。 */
+  title?: string
+  /** 采集时记录的站点名（og:site_name / 标题推断；旧数据没有）。 */
+  siteName?: string
+}
 
 export type SampleRow = {
   id: string
@@ -77,7 +86,12 @@ export type RunDetail = {
 export type CardRow = {
   id: string
   captureId: string
-  name?: string
+  /** 跨页归并键（method + 路径 + query 键集合）：接口手工改名的持久化键。 */
+  mergeKey: string
+  /** 服务端给出的可读接口名（自动名或手工名）。 */
+  name: string
+  /** 名称来源：auto = 自动取名（可被手工名覆盖）；manual = 面板手工改名。 */
+  nameSource?: 'auto' | 'manual'
   urlTemplate: string
   method: string
   requestTemplate?: Template
@@ -90,6 +104,52 @@ export type CardRow = {
   relatedPageUrls: string[]
   sampleCount: number
   createdAt: number
+}
+
+/* ───────────────────────── 三级名称（网站 / 页面 / 接口） ───────────────────────── */
+
+/**
+ * 采集时记录的页面元数据（GET /page-meta 投影）。
+ *
+ * `url` 是 `pageIdentityOf` 归一后的页面身份；`title` / `siteName` 取自采集中
+ * 记录的 document.title 与 og:site_name（缺省 = 采集时没拿到，不是空名）。
+ */
+export type PageMetaRow = {
+  url: string
+  title?: string
+  siteName?: string
+  visitedAt: number
+}
+
+/** 手工名称覆盖（GET /names 投影；键：sites=小写 host，pages=pageIdentityOf，interfaces=mergeKey）。 */
+export type NameMaps = {
+  sites: Record<string, string>
+  pages: Record<string, string>
+  interfaces: Record<string, string>
+}
+
+/** 面板手工改名的入口（POST /names 的入参 kind）。 */
+export type NameKind = 'site' | 'page' | 'interface'
+
+/** POST /retitle 回执：accepted=false 时 reason 说明为什么没发起。 */
+export type RetitleStartResult = {
+  accepted: boolean
+  targets: number
+  hosts: number
+  reason?: 'busy' | 'no-targets' | 'capture-running'
+}
+
+/** GET /retitle/status 投影（补抓名称的进度/结果）。 */
+export type RetitleStatus = {
+  running: boolean
+  targets: number
+  tried: number
+  updated: number
+  failed: number
+  skipped: number
+  startedAt?: number
+  finishedAt?: number
+  error?: string
 }
 
 /** POST /captures 回执投影（panel-routes ok(data) 的 data 段）。 */
@@ -239,4 +299,330 @@ export type ChainSaveResult = {
   code?: string
   issues?: Array<{ target: string; code: string; reason: string }>
   warnings?: Array<{ target: string; code: string; reason: string }>
+}
+
+
+/* ───────────────────────── UI 测试（浏览器录制 + 回放） ───────────────────────── */
+
+/** 页面断言（与服务端 ui-script 契约同形；客户端只做展示，不重复校验）。 */
+export type UiExpectLike = {
+  kind: string
+  selector?: string
+  equals?: string | number
+  contains?: string
+}
+
+/** 回放步骤。 */
+export type UiStepLike = {
+  id: string
+  kind: string
+  selector?: string
+  candidates?: string[]
+  value?: string
+  key?: string
+  url?: string
+  ms?: number
+  files?: string[]
+  expect?: UiExpectLike[]
+  at?: string
+}
+
+/** 脚本入参槽位。 */
+export type UiInputLike = {
+  name: string
+  type: string
+  required: boolean
+  example?: string
+}
+
+/** ui-script 文档（面板展示用；字段与服务端契约一一对应）。 */
+export type UiScriptDocLike = {
+  apiVersion: string
+  kind: string
+  meta: {
+    site: string
+    flow: string
+    version: number
+    created: string
+    source?: string
+    startUrl: string
+    domain?: string
+    note?: string
+    viewport?: { width: number; height: number }
+  }
+  inputs: UiInputLike[]
+  steps: UiStepLike[]
+}
+
+/** 版本摘要。 */
+export type UiScriptVersionInfo = {
+  version: number
+  created?: string
+  source?: string
+  stepCount?: number
+  startUrl?: string
+  note?: string
+  unreadable?: string
+}
+
+/** 脚本列表行（overview）。 */
+export type UiScriptRef = {
+  site: string
+  flow: string
+  latest: number
+  versions: number[]
+  domain?: string
+  updatedAt?: string
+  unreadable?: string
+  versionsInfo?: UiScriptVersionInfo[]
+}
+
+/** UI 回放运行行（/ui-tests/runs）。 */
+export type UiRunRow = {
+  runId: string
+  status: string
+  site: string
+  flow: string
+  version: number
+  startUrl: string
+  startedAt: number
+  finishedAt?: number
+  totalSteps?: number
+  stepsDone?: number
+  failedStep?: string
+  error?: string
+  screenshot?: string
+}
+
+/** 录制会话。 */
+export type UiRecordingSessionView = {
+  sessionId: string
+  pageUrl: string
+  recording: boolean
+  startedAt: number
+}
+
+/** 面板 overview。 */
+export type UiOverview = {
+  generatedAt: number
+  scripts: UiScriptRef[]
+  runs: UiRunRow[]
+  sessions: UiRecordingSessionView[]
+  uiTestsRootHint: string
+  /** 当前浏览器引擎（配置 uiTestBrowser 解析后的结果）。 */
+  browser?: {
+    engine: string
+    label: string
+    available: boolean
+    degraded?: string
+    installCommand?: string
+  }
+}
+
+/** 单版本脚本详情。 */
+export type UiScriptDetail = {
+  site: string
+  flow: string
+  version: number
+  availableVersions: number[]
+  yaml: string
+  doc: UiScriptDocLike
+}
+
+/** 停止录制回执（面板只消费展示字段）。 */
+export type UiRecordStopResult = {
+  ok: boolean
+  sessionId?: string
+  startUrl?: string
+  steps?: UiStepLike[]
+  stepCount?: number
+  skippedSecrets?: number
+  skippedUploads?: number
+  notice?: string
+  saved?: { site: string; flow: string; version: number; path: string }
+  persistedCookies?: number
+  error?: string
+}
+
+/** 回放计划卡 / 执行回执。 */
+export type UiRunResponse = {
+  ok: boolean
+  gate?: string
+  code?: string
+  message?: string
+  missing?: string[]
+  plan?: {
+    site: string
+    flow: string
+    version: number
+    startUrl: string
+    stepCount: number
+    writeSteps: number
+    steps: Array<{ id: string; kind: string; target?: string; value?: string }>
+    inputs: Record<string, string>
+    card?: string
+  }
+  result?: {
+    runId: string
+    success: boolean
+    site: string
+    flow: string
+    version: number
+    startUrl: string
+    totalSteps: number
+    stepsDone: number
+    steps: Array<{
+      id: string
+      kind: string
+      ok: boolean
+      target?: string
+      elapsedMs: number
+      error?: string
+      assertions: Array<{ kind: string; ok: boolean; expected?: string; actual?: string; elapsedMs: number; error?: string }>
+    }>
+    failedStep?: { id: string; kind: string; ok: boolean; error?: string }
+    screenshot?: string
+    dom?: string
+    error?: string
+    elapsedMs: number
+    cookiesApplied: number
+  }
+}
+
+/** 运行详情事件（扁平投影）。 */
+export type UiRunEventRow = {
+  event: string
+  ts?: number
+  id?: string
+  kind?: string
+  status?: string
+  stepId?: string
+  selector?: string
+  expected?: string
+  actual?: string
+  elapsed?: number
+  error?: string
+  success?: boolean
+  message?: string
+  screenshot?: string
+  dom?: string
+}
+
+/** 运行详情。 */
+export type UiRunDetail = {
+  run: UiRunRow
+  events: UiRunEventRow[]
+}
+
+
+/** 页面点选结果（选择器候选 + 元素摘要）。 */
+export type UiPickResult = {
+  ok: boolean
+  cancelled?: boolean
+  sessionId?: string
+  pageUrl?: string
+  selector?: string
+  candidates?: string[]
+  element?: { tag: string; id: string; text: string }
+  error?: string
+}
+
+
+/* ───────────────────────── UI 批量回归（M3） ───────────────────────── */
+
+export type UiBatchPlanItem = {
+  index: number
+  site: string
+  flow: string
+  version?: number
+  stepCount: number
+  writeSteps: number
+  missing: string[]
+  error?: string
+}
+
+export type UiBatchPlan = {
+  selection: 'flows' | 'site' | 'all'
+  site?: string
+  total: number
+  limit: number
+  items: UiBatchPlanItem[]
+  missingInputs: string[]
+  writeSteps: number
+  card?: string
+}
+
+export type UiBatchItemResult = {
+  index: number
+  site: string
+  flow: string
+  version?: number
+  runId?: string
+  success: boolean
+  skipped?: boolean
+  error?: string
+  stepsDone?: number
+  totalSteps?: number
+  failedStep?: string
+  screenshot?: string
+  elapsedMs?: number
+}
+
+export type UiBatchRecord = {
+  batchId: string
+  status: string
+  startedAt: number
+  finishedAt?: number
+  selection: string
+  site?: string
+  total: number
+  passed: number
+  failed: number
+  skipped: number
+  elapsedMs?: number
+  items: UiBatchItemResult[]
+  report?: string
+  reportJson?: string
+}
+
+export type UiBatchResponse = {
+  ok: boolean
+  gate?: string
+  code?: string
+  message?: string
+  plan?: UiBatchPlan
+  result?: {
+    batchId: string
+    selection: string
+    site?: string
+    total: number
+    passed: number
+    failed: number
+    skipped: number
+    elapsedMs: number
+    items: UiBatchItemResult[]
+    report: string
+    reportJson: string
+  }
+}
+
+
+/** 运行产物行（GET /artifacts）。 */
+export type ArtifactList = {
+  artifacts: ArtifactRow[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type ArtifactRow = {
+  runId: string
+  kind: 'chain' | 'ui' | 'unknown'
+  status?: string
+  site?: string
+  flow?: string
+  createdAt?: string
+  hasDataset: boolean
+  hasReport: boolean
+  datasetSize?: number
 }

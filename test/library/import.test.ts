@@ -115,6 +115,33 @@ it('首跑导入：采集卡 → 卡文件 + 索引，路径按位置加前缀�
   expect(readIndex(fx.dir).cards.map((entry) => entry.cardId)).toEqual(['card_000001'])
 })
 
+it('页面来源按身份去重：同一 SPA 页面的 hash/反缓存戳变体只留一个原始 URL', () => {
+  const fx = fixture()
+  run(fx.store, 'cap_1')
+  const captureCardId = addCard(fx.store, {
+    captureId: 'cap_1',
+    mergeKey: 'GET /api/materials:q',
+    pages: [
+      'https://pan.baidu.com/disk/main#/index?category=all',
+      'https://pan.baidu.com/disk/main#/index',
+      'https://pan.baidu.com/disk/main?_at_=1792240465584#/index?category=all',
+      'https://pan.baidu.com/disk/main#/share',
+    ],
+  })
+  fx.store.upsertRelation('cap_1', captureCardId, 'https://pan.baidu.com/disk/main#/index', 'fp-1')
+  closeAndImport(fx)
+  const card = readCard(fx.dir, 'card_000001')
+  // 保留首次出现的原始 URL（可打开），只压掉同一页面身份
+  expect(card?.sources).toEqual([{
+    captureId: 'cap_1',
+    pages: [
+      'https://pan.baidu.com/disk/main#/index?category=all',
+      'https://pan.baidu.com/disk/main#/share',
+    ],
+    relationIds: [expect.any(String)],
+  }])
+})
+
 it('重复导入同一 run：收敛到同一卡集合，sources 不重复、索引不重写', () => {
   const fx = fixture()
   run(fx.store, 'cap_1')

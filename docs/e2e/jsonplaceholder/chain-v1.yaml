@@ -1,0 +1,24 @@
+apiVersion: dataforge/v1
+kind: interface-chain
+meta:
+  site: JsonPlaceholder
+  flow: 真实只读闭环
+  version: 1
+  created: '2026-10-18T14:34:56.142Z'
+  source: agent
+inputs: []
+nodes:
+  - id: n1
+    card: card_000001
+    constants: {}
+  - id: n2
+    card: card_000002
+    constants: {}
+edges:
+  - from: n1.body.email
+    to: n2.query.email
+verify:
+  when: onSuccess
+  ui:
+    site: JsonPlaceholder
+    flow: 查看用户页

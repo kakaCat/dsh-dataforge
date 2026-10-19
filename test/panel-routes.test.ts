@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { CaptureStore } from '../src/capture/store.js'
 import { createCapturePanelHandler, registerCapturePanelRoutes, type CapturePanelDeps } from '../src/capture/panel-routes.js'
+import { CaptureNamesStore } from '../src/capture/names.js'
+import type { TitleBackfillService } from '../src/capture/retitle.js'
 
 let dir: string | undefined
 let store: CaptureStore | undefined
@@ -29,7 +31,7 @@ function seededStore(): CaptureStore {
     id: 'cap_t1', taskType: 'single_page', entryUrl: 'https://example.com/',
     status: 'running', startedAt: 1700000000000, stats: { pages: 0, requests: 0, cards: 0, credentials: 0 },
   })
-  store.upsertPage('cap_t1', 'https://example.com/', 0, 'ok')
+  store.upsertPage('cap_t1', 'https://example.com/', 0, 'ok', { title: '示例首页', siteName: '示例站点' })
   store.upsertSample('cap_t1', undefined, {
     url: 'https://example.com/api/list', method: 'GET', status: 200,
     requestHeaders: { cookie: 'session_id=SECRET_VALUE' }, responseHeaders: {},
@@ -50,7 +52,7 @@ interface FakeResponse {
   body: string
 }
 
-function serve(current: CaptureStore, method: string, url: string): FakeResponse {
+function serve(current: CaptureStore, method: string, url: string, extra: Partial<CapturePanelDeps> = {}): FakeResponse {
   const captured: FakeResponse = { status: 0, headers: {}, body: '' }
   const res = {
     writeHead: (status: number, headers: Record<string, string>) => {
@@ -59,7 +61,7 @@ function serve(current: CaptureStore, method: string, url: string): FakeResponse
     },
     end: (body: string) => { captured.body = body },
   }
-  createCapturePanelHandler({ store: current })(
+  createCapturePanelHandler({ store: current, ...extra })(
     { method, url } as unknown as IncomingMessage,
     res as unknown as ServerResponse,
   )
@@ -71,6 +73,7 @@ function servePost(
   url: string,
   body: unknown,
   startCapture?: CapturePanelDeps['startCapture'],
+  extra: Partial<CapturePanelDeps> = {},
 ): FakeResponse {
   const captured: FakeResponse = { status: 0, headers: {}, body: '' }
   const chunks = Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))
@@ -89,11 +92,21 @@ function servePost(
       if (event === 'end') setTimeout(cb, 0)
     },
   }
-  createCapturePanelHandler({ store: current, ...(startCapture === undefined ? {} : { startCapture }) })(
+  createCapturePanelHandler({
+    store: current,
+    ...(startCapture === undefined ? {} : { startCapture }),
+    ...extra,
+  })(
     req as unknown as IncomingMessage,
     res as unknown as ServerResponse,
   )
   return captured
+}
+
+/** 名称覆盖文件放在当前测试临时目录下（与采集库同根，贴近生产布局）。 */
+function namesStore(): CaptureNamesStore {
+  if (dir === undefined) throw new Error('先 seededStore() 再取 namesStore')
+  return new CaptureNamesStore(join(dir, 'capture', 'names.yaml'))
 }
 
 describe('createCapturePanelHandler（/dashboard/api/dataforge）', () => {
@@ -365,5 +378,184 @@ describe('registerCapturePanelRoutes', () => {
     dispose()
     dispose()
     expect(disposers).toHaveLength(0)
+  })
+})
+
+describe('名称数据面（page-meta / names / retitle / 卡片投影）', () => {
+  it('GET /page-meta：按页面身份去重、标题/站点名/visitedAt 在场', () => {
+    const current = seededStore()
+    current.upsertPage('cap_t1', 'https://example.com/list#/a?tab=1', 0, 'ok', { title: '列表页' })
+    current.upsertPage('cap_t1', 'https://example.com/list#/a', 0, 'ok', { siteName: '示例站点' })
+    const res = serve(current, 'GET', '/dashboard/api/dataforge/page-meta')
+    expect(res.status).toBe(200)
+    const data = JSON.parse(res.body).data as {
+      generatedAt: number
+      pages: Array<{ url: string; title?: string; siteName?: string; visitedAt: number }>
+    }
+    expect(data.generatedAt).toBeGreaterThan(0)
+    expect(new Set(data.pages.map((page) => page.url))).toEqual(
+      new Set(['https://example.com/', 'https://example.com/list#/a']),
+    )
+    expect(data.pages.find((page) => page.url === 'https://example.com/list#/a')).toMatchObject({
+      title: '列表页', siteName: '示例站点',
+    })
+    expect(data.pages.find((page) => page.url === 'https://example.com/')).toMatchObject({
+      title: '示例首页', siteName: '示例站点',
+    })
+    for (const row of data.pages) expect(typeof row.visitedAt).toBe('number')
+  })
+
+  it('GET /names：未装配 / 空文件 → 三个空对象（不 500）', () => {
+    const current = seededStore()
+    const unwired = serve(current, 'GET', '/names')
+    expect(unwired.status).toBe(200)
+    expect(JSON.parse(unwired.body).data).toEqual({ sites: {}, pages: {}, interfaces: {} })
+
+    const empty = serve(current, 'GET', '/names', { names: namesStore() })
+    expect(JSON.parse(empty.body).data).toEqual({ sites: {}, pages: {}, interfaces: {} })
+  })
+
+  it('GET /names：手工覆盖三分区读回（site 小写 / page 身份 / interface 原样）', () => {
+    const current = seededStore()
+    const names = namesStore()
+    names.set('site', 'Example.COM', '示例站')
+    names.set('page', 'https://example.com/list#/a?tab=1', '列表页')
+    names.set('interface', 'GET example.com/api/list', '列表接口')
+    const parsed = JSON.parse(serve(current, 'GET', '/names', { names }).body) as {
+      data: { sites: Record<string, string>; pages: Record<string, string>; interfaces: Record<string, string> }
+    }
+    expect(parsed.data).toEqual({
+      sites: { 'example.com': '示例站' },
+      pages: { 'https://example.com/list#/a': '列表页' },
+      interfaces: { 'GET example.com/api/list': '列表接口' },
+    })
+  })
+
+  it('POST /names：写入 → 200 {kind,key,name}（key 归一）；空 name = 删除', async () => {
+    const current = seededStore()
+    const names = namesStore()
+    const written = servePost(current, '/names', { kind: 'site', key: 'Example.COM', name: ' 示例站 ' }, undefined, { names })
+    await waitForPromise()
+    expect(written.status).toBe(200)
+    expect(JSON.parse(written.body).data).toEqual({ kind: 'site', key: 'example.com', name: '示例站' })
+
+    const pageWritten = servePost(current, '/names', {
+      kind: 'page', key: 'https://example.com/list?_at_=1#/a?tab=1', name: '列表页',
+    }, undefined, { names })
+    await waitForPromise()
+    expect(JSON.parse(pageWritten.body).data).toEqual({ kind: 'page', key: 'https://example.com/list#/a', name: '列表页' })
+
+    const removed = servePost(current, '/names', { kind: 'site', key: 'example.com', name: '   ' }, undefined, { names })
+    await waitForPromise()
+    expect(removed.status).toBe(200)
+    expect(JSON.parse(removed.body).data).toEqual({ kind: 'site', key: 'example.com' })
+    expect(JSON.parse(removed.body).data).not.toHaveProperty('name')
+    expect(names.snapshot().sites).toEqual({})
+  })
+
+  it('POST /names：kind/key 非法、name 超 80、坏 JSON → 400 信封', async () => {
+    const current = seededStore()
+    const names = namesStore()
+    const cases: Array<[unknown, string]> = [
+      [{ kind: 'flow', key: 'x', name: 'x' }, 'bad-name-kind'],
+      [{ kind: 'site', key: '  ', name: 'x' }, 'bad-name-key'],
+      [{ kind: 'site', key: 'x.test', name: 42 }, 'bad-name-value'],
+      [{ kind: 'site', key: 'x.test', name: 'x'.repeat(81) }, 'name-too-long'],
+    ]
+    for (const [body, code] of cases) {
+      const res = servePost(current, '/names', body, undefined, { names })
+      await waitForPromise()
+      expect(res.status).toBe(400)
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, code })
+    }
+    const badJson = servePost(current, '/names', '{oops', undefined, { names })
+    await waitForPromise()
+    expect(badJson.status).toBe(400)
+    expect(JSON.parse(badJson.body)).toMatchObject({ code: 'bad-json' })
+    // 未装配：合法请求 → 503（装配问题，不是请求方的错）
+    const unwired = servePost(current, '/names', { kind: 'site', key: 'x.test', name: 'x' })
+    await waitForPromise()
+    expect(unwired.status).toBe(503)
+    expect(JSON.parse(unwired.body)).toMatchObject({ code: 'names-not-wired' })
+  })
+
+  it('POST /retitle：未装配 503；装配后操作反馈走 200 信封（busy/no-targets 不是 5xx）', async () => {
+    const current = seededStore()
+    const unwired = servePost(current, '/retitle', {})
+    await waitForPromise()
+    expect(unwired.status).toBe(503)
+    expect(JSON.parse(unwired.body)).toMatchObject({ code: 'retitle-not-wired' })
+
+    const retitle = {
+      start: vi.fn(() => ({ accepted: false, targets: 0, hosts: 0, reason: 'no-targets' as const })),
+      status: vi.fn(),
+    } as unknown as TitleBackfillService
+    const res = servePost(current, '/retitle', {}, undefined, { retitle })
+    await waitForPromise()
+    expect(res.status).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({
+      success: true,
+      data: { accepted: false, targets: 0, hosts: 0, reason: 'no-targets' },
+    })
+    expect(retitle.start).toHaveBeenCalledTimes(1)
+  })
+
+  it('GET /retitle/status：未装配回零状态；装配后透传服务状态', () => {
+    const current = seededStore()
+    const unwired = serve(current, 'GET', '/retitle/status')
+    expect(unwired.status).toBe(200)
+    expect(JSON.parse(unwired.body).data).toEqual({
+      running: false, targets: 0, tried: 0, updated: 0, failed: 0, skipped: 0,
+    })
+
+    const retitle = {
+      start: vi.fn(),
+      status: vi.fn(() => ({ running: true, targets: 3, tried: 1, updated: 1, failed: 0, skipped: 2, startedAt: 123 })),
+    } as unknown as TitleBackfillService
+    const running = JSON.parse(serve(current, 'GET', '/retitle/status', { retitle }).body) as { data: unknown }
+    expect(running.data).toMatchObject({ running: true, targets: 3, tried: 1, updated: 1, skipped: 2, startedAt: 123 })
+  })
+
+  it('GET /cards：name=改进 semanticName（auto）；手工覆盖按 mergeKey 生效（manual）', () => {
+    const current = seededStore()
+    const auto = JSON.parse(serve(current, 'GET', '/cards').body) as {
+      data: { cards: Array<{ mergeKey: string; name: string; nameSource: string }> }
+    }
+    expect(auto.data.cards[0]).toMatchObject({
+      mergeKey: 'GET example.com/api/list',
+      name: 'list', // https://example.com/api/list → 剥掉 api 前缀 → list（不带方法前缀）
+      nameSource: 'auto',
+    })
+
+    const names = namesStore()
+    names.set('interface', 'GET example.com/api/list', '列表接口')
+    const manual = JSON.parse(serve(current, 'GET', '/cards', { names }).body) as {
+      data: { cards: Array<{ name: string; nameSource: string }> }
+    }
+    expect(manual.data.cards[0]).toMatchObject({ name: '列表接口', nameSource: 'manual' })
+  })
+
+  it('GET /runs/<id>：cards 同样带 mergeKey/name/nameSource', () => {
+    const current = seededStore()
+    const names = namesStore()
+    names.set('interface', 'GET example.com/api/list', '列表接口')
+    const parsed = JSON.parse(serve(current, 'GET', '/runs/cap_t1', { names }).body) as {
+      data: { cards: Array<{ mergeKey: string; name: string; nameSource: string }> }
+    }
+    expect(parsed.data.cards[0]).toMatchObject({
+      mergeKey: 'GET example.com/api/list', name: '列表接口', nameSource: 'manual',
+    })
+  })
+
+  it('POST 方法守卫：只允许 /captures、/names、/retitle，其余 405', () => {
+    const current = seededStore()
+    for (const path of ['/runs', '/cards', '/page-meta', '/retitle/status']) {
+      const res = serve(current, 'POST', path)
+      expect(res.status).toBe(405)
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, code: 'method-not-allowed' })
+    }
+    const message = JSON.parse(serve(current, 'POST', '/runs').body) as { error: string }
+    expect(message.error).toContain('/names')
+    expect(message.error).toContain('/retitle')
   })
 })

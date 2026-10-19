@@ -298,18 +298,68 @@ function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex').slice(0, 16)
 }
 
-/** 语义化名称（§6.3 六要素之一）：method + 最后一个具名路径段（先过 {@link normalizeUrlForTemplate} 抽 {p}），全抽象时退回 host。 */
+/**
+ * 接口名的噪声路径段：接口前缀 / 客户端壳层 / 静态资源，不含业务语义。
+ *
+ * 与「版本段（v1 / v1.2 / 1.2）、纯数字段、`{p}` 占位段」一起剥掉，剩下的末两段才是名字来源。
+ * 全小写比较（`API`、`Rest` 同样算噪声）。
+ */
+const SEMANTIC_NOISE_SEGMENTS = new Set([
+  'api', 'apis', 'sapi', 'vapi', 'rest', 'restapi', 'openapi', 'ajax', 'cgi-bin',
+  'web', 'www', 'index', 'index.html', 'service', 'services', 'controller', 'internal',
+  'pub', 'public', 'static', 'assets', 'pc', 'h5', 'app',
+])
+
+/** 占位段（`{p}` / `{id}`）：匿名参数不构成名字。 */
+const PLACEHOLDER_SEGMENT_RE = /^\{[^}]*\}$/
+/** 纯数字段（路径 id）：不是名字。 */
+const PURE_NUMBER_SEGMENT_RE = /^\d+$/
+/** 版本段：v1 / V2 / v1.2 / 1.2（纯数字段会先被更早的规则剥掉，这里只兜版本形态）。 */
+const VERSION_SEGMENT_RE = /^v?\d+(?:\.\d+)*$/i
+
+/** 单段 humanize：驼峰拆词、`_-.` 变空格、压空白、小写化。 */
+function humanizePathSegment(segment: string): string {
+  return segment
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/[_\-.\s]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function isNoisePathSegment(segment: string): boolean {
+  if (segment === '') return true
+  if (PLACEHOLDER_SEGMENT_RE.test(segment)) return true
+  if (PURE_NUMBER_SEGMENT_RE.test(segment)) return true
+  if (VERSION_SEGMENT_RE.test(segment)) return true
+  return SEMANTIC_NOISE_SEGMENTS.has(segment.toLowerCase())
+}
+
+/**
+ * 语义化名称 v2（§6.3 六要素之一）：路径去噪后取**最后两段** humanize，用 ` · ` 连接。
+ *
+ * 与 v1 的差别：
+ *   - 名字**不带方法前缀**（方法在界面上另有徽标，名字只描述接口语义）；
+ *   - 不只看最后一段：`aichat/api/messages/list` 也读得出 `messages · list`；
+ *   - 剥掉接口前缀（api/sapi/rest…）、版本段、纯数字 id 与 `{p}` 占位段；
+ *   - 什么都剥没了才退回 `${method} ${host}`（没有 host 用 capture.local）。
+ */
 export function semanticName(method: string, urlTemplate: string): string {
   const pathOnly = normalizeUrlForTemplate(urlTemplate).urlTemplate.split('?')[0]
+  const picked = pathSegmentsOf(pathOnly)
+    .filter((segment) => !isNoisePathSegment(segment))
+    .slice(-2)
+    .map(humanizePathSegment)
+    .filter((segment) => segment !== '')
+  if (picked.length > 0) return picked.join(' · ')
   let host = ''
   try {
     host = new URL(pathOnly, 'http://capture.local').host
   } catch {
     host = ''
   }
-  const named = pathSegmentsOf(pathOnly).filter((s) => s !== '{p}')
-  const last = named[named.length - 1] ?? ''
-  return last === '' ? `${method} ${host}` : `${method} ${last}`
+  return `${method} ${host === '' ? 'capture.local' : host}`
 }
 
 // ── FR-3.7 鉴权探测（读原始样本，不受 VOLATILE 滤键影响；只记名称，不记值） ──

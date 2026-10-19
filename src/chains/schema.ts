@@ -80,6 +80,8 @@ export type ChainNode = {
   hashes?: Record<string, string>
   /** 业务成功判据；HTTP 200 但字段不等于期望值时节点失败（如 errno:0）。 */
   expect?: ChainExpect
+  /** 多条业务成功判据（全部满足才通过）；与 expect 二选一或叠加。 */
+  expects?: ChainExpect[]
   /** FR-1.2 节点级配置预留位（本期只落盘不执行，R-3 消费）。 */
   retry?: number
   timeoutSeconds?: number
@@ -125,6 +127,30 @@ export type ChainEdge = {
   pick?: ChainEdgePick
 }
 
+/** 链级清理：主链结束后按 when 运行一条独立的清理链。 */
+export type ChainCleanup = {
+  when: 'onFailure' | 'always'
+  chain: {
+    site: string
+    flow: string
+    version?: number
+  }
+  /** 清理链入参：支持 $inputs.<name>（主链输入） / $result.<path>（主链 businessData） / 字面值。 */
+  inputs?: Record<string, string>
+}
+
+/** 链级 UI 验收：主链后运行一条 ui-script。 */
+export type ChainVerify = {
+  when: 'onSuccess' | 'onFailure' | 'always'
+  ui: {
+    site: string
+    flow: string
+    version?: number
+  }
+  /** UI 脚本入参：支持 $inputs.<name> / $result.outputs.<node>.<path> / 字面值。 */
+  inputs?: Record<string, string>
+}
+
 export type ChainMeta = {
   site: string
   flow: string
@@ -157,6 +183,8 @@ export type ChainDoc = {
   inputs: ChainInput[]
   nodes: ChainNode[]
   edges: ChainEdge[]
+  cleanup?: ChainCleanup
+  verify?: ChainVerify
 }
 
 /** 接口卡的一个字段（入参/出参同形）；`[n]` 与 `[*]` 等价。 */
@@ -291,6 +319,7 @@ const NodeSchema = Schema.object({
   baseUrl: Schema.string(),
   hashes: Schema.dict(Schema.string()),
   expect: Schema.any(),
+  expects: Schema.any(),
   retry: Schema.number().min(0),
   timeoutSeconds: Schema.number().min(0),
   layout: LayoutSchema,
@@ -336,6 +365,8 @@ export const ChainSchema = Schema.object({
   inputs: Schema.array(InputSchema).default([]),
   nodes: Schema.array(NodeSchema).required(),
   edges: Schema.array(EdgeSchema).default([]),
+  cleanup: Schema.any(),
+  verify: Schema.any(),
 })
 
 /* ----------------------------------------------------------------- helpers */
@@ -491,6 +522,13 @@ function normalizeExpect(raw: unknown): ChainExpect | undefined {
   return { path, equals }
 }
 
+/** expect 数组：非法项丢弃；空数组视为没写。 */
+function normalizeExpects(raw: unknown): ChainExpect[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out = raw.map(normalizeExpect).filter((item): item is ChainExpect => item !== undefined)
+  return out.length === 0 ? undefined : out
+}
+
 /** 把 YAML 里的 pick 收敛成类型；缺 match/field 视为没写（不静默猜）。 */
 function normalizePick(raw: unknown): ChainEdgePick | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
@@ -509,6 +547,61 @@ function normalizePick(raw: unknown): ChainEdgePick | undefined {
   }
 }
 
+/** cleanup 收敛：只认明确的 site/flow/when；输入必须是字符串映射。 */
+function normalizeCleanup(raw: unknown): ChainCleanup | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const record = raw as Record<string, unknown>
+  const chainRaw = record['chain']
+  if (chainRaw === null || typeof chainRaw !== 'object' || Array.isArray(chainRaw)) return undefined
+  const chain = chainRaw as Record<string, unknown>
+  const site = typeof chain['site'] === 'string' ? chain['site'].trim() : ''
+  const flow = typeof chain['flow'] === 'string' ? chain['flow'].trim() : ''
+  if (site === '' || flow === '') return undefined
+  const version = chain['version']
+  const inputsRaw = record['inputs']
+  const inputs: Record<string, string> = {}
+  if (inputsRaw !== null && typeof inputsRaw === 'object' && !Array.isArray(inputsRaw)) {
+    for (const [key, value] of Object.entries(inputsRaw as Record<string, unknown>)) {
+      if (typeof value === 'string') inputs[key] = value
+    }
+  }
+  return {
+    when: record['when'] === 'always' ? 'always' : 'onFailure',
+    chain: {
+      site,
+      flow,
+      ...(typeof version === 'number' && Number.isInteger(version) && version >= 1 ? { version } : {}),
+    },
+    ...(Object.keys(inputs).length === 0 ? {} : { inputs }),
+  }
+}
+
+/** verify 收敛：when 缺省 onSuccess；site/flow 必填。 */
+function normalizeVerify(raw: unknown): ChainVerify | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const record = raw as Record<string, unknown>
+  const uiRaw = record['ui']
+  if (uiRaw === null || typeof uiRaw !== 'object' || Array.isArray(uiRaw)) return undefined
+  const ui = uiRaw as Record<string, unknown>
+  const site = typeof ui['site'] === 'string' ? ui['site'].trim() : ''
+  const flow = typeof ui['flow'] === 'string' ? ui['flow'].trim() : ''
+  if (site === '' || flow === '') return undefined
+  const version = ui['version']
+  const inputsRaw = record['inputs']
+  const inputs: Record<string, string> = {}
+  if (inputsRaw !== null && typeof inputsRaw === 'object' && !Array.isArray(inputsRaw)) {
+    for (const [key, value] of Object.entries(inputsRaw as Record<string, unknown>)) {
+      if (typeof value === 'string') inputs[key] = value
+    }
+  }
+  const when = record['when'] === 'always' ? 'always' : record['when'] === 'onFailure' ? 'onFailure' : 'onSuccess'
+  return {
+    when,
+    ui: { site, flow, ...(typeof version === 'number' && Number.isInteger(version) && version >= 1 ? { version } : {}) },
+    ...(Object.keys(inputs).length === 0 ? {} : { inputs }),
+  }
+}
+
 function normalizeDoc(raw: unknown): ChainDoc {
   const doc = raw as ChainDoc & {
     inputs?: Array<Omit<ChainInput, 'required'> & { required?: boolean }>
@@ -516,6 +609,8 @@ function normalizeDoc(raw: unknown): ChainDoc {
     edges?: Array<Omit<ChainEdge, 'suggested'> & { suggested?: boolean }>
   }
   const docUnknown = unknownKeysOf(doc)
+  delete docUnknown.cleanup
+  delete docUnknown.verify
   return {
     ...docUnknown,
     apiVersion: doc.apiVersion,
@@ -546,6 +641,7 @@ function normalizeDoc(raw: unknown): ChainDoc {
       delete rest.baseUrl
       delete rest.hashes
       delete rest.expect
+      delete rest.expects
       const layout = nodeLayoutOf(node.layout)
       return {
         ...rest,
@@ -559,6 +655,7 @@ function normalizeDoc(raw: unknown): ChainDoc {
         ...(node.files === undefined || Object.keys(node.files).length === 0 ? {} : { files: { ...node.files } }),
         ...(node.hashes === undefined || Object.keys(node.hashes).length === 0 ? {} : { hashes: { ...node.hashes } }),
         ...(normalizeExpect(node.expect) === undefined ? {} : { expect: normalizeExpect(node.expect) }),
+        ...(normalizeExpects(node.expects) === undefined ? {} : { expects: normalizeExpects(node.expects) }),
         ...(node.retry === undefined ? {} : { retry: node.retry }),
         ...(node.timeoutSeconds === undefined ? {} : { timeoutSeconds: node.timeoutSeconds }),
         ...(layout === undefined ? {} : { layout }),
@@ -572,6 +669,8 @@ function normalizeDoc(raw: unknown): ChainDoc {
       ...(edge.transform === undefined ? {} : { transform: edge.transform }),
       ...(normalizePick(edge.pick) === undefined ? {} : { pick: normalizePick(edge.pick) }),
     })),
+    ...(normalizeCleanup(doc.cleanup) === undefined ? {} : { cleanup: normalizeCleanup(doc.cleanup) }),
+    ...(normalizeVerify(doc.verify) === undefined ? {} : { verify: normalizeVerify(doc.verify) }),
   }
 }
 

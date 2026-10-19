@@ -1,0 +1,610 @@
+{
+  "captureId": "cap_mvcdgc74_zdh9u7",
+  "entryUrl": "https://www.baidu.com",
+  "status": "done",
+  "samples": [
+    {
+      "id": "sm_mvcdgd8u_erj5e8",
+      "seq": 1,
+      "ts": 1792240055310,
+      "method": "GET",
+      "url": "https://www.baidu.com/sugrec?&prod=pc_his&from=pc_web&json=1&imod=2&sid=&hisdata=%5B%5D&_t=1792240055284&req=2&usegosug=1&csor=0",
+      "path": "/sugrec",
+      "query": {
+        "prod": "pc_his",
+        "from": "pc_web",
+        "json": "1",
+        "imod": "2",
+        "hisdata": "[]",
+        "_t": "1792240055284",
+        "req": "2",
+        "usegosug": "1",
+        "csor": "0"
+      },
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "ps-dataurlconfigqid": "0xbda2ab300006321a",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "accept": "application/json, text/javascript, */*; q=0.01",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"q\":\"\",\"p\":false,\"bs\":\"\",\"csor\":\"\",\"err_no\":0,\"errmsg\":\"\",\"queryid\":\"0xe8ffe96daf9f3f\"}"
+    },
+    {
+      "id": "sm_mvcdgt7w_nupp9w",
+      "seq": 2,
+      "ts": 1792240076012,
+      "method": "POST",
+      "url": "https://passport.baidu.com/cap/init",
+      "path": "/cap/init",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "accept": "application/json, text/plain, */*",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "preview",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "requestBody": "_=1792240075979&refer=https%3A%2F%2Fwww.baidu.com%2F&ak=1e3f2dd1c81f2075171a547893391274&ver=2&scene=login&ds=&tk=&as=&reinit=0",
+      "responseBody": "{\"code\":0,\"msg\":\"Success\",\"data\":{\"tk\":\"32973a9FRNeS+R+4Fi6qafzT5tTNuA/VJzQ+2C3pXq99LUmeMjZv/S/6+BmsN1/Q4cZmgaFhL1e9NFfigDqc/VVr++ke3x6rjO3lWmh1fuSSAhq6nz4F+UJW1v63gL6eo6xB1A0sFdfwBYUf6PyOsx8tBlx/YWqkMXkiRxNDTKCzcgo=\",\"as\":\"d1a51cc2\",\"ds\":\"m4qO5qXodumJbn+EbnzdB4U4y4vmSNNX28C/sSrkZbQinObd8U15RrwUUUTE4sDv1i+OLdOk6xqgFG0jIG4ZR3DLxxFYSrcR1+sjo83sVnrZ4B2BpqaM6m44WSK9mQ8o7n3YfohkCuuEiVeKlr6qATYkFcmZ2F4/UygRrSRcJCiV72kM+dbed+XeDWAq3SfVU3uw83sHOJhX3xT3Xk7KF7ulEk1Fh2gpaB55x/Osi4pGUw6giBZWWC1rh+ha5Z6fCZPFJfL2XoNgV+pz"
+    },
+    {
+      "id": "sm_mvcdgvkb_ikyz1s",
+      "seq": 3,
+      "ts": 1792240079051,
+      "method": "POST",
+      "url": "https://xlab.baidu.com/jnmq",
+      "path": "/jnmq",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "application/x-www-form-urlencoded",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "preview",
+      "requestBodyTruncated": true,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "requestBody": "p=tIMmI5cwYjONKRTT4i%2BOGCo5sjS08kYh42bI3apkYrzDqyhQ%2Bf56MPW%2FCLzVjsXcK5vptqJxkOePXq36EgQcRZdSkTP2Tnecy9AkxxI7GEWvQeNGl%2FMpYDH5lNdKqTYt62NZ2AFfmNq1AO3byyEn5OF1AuatZKpxLBwo3TonKVUvszDi0XQxzWmy05BDHvDNmxxzGUEaVbIhDE70uKshBzL4GuQ819jJb8hsPL7nWyO7%2F1y%2FcHhLCidaoODreRed45%2FjscV3JV1zEIDkpG7Bc7Ot2T2hFOc7ll0wjb8Ma5MHyKGi4y3rLqxIZDn%2FU%2BAIfvmYE7yNlovtkt1ziRaiMNtL2KhkuUdd7UDePHkw2d7dXRLfqWFqwnpfe6jzC%2Fry7Z38VbHttRdcs%2BzdXIyY8xsrcu3A%2FP71uwh38cGsNjbkQAvVxd0TxcsgqHCpDA0tXztuowtUg34yI51tDYOw1DtXM0pNPmMpCKVUrm",
+      "responseBody": "{\"o\":0,\"s\":\"R2EMb/+k8khbCPm+ahjQP9hhuKs18GL2onTycXUgnRo=\"}"
+    },
+    {
+      "id": "sm_mvcdgzjo_4aq8ve",
+      "seq": 4,
+      "ts": 1792240084212,
+      "method": "POST",
+      "url": "https://passport.baidu.com/cap/log",
+      "path": "/cap/log",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "accept": "application/json, text/plain, */*",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "preview",
+      "requestBodyTruncated": true,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "requestBody": "_=1792240084176&refer=https%3A%2F%2Fwww.baidu.com%2F&ak=1e3f2dd1c81f2075171a547893391274&as=d1a51cc2&scene=login&tk=32973a9FRNeS%2BR%2B4Fi6qafzT5tTNuA%2FVJzQ%2B2C3pXq99LUmeMjZv%2FS%2F6%2BBmsN1%2FQ4cZmgaFhL1e9NFfigDqc%2FVVr%2B%2Bke3x6rjO3lWmh1fuSSAhq6nz4F%2BUJW1v63gL6eo6xB1A0sFdfwBYUf6PyOsx8tBlx%2FYWqkMXkiRxNDTKCzcgo%3D&ver=2&fs=4IFX1dNMcbegH%2FAVAV%2BiI3nIZsIkvluZ%2Bc%2BE%2B85AulQszk0KA19QvRbrzEEzOInPDQHNH8lsEIB8pjgdvA91hO3hOIupvdkN2sLqP%2BTK3cP2E99X2ilOWkoDvcFfer5Q6TRf5hGzGovkIvZbdYpu6rALa0sDxM6gIPnzqTU0FL",
+      "responseBody": "{\"code\":0,\"msg\":\"Success\",\"data\":{\"as\":\"d1a51cc2\",\"ds\":\"sDTXTBQqSAPgxzxaxi28fIU4y4vmSNNX28C/sSrkZbQinObd8U15RrwUUUTE4sDv1i+OLdOk6xqgFG0jIG4ZR3DLxxFYSrcR1+sjo83sVnrZ4B2BpqaM6m44WSK9mQ8o7n3YfohkCuuEiVeKlr6qATYkFcmZ2F4/UygRrSRcJCiV72kM+dbed+XeDWAq3SfVU3uw83sHOJhX3xT3Xk7KF7ulEk1Fh2gpaB55x/Osi4pGUw6giBZWWC1rh+ha5Z6fCZPFJfL2XoNgV+pz54wEUVnpxttpE2RYgShaPZ3xn8DbIZmtk/phEJgyz/cW4TwYit38xSIouD3VuJCCY5OZTrSY6rxHTtdBM7Vkm5mwrubR6hXIdgmGn9187blmZ0JqK95+3/AEge8HvZ0m9vKCHvxbpII8nnWSO9k73U2qxcMPG/rTZCPOqhrDhrVNNGW0gt/gYMFO"
+    },
+    {
+      "id": "sm_mvcdh3oc_79bu7c",
+      "seq": 5,
+      "ts": 1792240089564,
+      "method": "POST",
+      "url": "https://passport.baidu.com/cap/log",
+      "path": "/cap/log",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "accept": "application/json, text/plain, */*",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "preview",
+      "requestBodyTruncated": true,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "requestBody": "_=1792240089528&refer=https%3A%2F%2Fwww.baidu.com%2F&ak=1e3f2dd1c81f2075171a547893391274&as=d1a51cc2&scene=login&tk=32973a9FRNeS%2BR%2B4Fi6qafzT5tTNuA%2FVJzQ%2B2C3pXq99LUmeMjZv%2FS%2F6%2BBmsN1%2FQ4cZmgaFhL1e9NFfigDqc%2FVVr%2B%2Bke3x6rjO3lWmh1fuSSAhq6nz4F%2BUJW1v63gL6eo6xB1A0sFdfwBYUf6PyOsx8tBlx%2FYWqkMXkiRxNDTKCzcgo%3D&ver=2&fs=4IFX1dNMcbegH%2FAVAV%2BiI3nIZsIkvluZ%2Bc%2BE%2B85AulQszk0KA19QvRbrzEEzOInPDQHNH8lsEIB8pjgdvA91hHKc%2B8P1WvHOLowK1CRxsntdcZSAqvwKDVrkJm45wkiczyuI5oRM8eVsEKPyPoDnVQqp7KS%2BS%2FfK5jtV1g",
+      "responseBody": "{\"code\":0,\"msg\":\"Success\",\"data\":{\"as\":\"d1a51cc2\",\"ds\":\"IBLzSp/w296z50h4v43jNIU4y4vmSNNX28C/sSrkZbQinObd8U15RrwUUUTE4sDv1i+OLdOk6xqgFG0jIG4ZR3DLxxFYSrcR1+sjo83sVnrZ4B2BpqaM6m44WSK9mQ8o7n3YfohkCuuEiVeKlr6qATYkFcmZ2F4/UygRrSRcJCiV72kM+dbed+XeDWAq3SfVU3uw83sHOJhX3xT3Xk7KF7ulEk1Fh2gpaB55x/Osi4pGUw6giBZWWC1rh+ha5Z6fCZPFJfL2XoNgV+pz54wEUVnpxttpE2RYgShaPZ3xn8DbIZmtk/phEJgyz/cW4TwYit38xSIouD3VuJCCY5OZTntGhqHBq//kwdi4ihz+dstl58YLTIvoJgXxmp45VaaDhWW7sUHmXruBARNljo0gwVUQTJwPORsxg6+Me3Ln3lyDQYFLFZWbwV8KTzFOihmu7K4l9Sw7"
+    },
+    {
+      "id": "sm_mvcdhw9k_7z90dh",
+      "seq": 6,
+      "ts": 1792240126616,
+      "method": "POST",
+      "url": "https://passport.baidu.com/cap/log",
+      "path": "/cap/log",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "accept": "application/json, text/plain, */*",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "preview",
+      "requestBodyTruncated": true,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "requestBody": "_=1792240126574&refer=https%3A%2F%2Fwww.baidu.com%2F&ak=1e3f2dd1c81f2075171a547893391274&as=d1a51cc2&scene=login&tk=32973a9FRNeS%2BR%2B4Fi6qafzT5tTNuA%2FVJzQ%2B2C3pXq99LUmeMjZv%2FS%2F6%2BBmsN1%2FQ4cZmgaFhL1e9NFfigDqc%2FVVr%2B%2Bke3x6rjO3lWmh1fuSSAhq6nz4F%2BUJW1v63gL6eo6xB1A0sFdfwBYUf6PyOsx8tBlx%2FYWqkMXkiRxNDTKCzcgo%3D&ver=2&fs=4IFX1dNMcbegH%2FAVAV%2BiI3nIZsIkvluZ%2Bc%2BE%2B85AulQszk0KA19QvRbrzEEzOInPDQHNH8lsEIB8pjgdvA91hMvwLUUJfs1cUjO2F0Rs6HUhccwjOtzJmFAKs066mLue6g13ZMVWch34vS8wg3NzyEVRxGhOTcLlnhZ8InkPDnn4",
+      "responseBody": "{\"code\":0,\"msg\":\"Success\",\"data\":{\"as\":\"d1a51cc2\",\"ds\":\"2mOuDR1G4tEIgxFeSCAqZoU4y4vmSNNX28C/sSrkZbQinObd8U15RrwUUUTE4sDv1i+OLdOk6xqgFG0jIG4ZR3DLxxFYSrcR1+sjo83sVnrZ4B2BpqaM6m44WSK9mQ8o7n3YfohkCuuEiVeKlr6qATYkFcmZ2F4/UygRrSRcJCiV72kM+dbed+XeDWAq3SfVU3uw83sHOJhX3xT3Xk7KF7ulEk1Fh2gpaB55x/Osi4pGUw6giBZWWC1rh+ha5Z6fCZPFJfL2XoNgV+pz54wEUVnpxttpE2RYgShaPZ3xn8DbIZmtk/phEJgyz/cW4TwYit38xSIouD3VuJCCY5OZTg9zq7oqc5+/H1FIgTtnlABq+bdml9jZt8DU7ZpRyReQ21wT90UO/cO/9T6Lgh8lA31yZrljTslFy22rWgad/8GWCSCJRWUJg0oi1Ci1jO6tvEfBIMKO"
+    },
+    {
+      "id": "sm_mvcdhzks_8kd21n",
+      "seq": 7,
+      "ts": 1792240130908,
+      "method": "POST",
+      "url": "https://passport.baidu.com/cap/log",
+      "path": "/cap/log",
+      "query": {},
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "accept": "application/json, text/plain, */*",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "preview",
+      "requestBodyTruncated": true,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "requestBody": "_=1792240130873&refer=https%3A%2F%2Fwww.baidu.com%2F&ak=1e3f2dd1c81f2075171a547893391274&as=d1a51cc2&scene=login&tk=32973a9FRNeS%2BR%2B4Fi6qafzT5tTNuA%2FVJzQ%2B2C3pXq99LUmeMjZv%2FS%2F6%2BBmsN1%2FQ4cZmgaFhL1e9NFfigDqc%2FVVr%2B%2Bke3x6rjO3lWmh1fuSSAhq6nz4F%2BUJW1v63gL6eo6xB1A0sFdfwBYUf6PyOsx8tBlx%2FYWqkMXkiRxNDTKCzcgo%3D&ver=2&fs=4IFX1dNMcbegH%2FAVAV%2BiI3nIZsIkvluZ%2Bc%2BE%2B85AulQszk0KA19QvRbrzEEzOInPDQHNH8lsEIB8pjgdvA91hLfKxQ0AusAGjCryh8I%2FW53FMK5%2FmC2%2BiunmfWPylIoFzF1SiNIeiSKrtNcVgjBdYBM9BA99k0hiTfdQMK",
+      "responseBody": "{\"code\":0,\"msg\":\"Success\",\"data\":{\"as\":\"d1a51cc2\",\"ds\":\"Dp7wy8B6JS6Mnr6TBsY1eoU4y4vmSNNX28C/sSrkZbQinObd8U15RrwUUUTE4sDv1i+OLdOk6xqgFG0jIG4ZR3DLxxFYSrcR1+sjo83sVnrZ4B2BpqaM6m44WSK9mQ8o7n3YfohkCuuEiVeKlr6qATYkFcmZ2F4/UygRrSRcJCiV72kM+dbed+XeDWAq3SfVU3uw83sHOJhX3xT3Xk7KF7ulEk1Fh2gpaB55x/Osi4pGUw6giBZWWC1rh+ha5Z6fCZPFJfL2XoNgV+pz54wEUVnpxttpE2RYgShaPZ3xn8DbIZmtk/phEJgyz/cW4TwYit38xSIouD3VuJCCY5OZTtZMiN3Yurk5ow6sJYgb3gfb1ZbZuYQttyOaKjnulOP4u1lYapNUJKvpVrlmDjbsRmqJ4KleYr2yurpFV+Z0BTRjXBlowJ/FZokkZ6K/kY2rJ5iBTiom"
+    },
+    {
+      "id": "sm_mvcdi7wa_lpe07y",
+      "seq": 8,
+      "ts": 1792240141690,
+      "method": "GET",
+      "url": "https://www.baidu.com/sugrec?&prod=pc_his&from=pc_web&json=1&imod=2&sid=63148_74486_74736_74795_74859_74903_74998_75121_75129_75154_75355_75396_75402_75343_75386_75431_75432_75435_75450_75536_75607_75529_75503_75586_75570_75488_75623_75642_75701_75652_75659_75634_75455_75425_75784_75770_75785_75780_75776_75741_75851_75860_75855_75813_75920_75907_75911_75946_75976_75980_75972_75993_75991_76014_76030_76054_76056_76063_76060_76061_76074_76078_76096_76080_76088&hisdata=%5B%5D&_t=1792240141486&req=2&usegosug=1&csor=0",
+      "path": "/sugrec",
+      "query": {
+        "prod": "pc_his",
+        "from": "pc_web",
+        "json": "1",
+        "imod": "2",
+        "sid": "63148_74486_74736_74795_74859_74903_74998_75121_75129_75154_75355_75396_75402_75343_75386_75431_75432_75435_75450_75536_75607_75529_75503_75586_75570_75488_75623_75642_75701_75652_75659_75634_75455_75425_75784_75770_75785_75780_75776_75741_75851_75860_75855_75813_75920_75907_75911_75946_75976_75980_75972_75993_75991_76014_76030_76054_76056_76063_76060_76061_76074_76078_76096_76080_76088",
+        "hisdata": "[]",
+        "_t": "1792240141486",
+        "req": "2",
+        "usegosug": "1",
+        "csor": "0"
+      },
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "ps-dataurlconfigqid": "0xa92b394c0001fa7d",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "accept": "application/json, text/javascript, */*; q=0.01",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"q\":\"\",\"p\":false,\"bs\":\"\",\"csor\":\"\",\"err_no\":0,\"errmsg\":\"\",\"queryid\":\"0x1fd4b37a76a5a9a\"}"
+    },
+    {
+      "id": "sm_mvcdi7xt_vb3yrr",
+      "seq": 9,
+      "ts": 1792240141745,
+      "method": "GET",
+      "url": "https://www.baidu.com/home/async/boxrec?bsToken=89e803ecf442b57fd94e2954f560016d",
+      "path": "/home/async/boxrec",
+      "query": {
+        "bsToken": "89e803ecf442b57fd94e2954f560016d"
+      },
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "ps-dataurlconfigqid": "0xa92b394c0001fa7d",
+          "referer": "https://www.baidu.com/",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0",
+          "x-requested-with": "XMLHttpRequest",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "accept": "*/*",
+          "content-type": "application/json"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": true,
+      "truncated": false,
+      "responseBody": "{\"data\":{\"box\":[{\"idx\":0,\"sa\":\"igh_notyyc_gsnd\",\"show_text\":\"直击苏超：泰州vs无锡\",\"text\":\"直击苏超：泰州vs无锡\"},{\"idx\":1,\"sa\":\"igh_notyyc_gsnd\",\"show_text\":\"“相爱的人应该都差不多”\",\"text\":\"“相爱的人应该都差不多”\"},{\"idx\":2,\"sa\":\"igh_notyyc_gsnd\",\"show_text\":\"沈腾广场舞大杀器\",\"text\":\"沈腾广场舞大杀器\"},{\"idx\":3,\"sa\":\"igh_notyyc_gsnd\",\"show_text\":\"黄奇帆被查 中纪委网站发文\",\"text\":\"黄奇帆被查 中纪委网站发文\"},{\"idx\":4,\"sa\":\"igh_notyyc_gsnd\",\"show_text\":\"长影资深演员隋桂凤去世\",\"text\":\"长影资深演员隋桂凤去世\"},{\"idx\":5,\"sa\":\"igh_notyyc_gsd\",\"show_text\":\"中国“飞行汽车”看呆外国学生\",\"text\":\"中国“飞行汽车”看呆外国学生\"},{\"idx\":6,\"s"
+    },
+    {
+      "id": "sm_mvcdi7yr_lgfbu6",
+      "seq": 10,
+      "ts": 1792240141779,
+      "method": "GET",
+      "url": "https://chat.baidu.com/aichat/longtask/list?taskType=1&token=MjhkZWQwZDZ8fDE3OTIyNDAxNDE1MDZ8MHhhOTJiMzk0YzAwMDFmYTdk-0xa92b394c0001fa7d",
+      "path": "/aichat/longtask/list",
+      "query": {
+        "taskType": "1",
+        "token": "MjhkZWQwZDZ8fDE3OTIyNDAxNDE1MDZ8MHhhOTJiMzk0YzAwMDFmYTdk-0xa92b394c0001fa7d"
+      },
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"status\":0,\"message\":\"\",\"data\":{\"taskItems\":[]},\"logid\":\"7398686513042799801\"}"
+    },
+    {
+      "id": "sm_mvcdi7z4_48zntc",
+      "seq": 11,
+      "ts": 1792240141792,
+      "method": "GET",
+      "url": "https://chat.baidu.com/aichat/api/messages/conf?tk=MjhkZWQwZDZ8fDE3OTIyNDAxNDE1MDd8MHhhOTJiMzk0YzAwMDFmYTdk-0xa92b394c0001fa7d&from=home_page",
+      "path": "/aichat/api/messages/conf",
+      "query": {
+        "tk": "MjhkZWQwZDZ8fDE3OTIyNDAxNDE1MDd8MHhhOTJiMzk0YzAwMDFmYTdk-0xa92b394c0001fa7d",
+        "from": "home_page"
+      },
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "application/json",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"status\":0,\"message\":\"\",\"data\":[{\"pollingType\":\"list\",\"messageType\":\"\",\"avgCost\":\"120\",\"maxPollingCost\":\"120\"},{\"pollingType\":\"query\",\"messageType\":\"async\",\"avgCost\":\"120\",\"maxPollingCost\":\"120\"},{\"pollingType\":\"query\",\"messageType\":\"recommend\",\"avgCost\":\"20\",\"maxPollingCost\":\"120\"}],\"logid\":\"6358383027477687230\"}"
+    },
+    {
+      "id": "sm_mvcdi7z6_67twer",
+      "seq": 12,
+      "ts": 1792240141794,
+      "method": "POST",
+      "url": "https://chat.baidu.com/aichat/api/messages/list?countOnly=1&tk=MjhkZWQwZDZ8fDE3OTIyNDAxNDE1MDd8MHhhOTJiMzk0YzAwMDFmYTdk-0xa92b394c0001fa7d&from=home_page",
+      "path": "/aichat/api/messages/list",
+      "query": {
+        "countOnly": "1",
+        "tk": "MjhkZWQwZDZ8fDE3OTIyNDAxNDE1MDd8MHhhOTJiMzk0YzAwMDFmYTdk-0xa92b394c0001fa7d",
+        "from": "home_page"
+      },
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "application/json",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "preview",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "requestBody": "{\"page\":1,\"pageSize\":20}",
+      "responseBody": "{\"status\":0,\"message\":\"\",\"data\":{\"count\":0},\"logid\":\"8044848091159115275\"}"
+    },
+    {
+      "id": "sm_mvcdi7zf_r6yms7",
+      "seq": 13,
+      "ts": 1792240141803,
+      "method": "POST",
+      "url": "https://chat.baidu.com/aichat/api/messages/list?tk=MjhkZWQwZDZ8fDE3OTIyNDAxNDE1MDh8MHhhOTJiMzk0YzAwMDFmYTdk-0xa92b394c0001fa7d&from=home_page",
+      "path": "/aichat/api/messages/list",
+      "query": {
+        "tk": "MjhkZWQwZDZ8fDE3OTIyNDAxNDE1MDh8MHhhOTJiMzk0YzAwMDFmYTdk-0xa92b394c0001fa7d",
+        "from": "home_page"
+      },
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "content-type": "application/json",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "preview",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "requestBody": "{\"page\":1,\"pageSize\":20}",
+      "responseBody": "{\"status\":0,\"message\":\"\",\"data\":{},\"logid\":\"7955174048890279014\"}"
+    },
+    {
+      "id": "sm_mvcdi8i5_6kko88",
+      "seq": 14,
+      "ts": 1792240142477,
+      "method": "GET",
+      "url": "https://www.baidu.com/sugrec?&prod=pc_his&from=pc_web&json=1&imod=2&sid=63148_74486_74736_74795_74859_74903_74998_75121_75129_75154_75355_75396_75402_75343_75386_75431_75432_75435_75450_75536_75607_75529_75503_75586_75570_75488_75623_75642_75701_75652_75659_75634_75455_75425_75784_75770_75785_75780_75776_75741_75851_75860_75855_75813_75920_75907_75911_75946_75976_75980_75972_75993_75991_76014_76030_76054_76056_76063_76060_76061_76074_76078_76096_76080_76088&hisdata=%5B%5D&_t=1792240142388&req=2&usegosug=1&sc=eb&csor=0",
+      "path": "/sugrec",
+      "query": {
+        "prod": "pc_his",
+        "from": "pc_web",
+        "json": "1",
+        "imod": "2",
+        "sid": "63148_74486_74736_74795_74859_74903_74998_75121_75129_75154_75355_75396_75402_75343_75386_75431_75432_75435_75450_75536_75607_75529_75503_75586_75570_75488_75623_75642_75701_75652_75659_75634_75455_75425_75784_75770_75785_75780_75776_75741_75851_75860_75855_75813_75920_75907_75911_75946_75976_75980_75972_75993_75991_76014_76030_76054_76056_76063_76060_76061_76074_76078_76096_76080_76088",
+        "hisdata": "[]",
+        "_t": "1792240142388",
+        "req": "2",
+        "usegosug": "1",
+        "sc": "eb",
+        "csor": "0"
+      },
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "ps-dataurlconfigqid": "0xa92b394c0001fa7d",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "accept": "application/json, text/javascript, */*; q=0.01",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"q\":\"\",\"p\":false,\"bs\":\"\",\"csor\":\"\",\"err_no\":0,\"errmsg\":\"\",\"queryid\":\"0x1cbc501fab5763f\"}"
+    },
+    {
+      "id": "sm_mvcdjpix_xhju62",
+      "seq": 15,
+      "ts": 1792240211193,
+      "method": "GET",
+      "url": "https://www.baidu.com/sugrec?&prod=pc_his&from=pc_web&json=1&imod=2&sid=63148_74486_74736_74795_74859_74903_74998_75121_75129_75154_75355_75396_75402_75343_75386_75431_75432_75435_75450_75536_75607_75529_75503_75586_75570_75488_75623_75642_75701_75652_75659_75634_75455_75425_75784_75770_75785_75780_75776_75741_75851_75860_75855_75813_75920_75907_75911_75946_75976_75980_75972_75993_75991_76014_76030_76054_76056_76063_76060_76061_76074_76078_76096_76080_76088&hisdata=%5B%5D&_t=1792240211154&req=2&usegosug=1&sc=eb&csor=0",
+      "path": "/sugrec",
+      "query": {
+        "prod": "pc_his",
+        "from": "pc_web",
+        "json": "1",
+        "imod": "2",
+        "sid": "63148_74486_74736_74795_74859_74903_74998_75121_75129_75154_75355_75396_75402_75343_75386_75431_75432_75435_75450_75536_75607_75529_75503_75586_75570_75488_75623_75642_75701_75652_75659_75634_75455_75425_75784_75770_75785_75780_75776_75741_75851_75860_75855_75813_75920_75907_75911_75946_75976_75980_75972_75993_75991_76014_76030_76054_76056_76063_76060_76061_76074_76078_76096_76080_76088",
+        "hisdata": "[]",
+        "_t": "1792240211154",
+        "req": "2",
+        "usegosug": "1",
+        "sc": "eb",
+        "csor": "0"
+      },
+      "status": 200,
+      "pageUrl": "https://www.baidu.com/",
+      "requestHeaders": {
+        "values": {
+          "sec-ch-ua-platform": "\"macOS\"",
+          "ps-dataurlconfigqid": "0xa92b394c0001fa7d",
+          "referer": "https://www.baidu.com/",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "accept": "application/json, text/javascript, */*; q=0.01",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0"
+        },
+        "sensitive": []
+      },
+      "requestBodySource": "none",
+      "requestBodyTruncated": false,
+      "responseHeaders": {
+        "values": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "sensitive": []
+      },
+      "responseBodySource": "preview",
+      "responseBodyTruncated": false,
+      "truncated": false,
+      "responseBody": "{\"q\":\"\",\"p\":false,\"bs\":\"\",\"csor\":\"\",\"err_no\":0,\"errmsg\":\"\",\"queryid\":\"0xab7c58f8d49a8a\"}"
+    }
+  ],
+  "stats": {
+    "totalSamples": 15,
+    "returnedSamples": 15,
+    "interfaces": 8,
+    "writes": 8,
+    "pages": 1,
+    "truncatedBodies": 7
+  },
+  "warnings": [
+    {
+      "code": "trace-limit",
+      "message": "fixture: only first 20 / 15 samples"
+    }
+  ]
+}

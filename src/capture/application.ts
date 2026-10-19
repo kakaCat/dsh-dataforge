@@ -4,6 +4,8 @@
  * - action 是 agent 驱动路径：只开会话（registry.open），动作由 agent 经 session 原语给；
  * - single_page / site_crawl 是自治路径：投递后台 job；jobs 不可用（服务缺席，或服务在但拒绝——
  *   面板路由没有 agent 归属时 start 会抛错）即前台降级，run 照常跑完，绝不留 running 僵尸。
+ * - 三条路径统一记页面标题/站点名（browser.onPageMeta → store.upsertPage 的 meta 参数），
+ *   旧库缺标题由面板「补抓名称」（TitleBackfillService）重访回填。
  */
 import type { SessionRegistry } from './session.js'
 import { crawlSite, type CrawlDriver } from './crawler.js'
@@ -21,9 +23,10 @@ import {
   queryPairsOf,
   semanticName,
 } from './normalizer.js'
-import { openCapturingPage, responseToRawSample, type WireSample } from './browser.js'
+import { openCapturingPage, responseToRawSample, type PagePageMeta, type WireSample } from './browser.js'
 import type { CaptureStore } from './store.js'
 import { harvestTokenCredentials } from './token-harvest.js'
+import { pageIdentityOf } from '../shared/page-url.js'
 import type { Config } from '../config.js'
 import type { Cookie } from 'playwright-core'
 import type {
@@ -83,12 +86,13 @@ export const SAMPLE_LIMIT_PER_RUN = 1000
 type CardAcc = {
   acc: ReturnType<typeof newRequestSamplesAcc>
   responseTexts: string[]
-  pageUrls: Set<string>
+  /** 页面身份 → 该身份首次观测到的原始页面 URL（卡上的页面引用留原值，展示/打开/重采可用）。 */
+  pageUrls: Map<string, string>
   sampleTotal: number
 }
 
 function newCardAcc(): CardAcc {
-  return { acc: newRequestSamplesAcc(), responseTexts: [], pageUrls: new Set(), sampleTotal: 0 }
+  return { acc: newRequestSamplesAcc(), responseTexts: [], pageUrls: new Map(), sampleTotal: 0 }
 }
 
 /** 每卡累计样本封顶（与 normalizer 的 TEMPLATE_DIFF_SAMPLE_CAP 对齐）：内存诚实上界，计数照实。 */
@@ -122,7 +126,11 @@ function wireToStore(deps: CaptureDeps, captureId: string, pageIds: Map<string, 
     }
     const raw = responseToRawSample(w, deps.config.captureBodyLimitBytes)
     if (raw === undefined) return
-    const pageId = pageIdOf(w.pageUrl)
+    // 页面身份归一（shared/page-url）：page 行 / 关系行写「页面身份」，同一 SPA 页面的
+    // hash 路由变体与 `?_at_=` 反缓存戳变体因此并成一页；样本行留原始 pageUrl（逐请求证据），
+    // 卡上的页面引用也留首次观测到的原始 URL（展示/打开/重采要真实可打开的地址）。
+    const pageUrl = pageIdentityOf(w.pageUrl)
+    const pageId = pageIdOf(pageUrl)
     const sampleId = deps.store.upsertSample(captureId, pageId, {
       ...raw,
       responseHeaders: { 'content-type': w.contentType },
@@ -156,7 +164,8 @@ function wireToStore(deps: CaptureDeps, captureId: string, pageIds: Map<string, 
           cardAcc.acc.pathParams.push(rawSegments[i])
       }
     }
-    cardAcc.pageUrls.add(w.pageUrl)
+    // 同一身份只留首次观测到的原始 URL（卡上的页面引用用于展示/打开/重采，不参与归并）
+    if (!cardAcc.pageUrls.has(pageUrl)) cardAcc.pageUrls.set(pageUrl, w.pageUrl)
     cardAcc.sampleTotal += 1
     if (typeof raw.responseBody === 'string' && raw.responseBody !== '')
       pushCapped(cardAcc.responseTexts, raw.responseBody, CARD_ACC_SAMPLE_CAP)
@@ -166,18 +175,36 @@ function wireToStore(deps: CaptureDeps, captureId: string, pageIds: Map<string, 
     const cardId = deps.store.upsertCard(captureId, {
       mergeKey, method: raw.method, urlTemplate,
       name: semanticName(raw.method, urlTemplate),
-      relatedPageUrls: [...cardAcc.pageUrls],
+      relatedPageUrls: [...cardAcc.pageUrls.values()],
       requestTemplate: buildRequestTemplate({ acc: cardAcc.acc, sampleTotal: cardAcc.sampleTotal }),
       responseTemplate: buildResponseTemplate(cardAcc.responseTexts),
       ...(auth.authType === undefined ? {} : { authType: auth.authType }),
       ...(auth.evidence === undefined ? {} : { authEvidence: auth.evidence }),
     })
     const relationId = deps.store.upsertRelation(
-      captureId, cardId, w.pageUrl, paramsFingerprintOf(raw.url, raw.requestBody), pageId,
+      captureId, cardId, pageUrl, paramsFingerprintOf(raw.url, raw.requestBody), pageId,
     )
     // 样本回指关系行：一条请求属于「哪个页面 × 哪个接口 × 哪种形态」
     deps.store.attachSampleRelation(sampleId, relationId)
   }}
+
+/**
+ * 页面标题/站点名落库（三条采集路径共用）。
+ *
+ * url 先归一到页面身份再 upsert：与样本桥、爬行 page 事件写的是同一行（upsertPage 按
+ * (capture_id,url) 幂等，后到的 meta 只补非空标题/站点名，不重复计页数）。
+ * 身份为空（非法 URL）如实丢弃——名称是增强面，不因它中断采集。
+ */
+function pageMetaSink(deps: CaptureDeps, captureId: string): (meta: PagePageMeta) => void {
+  return (meta) => {
+    const identity = pageIdentityOf(meta.url)
+    if (identity === '') return
+    deps.store.upsertPage(captureId, identity, 0, 'ok', {
+      ...(meta.title === undefined ? {} : { title: meta.title }),
+      ...(meta.siteName === undefined ? {} : { siteName: meta.siteName }),
+    })
+  }
+}
 
 /**
  * 安全启动后台 job：三种结局都要能落地，不能把异常冒给调用方。
@@ -275,7 +302,10 @@ export async function startCapture(deps: CaptureDeps, args: StartCaptureArgs): P
       ...(args.headless === undefined ? {} : { headless: args.headless }),
       ...(cookies.length === 0 ? {} : { cookies }),
     })
-    deps.registry.bindSink(sessionId, wireToStore(deps, captureId, new Map()))
+    deps.registry.bindSink(sessionId, {
+      onSample: wireToStore(deps, captureId, new Map()),
+      onPageMeta: pageMetaSink(deps, captureId),
+    })
     return { accepted: true, gate: 'started', captureId, sessionId, ...(cookies.length === 0 ? {} : { cookiesReused: cookies.length }) }
   }
 
@@ -326,7 +356,10 @@ function makeAutonomousRun(
       try {
         const pageIds = new Map<string, string>()
         const onWire = wireToStore(deps, captureId, pageIds)
-        const { page, context, browser } = await deps.openCapturingPage(deps.config.captureChromeChannel, onWire)
+        const { page, context, browser } = await deps.openCapturingPage(deps.config.captureChromeChannel, onWire, {
+          // 单页/爬取同样记标题：onPageMeta 在 load / 主 frame 导航后防抖上报，落 pages.title/site_name。
+          onPageMeta: pageMetaSink(deps, captureId),
+        })
         closeBrowser = async () => { await browser.close().catch(() => undefined) }
         if (taskType === 'single_page') {
           await page.goto(entry.href, { waitUntil: 'domcontentloaded', timeout: 30_000 })
@@ -352,8 +385,10 @@ function makeAutonomousRun(
             stabilityMs: deps.config.captureStabilityWindowMs,
             onEvent: (e) => {
               if (e.kind === 'page') {
-                const pageId = deps.store.upsertPage(captureId, e.url, 0, 'ok')
-                if (!pageIds.has(e.url)) pageIds.set(e.url, pageId)
+                // 与 wireToStore 同口径：pages 表存页面身份；pageIds 的键也必须是身份串。
+                // 请求先于爬行页事件到达时该页已建行 → 不重复建（否则同页计两次页数）。
+                const pageUrl = pageIdentityOf(e.url)
+                if (!pageIds.has(pageUrl)) pageIds.set(pageUrl, deps.store.upsertPage(captureId, pageUrl, 0, 'ok'))
               }
             },
             onSample: () => undefined,

@@ -22,6 +22,12 @@ export const SITES_TAB_LABEL = '采集网站'
 /** R-2 编排页签：原型四段动线（网站 → 流程 → 编排图 → 画布）。 */
 export const ORCH_TAB_ID = 'dataforge-orchestration'
 export const ORCH_TAB_LABEL = '编排'
+/** UI 测试页签：浏览器录制 + 页面断言回放（与接口链执行面分开）。 */
+export const UITEST_TAB_ID = 'dataforge-ui-tests'
+export const UITEST_TAB_LABEL = 'UI 测试'
+/** 运行产物页签：只读 dataset/evidence 列表。 */
+export const ARTIFACTS_TAB_ID = 'dataforge-artifacts'
+export const ARTIFACTS_TAB_LABEL = '运行产物'
 
 export const REFRESH_MS = 15_000
 /** 采集页的进度轮询（进行中才 2 秒一次；收口即停）。 */
@@ -32,6 +38,8 @@ export const SITES_MAX_AGGREGATE_CARDS = 5_000
 /** 采集网站页聚合的 run 上限（/runs 单请求拉满；超出由服务端截断）。 */
 export const SITES_MAX_RUNS = 500
 export const SAMPLES_DISPLAY_CAP = 50
+/** 接口列表分页大小：接口库/采集结果的页面节点展开后按此分页（一页可能挂几百个接口）。 */
+export const IFACES_PER_PAGE = 10
 export const RELATED_PAGES_DISPLAY_CAP = 10
 export const SAMPLE_TEXT_CAP = 300
 
@@ -52,6 +60,22 @@ export const AUTH_TYPE_LABELS: Record<string, string> = {
 /** 入参位置（A8）→ 展示名。 */
 export const LOCATION_LABELS: Record<string, string> = {
   path: '路径', query: '查询串', header: '请求头', body: '请求体',
+}
+
+/**
+ * 分页按钮窗口：页数多时只画首末 + 当前页邻域（中间用省略号），避免几十个按钮糊满一行。
+ * 返回 0-based 页码；`'…'` 是不可点的占位。页数不多（≤9）时全量返回。
+ */
+export function pagerWindow(current: number, total: number, radius = 1): Array<number | '…'> {
+  if (total <= 9) return Array.from({ length: total }, (_, index) => index)
+  const out: Array<number | '…'> = [0]
+  const start = Math.max(1, current - radius)
+  const end = Math.min(total - 2, current + radius)
+  if (start > 1) out.push('…')
+  for (let index = start; index <= end; index += 1) out.push(index)
+  if (end < total - 2) out.push('…')
+  out.push(total - 1)
+  return out
 }
 
 /** 语义名 + 位置的入参展示名（A8：location 缺省为旧数据，只显字段名）。 */

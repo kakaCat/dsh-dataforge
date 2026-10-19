@@ -9,16 +9,24 @@
 import Database from 'better-sqlite3'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { pageIdentityOf } from '../shared/page-url.js'
 import type {
   CardRow,
   CaptureRunRow,
   CaptureStatus,
   CredentialRow,
+  PageMetaRow,
   PageRow,
   RelationRow,
   SampleRow,
   Template,
 } from '../shared/capture-types.js'
+
+/** 页面元信息（标题/站点名）：空串/null 视为「没有值」，不覆盖旧值。 */
+export interface PageMetaInput {
+  title?: string
+  siteName?: string
+}
 
 const CARDS_TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS interface_cards (
@@ -45,7 +53,8 @@ CREATE TABLE IF NOT EXISTS capture_runs (
 );
 CREATE TABLE IF NOT EXISTS pages (
   id TEXT PRIMARY KEY, capture_id TEXT REFERENCES capture_runs(id), url TEXT NOT NULL,
-  depth INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ok', visited_at INTEGER NOT NULL
+  depth INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ok', visited_at INTEGER NOT NULL,
+  title TEXT, site_name TEXT
 );
 CREATE TABLE IF NOT EXISTS request_samples (
   id TEXT PRIMARY KEY, capture_id TEXT REFERENCES capture_runs(id), page_id TEXT, relation_id TEXT,
@@ -125,6 +134,7 @@ export class CaptureStore {
     this.db.exec(CARDS_INDEX_DDL)
     this.db.exec(RELATIONS_INDEX_DDL)
     this.ensureRunsNoticeColumn()
+    this.ensurePagesMetaColumns()
     this.ensureSamplesRelationColumn()
     this.backfillLegacyRelations()
   }
@@ -189,27 +199,160 @@ export class CaptureStore {
 
   // ── pages ──
 
-  upsertPage(captureId: string, url: string, depth: number, status: PageRow['status']): string {
+  /**
+   * 页面行幂等写入（按 `(capture_id, url)` 唯一）。
+   *
+   * 同一页面会从多条证据重复写入：旁路样本首次见到的 pageUrl（wireToStore）、爬行的 page 事件、
+   * browser 的标题上报（onPageMeta）。早期每次 INSERT 新行，pages 表里同一页会出现多行、
+   * 页数统计虚高；现在把 `(capture_id, url)` 当身份：
+   *   - 已存在 → 只刷新 visited_at/status 与**非空**标题/站点名，不重复 bump 统计；
+   *   - 不存在 → INSERT 并 bump `pages` 统计。
+   *
+   * url 由调用方传页面身份（`shared/page-url`）；历史字面 URL 行保持原样，由出口投影归并。
+   */
+  upsertPage(captureId: string, url: string, depth: number, status: PageRow['status'], meta?: PageMetaInput): string {
+    const title = cleanMetaText(meta?.title)
+    const siteName = cleanMetaText(meta?.siteName)
+    const existing = this.db
+      .prepare('SELECT id FROM pages WHERE capture_id=? AND url=?')
+      .get(captureId, url) as { id: string } | undefined
+    if (existing !== undefined) {
+      this.db
+        .prepare(
+          `UPDATE pages SET visited_at=?,
+             status=?,
+             title=CASE WHEN ?<>'' THEN ? ELSE title END,
+             site_name=CASE WHEN ?<>'' THEN ? ELSE site_name END
+           WHERE id=?`,
+        )
+        .run(Date.now(), status, title, title, siteName, siteName, existing.id)
+      return existing.id
+    }
     const id = `pg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
     this.db
-      .prepare('INSERT INTO pages(id,capture_id,url,depth,status,visited_at) VALUES (?,?,?,?,?,?)')
-      .run(id, captureId, url, depth, status, Date.now())
+      .prepare('INSERT INTO pages(id,capture_id,url,depth,status,visited_at,title,site_name) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, captureId, url, depth, status, Date.now(), title === '' ? null : title, siteName === '' ? null : siteName)
     this.appendEvent({ kind: 'page', captureId, url, depth, status })
     this.bumpRunStats(captureId, 'pages')
     return id
   }
 
+  /**
+   * 页面清单（按页面身份去重，最近访问为准）。
+   *
+   * 新写入的 pages.url 本身就是页面身份（见 application 桥）；历史库存的是字面 URL，
+   * 同一 SPA 页面的 hash/反缓存戳变体会是多行 —— 出口按同一口径归并，避免工具回执
+   * 把「同一个页面」报成多页。归并只影响投影，不改历史行（证据仍在 request_samples）。
+   */
   listPages(captureId: string, limit = 50): PageRow[] {
+    // 先取全量再归并、最后截断：历史字面 URL 变体会占多行，先 LIMIT 会让同一身份把后面
+    // 别的页面挤掉（返回不足 limit 条且静默漏页）。每 run 的 pages 行数受采集页数上限约束。
     const rows = this.db
-      .prepare('SELECT * FROM pages WHERE capture_id=? ORDER BY visited_at DESC LIMIT ?')
-      .all(captureId, limit) as Array<Record<string, unknown>>
-    return rows.map((row) => ({
-      id: String(row['id']),
-      captureId: String(row['capture_id']),
-      url: String(row['url']),
-      depth: Number(row['depth']),
-      status: String(row['status']) as PageRow['status'],
-    }))
+      .prepare('SELECT * FROM pages WHERE capture_id=? ORDER BY visited_at DESC')
+      .all(captureId) as Array<Record<string, unknown>>
+    const seen = new Set<string>()
+    const pages: PageRow[] = []
+    for (const row of rows) {
+      const pageUrl = pageIdentityOf(String(row['url']))
+      if (seen.has(pageUrl)) continue
+      seen.add(pageUrl)
+      const title = cleanMetaText(optString(row['title']))
+      const siteName = cleanMetaText(optString(row['site_name']))
+      pages.push({
+        id: String(row['id']),
+        captureId: String(row['capture_id']),
+        url: pageUrl,
+        depth: Number(row['depth']),
+        status: String(row['status']) as PageRow['status'],
+        ...(title === '' ? {} : { title }),
+        ...(siteName === '' ? {} : { siteName }),
+      })
+      if (pages.length >= limit) break
+    }
+    return pages
+  }
+
+  /**
+   * 全库页面元信息（/page-meta 数据面）：按页面身份归并、visitedAt 最新者胜、跳过非 http(s)。
+   *
+   * 多取 `limit × 4` 原始行再归并：历史字面 URL 变体（hash/反缓存戳）会占多行，
+   * 只取 limit 行会让同一身份把后面别的页面挤掉。归并只影响投影，不改历史行。
+   *
+   * 同一身份的旧行只**补缺**标题/站点名（不拿旧值覆盖最新行的非空值）：标题与站点名可能
+   * 分两次上报（先 title 后 siteName，毫秒相同则 SQL 排序不定），纯「取第一行」会让另一个字段丢失。
+   */
+  listPageMeta(limit = 500): PageMetaRow[] {
+    const fetchLimit = Math.max(1, limit) * 4
+    const rows = this.db
+      .prepare('SELECT url, title, site_name, visited_at FROM pages ORDER BY visited_at DESC LIMIT ?')
+      .all(fetchLimit) as Array<Record<string, unknown>>
+    const byIdentity = new Map<string, PageMetaRow>()
+    const order: string[] = []
+    for (const row of rows) {
+      const rawUrl = String(row['url'] ?? '')
+      if (!/^https?:/i.test(rawUrl.trim())) continue
+      const identity = pageIdentityOf(rawUrl)
+      const title = cleanMetaText(optString(row['title']))
+      const siteName = cleanMetaText(optString(row['site_name']))
+      const existing = byIdentity.get(identity)
+      if (existing === undefined) {
+        if (order.length >= limit) continue
+        byIdentity.set(identity, {
+          url: identity,
+          ...(title === '' ? {} : { title }),
+          ...(siteName === '' ? {} : { siteName }),
+          visitedAt: Number(row['visited_at']),
+        })
+        order.push(identity)
+        continue
+      }
+      // 同一身份：只补缺，不覆盖最新行已有的非空值
+      if (existing.title === undefined && title !== '') existing.title = title
+      if (existing.siteName === undefined && siteName !== '') existing.siteName = siteName
+    }
+    return order.flatMap((identity) => {
+      const row = byIdentity.get(identity)
+      return row === undefined ? [] : [row]
+    })
+  }
+
+  /**
+   * 按页面身份回写标题/站点名（旧页面补抓的落点）：匹配**所有**同一身份的历史行。
+   *
+   * 空值不覆盖旧值（补抓只补缺：读不到标题时不该把已有标题清空）。
+   * 返回实际被更新的行数（调用方据此判断目标是否在 pages 表里存在）。
+   */
+  applyPageMeta(url: string, title?: string, siteName?: string): number {
+    const cleanTitle = cleanMetaText(title)
+    const cleanSite = cleanMetaText(siteName)
+    if (cleanTitle === '' && cleanSite === '') return 0
+    const target = pageIdentityOf(url)
+    if (target === '') return 0
+    const rows = this.db.prepare('SELECT id, url FROM pages').all() as Array<{ id: string; url: string }>
+    const update = this.db.prepare(
+      `UPDATE pages SET
+         title=CASE WHEN ?<>'' THEN ? ELSE title END,
+         site_name=CASE WHEN ?<>'' THEN ? ELSE site_name END
+       WHERE id=?`,
+    )
+    let updated = 0
+    const apply = this.db.transaction((): void => {
+      for (const row of rows) {
+        if (pageIdentityOf(row.url) !== target) continue
+        update.run(cleanTitle, cleanTitle, cleanSite, cleanSite, row.id)
+        updated += 1
+      }
+    })
+    apply()
+    return updated
+  }
+
+  /** kind='cookie' 的 value_json 原文（补抓复用登录态；值只在服务端内存过手，不出壳）。 */
+  listCookieJson(limit = 500): string[] {
+    const rows = this.db
+      .prepare(`SELECT value_json FROM credential_events WHERE kind='cookie' AND value_json IS NOT NULL ORDER BY obtained_at DESC LIMIT ?`)
+      .all(Math.max(1, limit)) as Array<{ value_json: string }>
+    return rows.map((row) => String(row['value_json']))
   }
 
   // ── samples ──
@@ -526,6 +669,23 @@ export class CaptureStore {
     this.db.exec('ALTER TABLE capture_runs ADD COLUMN notice TEXT')
   }
 
+  /**
+   * 老库迁移：pages 无 title/site_name 列（名称数据面引入前建的库）→ ALTER 补齐。
+   *
+   * 只加列、不动历史行：历史页面标题靠面板「补抓名称」动作（TitleBackfillService）重访回填；
+   * 库仍可被旧版本插件打开（新列全为 NULL，旧查询不受影响）。
+   */
+  private ensurePagesMetaColumns(): void {
+    const hasColumn = (column: string): boolean => {
+      const row = this.db
+        .prepare("SELECT COUNT(*) AS n FROM pragma_table_info('pages') WHERE name=?")
+        .get(column) as { n: number }
+      return Number(row.n) > 0
+    }
+    if (!hasColumn('title')) this.db.exec('ALTER TABLE pages ADD COLUMN title TEXT')
+    if (!hasColumn('site_name')) this.db.exec('ALTER TABLE pages ADD COLUMN site_name TEXT')
+  }
+
   private bumpRunStats(captureId: string, key: keyof CaptureRunRow['stats']): void {
     this.db
       .prepare(
@@ -572,6 +732,12 @@ function optString(value: unknown): string | undefined {
   return value === null || value === undefined ? undefined : String(value)
 }
 
+/** 页面元信息清洗：压空白、去首尾；缺席/非字符串 → 空串（调用方统一当「没有值」）。 */
+function cleanMetaText(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  return value.replace(/\s+/g, ' ').trim()
+}
+
 function rowToCard(row: Record<string, unknown>): CardRow {
   const auth = optRecord<Record<string, unknown>>(row['auth_json'])
   const authType = typeof auth?.['authType'] === 'string' ? (auth['authType'] as CardRow['authType']) : undefined
@@ -585,6 +751,7 @@ function rowToCard(row: Record<string, unknown>): CardRow {
     id: String(row['id']),
     captureId: String(row['capture_id']),
     name: optString(row['name']),
+    mergeKey: optString(row['merge_key']),
     urlTemplate: String(row['url_template']),
     method: String(row['method']),
     requestTemplate: optTemplate(row['request_template_json']),
