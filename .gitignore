@@ -1,6 +1,37 @@
+# 依赖（历史误提交，已从索引移除；依赖由 pnpm-lock.yaml 重建）
 node_modules/
+
+# dataforge 本地产物（链/接口库/采集库/运行留痕）
 .dsh/dataforge/
+
+# 本地工具状态目录
+.codegraph/
 .gstack/
 .omo/
+
+# 系统文件
 .DS_Store
+Thumbs.db
+desktop.ini
+
+# 编辑器 / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 环境变量 / 本地密钥
+.env
+.env.*
+!.env.example
+
+# 构建缓存 / 产物
+*.tsbuildinfo
 *.log
+coverage/
+.eslintcache
+.vite/
+.turbo/
+.cache/
+tmp/
+*.tmp
