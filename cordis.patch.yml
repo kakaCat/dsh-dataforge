@@ -23,3 +23,7 @@
         # injectPolicy: true
         # chainCredentialPersistence: true   # 换票 cookie → dataRoot/credentials（0600）
         # uiTestBrowser: auto                 # auto | playwright | shared | cdp（UI 测试浏览器引擎）
+        # AI 代办录制（dataforge_ui_agent_*）用自己的可见 Chrome，与 uiTestBrowser 引擎选择无关。
+        # 服务端密钥表：agent_act 的 value_from 按键名取值（键名对 AI 可见，值只在服务端过手）。
+        # uiAgentCredentials:
+        #   loginPassword: "xxx"   # fill { selector: "#pwd", value_from: "loginPassword" }，步骤记 {{loginPassword}}

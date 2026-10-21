@@ -18,12 +18,16 @@ import { join } from 'node:path'
 import { domainMatches } from '../execute/credentials.js'
 import { originOfUrl, persistCookies, readStore } from '../capture/credential-store.js'
 import {
+  AgentRecordingSessions,
+  type AgentActResult, type AgentActSpec, type AgentSessionView,
+} from './agentrec.js'
+import {
   listUiScripts, listUiVersionInfos, loadUiScript, saveUiScript,
   type UiScriptLoadResult, type UiScriptRef, type UiScriptSaveResult,
 } from './store.js'
 import {
   formatUiIssues, inputRefsOf, loadYamlValue, missingInputsOf, parseUiScriptDoc, type UiIssue, type UiScriptDoc,
-  type UiScriptSource,
+  type UiScriptSource, type UiStep,
 } from './schema.js'
 import { planUiRun, type UiCookie, type UiRunPlan, type UiRunResult } from './run.js'
 import {
@@ -62,6 +66,16 @@ export type UiTestDeps = {
    * 共享浏览器一次只适合一条、会抢窗口，批量回归不能依赖它。
    */
   batchEngine: UiBrowserEngine
+  /**
+   * AI 代办录制的会话注册表（agentrec）：AI 自主操作页面、动作同步录步。
+   * 与录制会话（resolveEngine）相互独立——代办录制需要直接持有 Playwright Page。
+   */
+  agentSessions: AgentRecordingSessions
+  /**
+   * 服务端密钥表（配置 uiAgentCredentials）：act 的 valueFrom 在这里取值。
+   * 模型上下文只见键名（open 回执的 credentialKeys），永远不见值。
+   */
+  agentSecrets: Record<string, string>
   /** 可注入时钟（测试用）。 */
   now?: () => number
 }
@@ -408,6 +422,263 @@ export async function pickSelectorForTool(
   args: { sessionId: string; timeoutMs?: number },
 ): Promise<UiPickToolValue> {
   return deps.resolveEngine().engine.pickSelector(args.sessionId, args.timeoutMs)
+}
+
+/* ────────────────────────────────────────────────
+ * AI 代办录制（agentrec）：AI 自主操作 + 同步录步 + 待审查落盘
+ * ──────────────────────────────────────────────── */
+
+/** 打开代办录制会话回执。 */
+export type UiAgentOpenToolValue = {
+  ok: boolean
+  /** confirm-required = 只回了计划卡，还没起浏览器。 */
+  gate?: string
+  plan?: { card: string; task: string; startUrl: string; headless: boolean; credentialKeys: string[] }
+  sessionId?: string
+  runId?: string
+  pageUrl?: string
+  /** 服务端密钥表的键名（只有名字，没有值）。 */
+  credentialKeys?: string[]
+  notice?: string
+  error?: string
+}
+
+/**
+ * 打开 AI 代办录制会话（可见 Chrome，人能围观/随时接管）。
+ *
+ * 三道闸之闸2：不带 confirm 只回计划卡（任务/起点/密钥键名/写操作提示），
+ * 一个浏览器都不起；确认后才真开。AI 随后用 agent_act 自主操作，动作同步录步。
+ *
+ * 引擎说明：代办录制用自己的浏览器工厂（AgentRecordingSessions，playwright-core +
+ * 系统 Chrome），与 uiTestBrowser 配置的录制/回放引擎相互独立——shared 引擎下
+ * 人录走侧栏共享浏览器，代办录制仍拉自己的可见窗口，互不影响。
+ */
+export async function openAgentSessionForTool(
+  deps: UiTestDeps,
+  exec: unknown,
+  args: { task: string; startUrl: string; headless?: boolean; confirm?: boolean },
+): Promise<UiAgentOpenToolValue> {
+  const task = args.task.trim()
+  if (task === '') return { ok: false, error: 'task 不能为空：写清楚要 AI 完成什么（审查比对的基准）' }
+  let url: string
+  try {
+    const parsed = new URL(args.startUrl)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('protocol')
+    url = parsed.toString()
+  } catch {
+    return { ok: false, error: `startUrl 必须是 http/https 的合法 URL：${args.startUrl}` }
+  }
+  const headless = args.headless ?? false
+  const credentialKeys = Object.keys(deps.agentSecrets).sort()
+  const card = [
+    `🤖 AI 代办录制计划`,
+    `任务：${task}`,
+    `起点：${url}（${headless ? '无头' : '可见'} Chrome）`,
+    credentialKeys.length > 0
+      ? `服务端密钥（valueFrom 可用键名）：${credentialKeys.join('、')}`
+      : '未配置服务端密钥（uiAgentCredentials）：fill 只能给明文值，密码字段将无法执行',
+    '⚠️ AI 将自主操作真实页面（点击/输入可能产生真实写入），期间检测到验证码会暂停叫人。',
+    '确认后带 confirm=true 重调才会打开浏览器。',
+  ].join('\n')
+  if (args.confirm !== true) {
+    return { ok: true, gate: 'confirm-required', plan: { card, task, startUrl: url, headless, credentialKeys } }
+  }
+  const cookies = await loadCookiesForStart(deps, url)
+  const opened = await deps.agentSessions.open({
+    startUrl: url,
+    task,
+    headless,
+    cookies,
+  })
+  if (!opened.ok) return { ok: false, error: opened.error }
+  return {
+    ok: true,
+    sessionId: opened.sessionId,
+    runId: opened.runId,
+    pageUrl: opened.pageUrl,
+    credentialKeys,
+    notice: headless
+      ? '会话已打开（无头）。建议可见窗口以便围观与人工过验证码；如要切换，关闭后重开。'
+      : '会话已打开（可见 Chrome）：你可围观 AI 操作，随时人工接管；AI 应用 dataforge_ui_agent_act 逐步执行，动作会同步录成步骤。',
+  }
+}
+
+/** 代办动作回执（脱敏后）。 */
+export type UiAgentActToolValue = AgentActResult
+
+/** 执行一个代办动作：动作进页面，步骤进缓冲；challenge 检测到就如实报（AI 应暂停叫人）。 */
+export async function agentActForTool(
+  deps: UiTestDeps,
+  args: { sessionId: string; act: AgentActSpec },
+): Promise<UiAgentActToolValue> {
+  return deps.agentSessions.act(args.sessionId, args.act, deps.agentSecrets)
+}
+
+/** 停止代办录制回执。 */
+export type UiAgentStopToolValue = {
+  ok: boolean
+  sessionId?: string
+  stepCount?: number
+  /** 落盘结果（review=pending 的待审查版本）。 */
+  saved?: { site: string; flow: string; version: number; path: string; review: 'pending' }
+  /** 已持久化的 cookie 条数（只有条数）。 */
+  persistedCookies?: number
+  /** 录到的步骤（未落盘时也给，便于排查）。 */
+  steps?: UiStep[]
+  notice?: string
+  error?: string
+}
+
+/**
+ * 停止代办录制：步骤缓冲 → ui-script v1（review=pending + 原始任务描述）→ cookie 落 jar → 关会话。
+ *
+ * 没录到步骤不落盘（如实回 notice）。站点/流程名留空时按当前页面自动命名（与录制器同口径）。
+ * 回放不消费 review：待审查版本确认前也可以直接回放，只是面板会一直挂「待审查」角标。
+ */
+export async function stopAgentSessionForTool(
+  deps: UiTestDeps,
+  exec: unknown,
+  args: { sessionId: string; site?: string; flow?: string; domain?: string; note?: string },
+): Promise<UiAgentStopToolValue> {
+  const steps = deps.agentSessions.stepsOf(args.sessionId)
+  if (steps === undefined) return { ok: false, error: `会话 ${args.sessionId} 不存在（可能已关闭）` }
+  const task = deps.agentSessions.taskOf(args.sessionId) ?? ''
+  const startUrl = deps.agentSessions.startUrlOf(args.sessionId) ?? ''
+  const viewport = deps.agentSessions.viewportOf(args.sessionId)
+  const secretSlots = deps.agentSessions.secretSlotsOf(args.sessionId)
+
+  if (steps.length === 0) {
+    await deps.agentSessions.close(args.sessionId)
+    return { ok: true, sessionId: args.sessionId, stepCount: 0, notice: '没有录到任何步骤（未落盘）' }
+  }
+
+  let site = args.site?.trim()
+  let flow = args.flow?.trim()
+  let autoNamed = false
+  if (site === undefined || site === '' || flow === undefined || flow === '') {
+    const meta = await deps.agentSessions.pageMetaOf(args.sessionId).catch(() => ({}))
+    const auto = autoNameFor(meta)
+    if (site === undefined || site === '') {
+      site = auto.site === '' ? '未命名站点' : auto.site
+      autoNamed = true
+    }
+    if (flow === undefined || flow === '') {
+      flow = auto.flow
+      autoNamed = true
+    }
+  }
+
+  const doc: UiScriptDoc = {
+    apiVersion: 'dataforge/v1',
+    kind: 'ui-script',
+    meta: {
+      site: site as string,
+      flow: flow as string,
+      version: 1,
+      created: new Date().toISOString(),
+      source: 'agent',
+      startUrl,
+      review: 'pending',
+      task,
+      ...(viewport === undefined ? {} : { viewport }),
+      ...(args.domain === undefined || args.domain.trim() === '' ? {} : { domain: args.domain.trim() }),
+      ...(args.note === undefined || args.note.trim() === '' ? {} : { note: args.note.trim() }),
+    },
+    inputs: secretSlots.map((name) => ({ name, type: 'string' as const, required: true, example: '回放时由人提供' })),
+    steps,
+  }
+  const saved = saveUiScript(await workspaceOf(deps, exec), doc, { source: 'agent' })
+  const persistedCookies = await persistCookiesOf(deps, await deps.agentSessions.cookiesOf(args.sessionId)).catch(() => undefined)
+  await deps.agentSessions.close(args.sessionId)
+  if (!saved.ok) {
+    return {
+      ok: false,
+      sessionId: args.sessionId,
+      stepCount: steps.length,
+      steps,
+      persistedCookies,
+      notice: `步骤已录到 ${steps.length} 条，但脚本未通过校验未落盘：${formatUiIssues(saved.issues)}`,
+    }
+  }
+  return {
+    ok: true,
+    sessionId: args.sessionId,
+    stepCount: steps.length,
+    saved: {
+      site: saved.doc.meta.site,
+      flow: saved.doc.meta.flow,
+      version: saved.version,
+      path: saved.path,
+      review: 'pending',
+    },
+    persistedCookies,
+    steps,
+    notice: [
+      `已落盘为 v${saved.version}（待审查）：人在面板比对任务描述与步骤，确认后转 confirmed。`,
+      autoNamed ? `站点/流程名留空，已自动命名：${saved.doc.meta.site} / ${saved.doc.meta.flow}` : '',
+      secretSlots.length > 0 ? `${secretSlots.length} 个字段经服务端密钥注入，已脱敏为入参槽位：${secretSlots.join('、')}（回放前提供）。` : '',
+      '待审查不影响回放：确认前也可直接 dataforge_ui_run 验证。',
+    ].filter((item) => item !== '').join('；'),
+  }
+}
+
+/** 代办录制会话列表（面板轮询用）。 */
+export function agentSessionsOf(deps: UiTestDeps): AgentSessionView[] {
+  return deps.agentSessions.list()
+}
+
+/** 人工审查回执：把某版本标记为已确认（落新版本的语义，旧版本不可变）。 */
+export type UiAgentReviewToolValue = {
+  ok: boolean
+  site?: string
+  flow?: string
+  version?: number
+  review?: 'confirmed'
+  message?: string
+  availableVersions?: number[]
+  error?: string
+}
+
+/**
+ * 审查确认（面板用）：把指定版本确认为「与任务一致」。
+ *
+ * 版本不可变：确认不是改旧文件，而是落一个 review=confirmed 的新版本（沿用原 source/task）。
+ * 驳回不需要工具：人直接编辑步骤/断言后另存新版本即可（pending 角标随最新版本走）。
+ */
+export async function confirmAgentReviewForTool(
+  workspaceRoot: string,
+  args: { site: string; flow: string; version?: number; note?: string },
+): Promise<UiAgentReviewToolValue> {
+  const loaded = loadUiScript(workspaceRoot, args.site, args.flow, args.version)
+  if (!loaded.ok) {
+    return {
+      ok: false,
+      error: loaded.message,
+      availableVersions: loaded.availableVersions,
+    }
+  }
+  const note = args.note?.trim()
+  const doc: UiScriptDoc = {
+    ...loaded.doc,
+    meta: {
+      ...loaded.doc.meta,
+      created: new Date().toISOString(),
+      review: 'confirmed',
+      ...(note === undefined || note === '' ? {} : { note }),
+    },
+  }
+  const saved = saveUiScript(workspaceRoot, doc, { source: loaded.doc.meta.source })
+  if (!saved.ok) {
+    return { ok: false, error: `确认版本未通过校验：${formatUiIssues(saved.issues)}` }
+  }
+  return {
+    ok: true,
+    site: saved.doc.meta.site,
+    flow: saved.doc.meta.flow,
+    version: saved.version,
+    review: 'confirmed',
+    message: `已确认：v${saved.version} 标记为 review=confirmed（任务：${saved.doc.meta.task ?? '（无）'}）`,
+  }
 }
 
 /* ────────────────────────────────────────────────
@@ -834,9 +1105,12 @@ export async function loadCookiesForStart(deps: UiTestDeps, startUrl: string): P
  *
  * 只报写入条数，cookie 值不经过任何回执/日志。落盘失败不抛（录制本身已成功）。
  */
-async function persistSessionCookies(deps: UiTestDeps, engine: UiBrowserEngine, sessionId: string): Promise<number | undefined> {
+/**
+ * 把一组 cookie 写进本地 jar（0600、按 origin 隔离）。只报写入条数，值不经过任何回执/日志。
+ * 落盘失败不抛（录制/代办本身已成功）。
+ */
+export async function persistCookiesOf(deps: UiTestDeps, cookies: UiCookie[]): Promise<number | undefined> {
   if (deps.credentialStorePath === undefined) return undefined
-  const cookies = await engine.cookiesOf(sessionId)
   if (cookies.length === 0) return 0
   const now = deps.now?.() ?? Date.now()
   // 按 cookie 的 domain 分组 → origin；persistCookies 的入参是 Set-Cookie 字符串。
@@ -854,6 +1128,10 @@ async function persistSessionCookies(deps: UiTestDeps, engine: UiBrowserEngine, 
     persisted += persistCookies(deps.credentialStorePath, origin, lines, now)
   }
   return persisted
+}
+
+async function persistSessionCookies(deps: UiTestDeps, engine: UiBrowserEngine, sessionId: string): Promise<number | undefined> {
+  return persistCookiesOf(deps, await engine.cookiesOf(sessionId))
 }
 
 /* ────────────────────────────────────────────────

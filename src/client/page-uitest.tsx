@@ -12,7 +12,7 @@
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
-  closeUiRecording, fetchUiBatches, fetchUiOverview, fetchUiRunDetail, fetchUiScript,
+  closeUiRecording, confirmUiAgentReview, fetchUiBatches, fetchUiOverview, fetchUiRunDetail, fetchUiScript,
   fetchUiSessions, openUiRecording, runUiBatch, runUiTest, startUiRecording, stopUiRecording,
   uiBatchReportUrl, uiEvidenceUrl,
 } from './api.js'
@@ -29,7 +29,7 @@ export interface UiTestPageProps {
   visible: boolean
 }
 
-type Busy = 'load' | 'open' | 'start' | 'stop' | 'close' | 'plan' | 'run' | 'detail' | 'batch-plan' | 'batch-run' | undefined
+type Busy = 'load' | 'open' | 'start' | 'stop' | 'close' | 'plan' | 'run' | 'detail' | 'batch-plan' | 'batch-run' | 'review' | undefined
 
 type Selected = { site: string; flow: string }
 
@@ -42,10 +42,13 @@ const FIELD_NOTE: Record<string, string> = {
   wait: '等待',
   goto: '打开地址',
   upload: '上传文件',
+  scroll: '滚动',
 }
 
 function stepSummary(step: UiStepLike): string {
-  const target = step.selector ?? step.url ?? step.key ?? (step.files === undefined ? '' : step.files.join(', '))
+  const target = step.selector ?? step.url ?? step.key
+    ?? (step.deltaY === undefined ? undefined : `Δ${step.deltaY}px`)
+    ?? (step.files === undefined ? '' : step.files.join(', '))
   const value = step.value === undefined ? '' : ` = ${step.value}`
   return `${FIELD_NOTE[step.kind] ?? step.kind}${value}${target === '' ? '' : ` @ ${target}`}`
 }
@@ -459,6 +462,25 @@ export function UiTestPage({ visible }: UiTestPageProps): ReactNode {
     }
   }
 
+  /** 人工审查确认：当前版本与 AI 任务描述比对一致 → 落 review=confirmed 新版本。 */
+  async function onConfirmReview(): Promise<void> {
+    if (detail === undefined) return
+    setError(undefined)
+    setBusy('review')
+    try {
+      const result = await confirmUiAgentReview({
+        site: detail.doc.meta.site,
+        flow: detail.doc.meta.flow,
+        version: detail.version,
+      })
+      setNotice(result.message ?? `已确认 v${result.version ?? '?'}：与任务一致`)
+      await reload(true)
+    } catch (err) {
+      setError(String((err as Error)?.message ?? err))
+    } finally {
+      setBusy(undefined)
+    }
+  }
   const stepCount = detail?.doc.steps.length ?? 0
   const versionOptions = useMemo(() => detail?.availableVersions ?? [], [detail])
   const currentRun = runResponse?.result
@@ -601,6 +623,7 @@ export function UiTestPage({ visible }: UiTestPageProps): ReactNode {
                     <span className="dsh-df-kv">
                       v{script.latest}
                       {versionInfo?.stepCount === undefined ? '' : ` · ${versionInfo.stepCount} 步`}
+                      {(script.review ?? versionInfo?.review) === 'pending' ? ' · ⏳待审查' : ''}
                     </span>
                   </button>
                 )
@@ -645,7 +668,14 @@ export function UiTestPage({ visible }: UiTestPageProps): ReactNode {
                 {detail.doc.meta.site} / {detail.doc.meta.flow} ｜ v{detail.version}
               </h2>
               <span className="dsh-df-badge done">{detail.doc.meta.source ?? '未标注'}</span>
+              {detail.doc.meta.review === 'pending' ? <span className="dsh-df-badge running">⏳ 待审查</span> : null}
+              {detail.doc.meta.review === 'confirmed' ? <span className="dsh-df-badge done">✓ 已确认</span> : null}
             </div>
+            {detail.doc.meta.task !== undefined && detail.doc.meta.task !== '' ? (
+              <p className="dsh-df-kv" style={{ marginTop: 6 }}>
+                <b>AI 任务</b> {detail.doc.meta.task}
+              </p>
+            ) : null}
             <p className="dsh-df-kv">
               <b>起点</b> {detail.doc.meta.startUrl} ｜ <b>{stepCount} 步</b>
               {detail.doc.meta.created === undefined ? '' : ` ｜ ${detail.doc.meta.created}`}
@@ -693,6 +723,17 @@ export function UiTestPage({ visible }: UiTestPageProps): ReactNode {
                   <input type="checkbox" checked={showBrowser} onChange={(event) => setShowBrowser(event.target.checked)} />
                   显示浏览器窗口
                 </label>
+              ) : null}
+              {detail.doc.meta.review === 'pending' ? (
+                <button
+                  type="button"
+                  className="dsh-df-btn-primary"
+                  title="比对上方 AI 任务描述与下方步骤：一致就确认，确认落 review=confirmed 新版本"
+                  onClick={() => { void onConfirmReview() }}
+                  disabled={busy !== undefined}
+                >
+                  {busy === 'review' ? '确认中…' : '✓ 审查通过'}
+                </button>
               ) : null}
               <button type="button" className="dsh-df-btn" onClick={() => { void onPlanRun() }} disabled={busy !== undefined}>
                 {busy === 'plan' ? '生成计划…' : '回放计划'}

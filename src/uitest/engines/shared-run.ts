@@ -253,6 +253,13 @@ async function runStep(
       const key = substituteInputs(step.key ?? '', inputs)
       assertKey(key)
       await io.seam.key(sessionId, { key })
+    } else if (step.kind === 'scroll') {
+      // 两种形态与 Playwright 引擎同口径：selector = 滚到元素；否则 deltaY 窗口滚动。
+      if (step.selector !== undefined) {
+        await io.seam.scroll(sessionId, { selector: step.selector })
+      } else {
+        await io.seam.scroll(sessionId, { deltaY: step.deltaY ?? 0 })
+      }
     } else if (step.kind === 'submit') {
       const selector = cssCandidatesOf(step)[0]
       if (selector === undefined) throw new Error('submit 步骤没有 CSS selector（共享引擎只能用 CSS 触发表单提交）')

@@ -322,6 +322,8 @@ export type UiStepLike = {
   key?: string
   url?: string
   ms?: number
+  /** scroll 步骤：无 selector 时的窗口滚动像素。 */
+  deltaY?: number
   files?: string[]
   expect?: UiExpectLike[]
   at?: string
@@ -349,6 +351,10 @@ export type UiScriptDocLike = {
     domain?: string
     note?: string
     viewport?: { width: number; height: number }
+    /** AI 代办录制的原始任务描述（审查比对基准）。 */
+    task?: string
+    /** 人工审查状态：pending = 待审；confirmed = 已确认与任务一致。 */
+    review?: 'pending' | 'confirmed'
   }
   inputs: UiInputLike[]
   steps: UiStepLike[]
@@ -362,6 +368,8 @@ export type UiScriptVersionInfo = {
   stepCount?: number
   startUrl?: string
   note?: string
+  task?: string
+  review?: 'pending' | 'confirmed'
   unreadable?: string
 }
 
@@ -373,6 +381,10 @@ export type UiScriptRef = {
   versions: number[]
   domain?: string
   updatedAt?: string
+  /** 最新版本审查状态（待审查角标）。 */
+  review?: 'pending' | 'confirmed'
+  /** 最新版本的 AI 任务描述。 */
+  task?: string
   unreadable?: string
   versionsInfo?: UiScriptVersionInfo[]
 }
@@ -402,12 +414,23 @@ export type UiRecordingSessionView = {
   startedAt: number
 }
 
+/** AI 代办录制会话（overview；与录制会话相互独立）。 */
+export type UiAgentSessionView = {
+  sessionId: string
+  runId: string
+  pageUrl: string
+  task: string
+  steps: number
+  startedAt: number
+}
+
 /** 面板 overview。 */
 export type UiOverview = {
   generatedAt: number
   scripts: UiScriptRef[]
   runs: UiRunRow[]
   sessions: UiRecordingSessionView[]
+  agentSessions?: UiAgentSessionView[]
   uiTestsRootHint: string
   /** 当前浏览器引擎（配置 uiTestBrowser 解析后的结果）。 */
   browser?: {

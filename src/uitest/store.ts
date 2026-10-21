@@ -81,6 +81,10 @@ export type UiVersionInfo = {
   stepCount?: number
   startUrl?: string
   note?: string
+  /** AI 代办录制的原始任务描述（审查比对用）。 */
+  task?: string
+  /** 人工审查状态：pending = AI 代办待审；缺省 = 无标记（人录/已确认）。 */
+  review?: 'pending' | 'confirmed'
   unreadable?: string
 }
 
@@ -92,6 +96,10 @@ export type UiScriptRef = {
   versions: number[]
   domain?: string
   updatedAt?: string
+  /** 最新版本的审查状态（列表角标用，随最新版本走）。 */
+  review?: 'pending' | 'confirmed'
+  /** 最新版本的 AI 任务描述。 */
+  task?: string
   unreadable?: string
 }
 
@@ -125,6 +133,8 @@ export function listUiVersionInfos(workspaceRoot: string, site: string, flow: st
         stepCount: doc.doc.steps.length,
         startUrl: doc.doc.meta.startUrl,
         ...(doc.doc.meta.note === undefined ? {} : { note: doc.doc.meta.note }),
+        ...(doc.doc.meta.task === undefined ? {} : { task: doc.doc.meta.task }),
+        ...(doc.doc.meta.review === undefined ? {} : { review: doc.doc.meta.review }),
       }
     } catch (error) {
       return { version, unreadable: String((error as Error)?.message ?? error) }
@@ -149,11 +159,15 @@ export function listUiScripts(workspaceRoot: string): UiScriptRef[] {
       let domain: string | undefined
       let unreadable: string | undefined
       let updatedAt: string | undefined
+      let review: 'pending' | 'confirmed' | undefined
+      let task: string | undefined
       try {
         const doc = parseUiScriptYaml(readFileSync(uiScriptPath(workspaceRoot, site, flow, latest), 'utf8'))
         if (doc.ok) {
           domain = doc.doc.meta.domain
           updatedAt = doc.doc.meta.created
+          review = doc.doc.meta.review
+          task = doc.doc.meta.task
         } else {
           unreadable = doc.issues.map((item) => `${item.target}：${item.reason}`).join('；')
         }
@@ -167,6 +181,8 @@ export function listUiScripts(workspaceRoot: string): UiScriptRef[] {
         versions,
         ...(domain === undefined ? {} : { domain }),
         ...(updatedAt === undefined ? {} : { updatedAt }),
+        ...(review === undefined ? {} : { review }),
+        ...(task === undefined ? {} : { task }),
         ...(unreadable === undefined ? {} : { unreadable }),
       })
     }

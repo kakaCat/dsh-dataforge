@@ -41,8 +41,10 @@ import type { TraceGetToolValue } from './trace/types.js'
 import { lookupForTool, type LookupDeps, type LookupToolValue } from './lookup/lookup.js'
 import { exportRunArtifacts, type DatasetExportToolValue } from './datasets/export.js'
 import {
-  batchRunForTool, closeRecordingForTool, getUiScriptForTool, openRecordingForTool, runsForTool,
-  runUiScriptForTool, startRecordingForTool, stopRecordingForTool, upsertUiScriptForTool,
+  batchRunForTool, closeRecordingForTool, getUiScriptForTool, openAgentSessionForTool, openRecordingForTool,
+  agentActForTool, stopAgentSessionForTool,
+  runsForTool, runUiScriptForTool, startRecordingForTool, stopRecordingForTool, upsertUiScriptForTool,
+  type UiAgentActToolValue, type UiAgentOpenToolValue, type UiAgentStopToolValue,
   type UiBatchToolValue, type UiRecordOpenToolValue, type UiRecordStartToolValue,
   type UiRecordStopToolValue, type UiRunsToolValue, type UiRunToolValue, type UiScriptToolValue,
   type UiScriptUpsertToolValue, type UiTestDeps,
@@ -3059,6 +3061,254 @@ export function defineUiBatchRunTool(deps: UiTestDeps) {
         ...(args.limit === undefined ? {} : { limit: args.limit }),
         ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
         ...(args.dry_run === undefined ? {} : { dryRun: args.dry_run }),
+      }))
+    },
+  })
+}
+
+// ────────────────────────────────────────────────
+// dataforge_ui_agent_open / act / stop（AI 代办录制）
+// ────────────────────────────────────────────────
+
+function renderUiAgentOpen(value: UiAgentOpenToolValue): string {
+  if (value.gate === 'confirm-required' && value.plan !== undefined) return value.plan.card
+  if (!value.ok) return `❌ ${value.error ?? '打开代办录制会话失败'}`
+  return [
+    `🤖 代办录制会话已打开：${value.sessionId}（runId: ${value.runId}）`,
+    `当前页面：${value.pageUrl ?? '（未知）'}`,
+    value.notice ?? '',
+  ].filter((line) => line !== '').join('\n')
+}
+
+export function defineUiAgentOpenTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_agent_open',
+    description: `打开 AI 代办录制会话：AI 自主操作页面（打开/登录/干活），每个动作同步录成 UI 步骤，供人审查。
+
+工作流：agent_open(confirm=true) → 反复 agent_act（先 inspect 观察页面再动作）→ agent_stop 落盘为**待审查脚本**（meta.review=pending + 原始任务描述）→ 人在面板逐步比对任务与步骤 → 确认转 confirmed。
+
+三道闸之闸2：不带 confirm 只回计划卡（任务/起点/密钥键名/写操作提示），一个浏览器都不起。
+引擎说明：代办会话用自己的可见 Chrome（playwright-core + 系统 Chrome），与 uiTestBrowser 配置的
+录制/回放引擎相互独立——shared 引擎下人录走侧栏，代办录制仍拉自己的窗口。
+登录（混合模式）：密码框 fill 必须给 valueFrom（服务端密钥表 uiAgentCredentials 的键名，open 回执列出可用键）；
+act 每步后探测人机验证，检测到 challenge.detected=true 就**暂停叫人**，人在可见窗口过完验证码后继续 agent_act。`,
+    parameters: {
+      task: { type: 'string', required: true, description: '要 AI 完成的工作内容（审查比对的基准，写清楚验收口径）' },
+      start_url: { type: 'string', required: true, description: '起点页面（http/https）' },
+      headless: { type: 'boolean', description: '缺省 false = 可见 Chrome（人可围观/接管/过验证码）' },
+      confirm: { type: 'boolean', description: '闸2：用户确认计划卡后才允许 true；缺省只出计划卡' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          gate: { type: 'string' },
+          plan: { type: 'object', additionalProperties: true },
+          sessionId: { type: 'string' },
+          runId: { type: 'string' },
+          pageUrl: { type: 'string' },
+          credentialKeys: { type: 'array', items: { type: 'string' } },
+          notice: { type: 'string' },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUiAgentOpen(tighten<UiAgentOpenToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<UiAgentOpenToolValue> {
+      return lossless(await openAgentSessionForTool(deps, exec, {
+        task: args.task,
+        startUrl: args.start_url,
+        ...(args.headless === undefined ? {} : { headless: args.headless }),
+        ...(args.confirm === undefined ? {} : { confirm: args.confirm }),
+      }))
+    },
+  })
+}
+
+function renderUiAgentAct(value: UiAgentActToolValue): string {
+  if (!value.ok) return `❌ ${value.error ?? '动作失败（未录步）'}`
+  const lines: string[] = []
+  if (value.inspect !== undefined) {
+    lines.push(`👀 页面观察：${value.inspect.title || '（无标题）'} ${value.inspect.url}`)
+    for (const el of value.inspect.elements.slice(0, 30)) {
+      lines.push(`  [${el.index}] <${el.tag}> ${el.text || '（无文本）'} → ${el.candidates[0] ?? '（无候选）'}`)
+    }
+    if (value.inspect.elements.length > 30) lines.push(`  … 还有 ${value.inspect.elements.length - 30} 个`)
+  }
+  if (value.step !== undefined) {
+    lines.push(`✅ 已执行并录步 ${value.step.id}：${value.step.kind}${value.step.selector === undefined ? '' : ` ${value.step.selector}`}`)
+  }
+  if (value.valueMasked === true) lines.push('🔐 该值经服务端密钥注入，步骤里只记 {{槽位}}。')
+  if (value.challenge?.detected === true) {
+    lines.push(`⚠️ 检测到人机验证（${value.challenge.markers.join('、')}）：暂停叫人，人在可见窗口完成验证后再继续 act。`)
+  }
+  lines.push(`页面：${value.pageUrl ?? '（未知）'}；已录 ${value.stepsSoFar ?? 0} 步。`)
+  return lines.join('\n')
+}
+
+export function defineUiAgentActTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_agent_act',
+    description: `在代办录制会话上执行一个动作；动作进页面，步骤同步进缓冲（失败不录步）。
+
+动作 kind：
+- inspect：观察页面（URL/标题/可交互元素清单+候选选择器+人机验证探测），**不产生步骤**——自主规划先 inspect 再动作；
+- goto {url} / wait {ms} / scroll {deltaY}（窗口滚动）；
+- click {selector} / scroll {selector}（滚到元素）；
+- fill {selector, value}；密码框或涉密值用 fill {selector, valueFrom}（键名见 open 回执 credentialKeys，值只在服务端过手，步骤记 {{槽位}}）；
+- select {selector, value}；press {key, selector?}（不带 selector = 全局按键）。
+
+selector 建议用 inspect 回执里的候选（元素描述同时录进步骤，回放有容错）。每个动作后回执都带 challenge：
+detected=true 说明出现验证码/滑块，**立即停止叫人**，人过完验证再继续。`,
+    parameters: {
+      session_id: { type: 'string', required: true, description: 'dataforge_ui_agent_open 返回的 sessionId' },
+      act: {
+        type: 'object',
+        required: true,
+        additionalProperties: false,
+        description: '动作描述（kind 必填，其余按 kind 取用）',
+        properties: {
+          kind: { type: 'string', required: true, enum: ['inspect', 'goto', 'click', 'fill', 'select', 'press', 'scroll', 'wait'] },
+          selector: { type: 'string', description: 'click/fill/select/scroll/press 的目标（优先用 inspect 给的候选）' },
+          url: { type: 'string', description: 'goto 的目标地址' },
+          value: { type: 'string', description: 'fill/select 的值（密码框禁用，见 valueFrom）' },
+          value_from: { type: 'string', description: '服务端密钥表键名：值只在服务端过手，步骤记 {{槽位}}' },
+          key: { type: 'string', description: 'press 的键（Enter/Tab/Escape/ArrowDown…）' },
+          delta_y: { type: 'number', description: 'scroll 的窗口滚动像素（正数向下；与 selector 二选一）' },
+          ms: { type: 'number', description: 'wait 的毫秒数（0..60000）' },
+        },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          error: { type: 'string' },
+          pageUrl: { type: 'string' },
+          challenge: { type: 'object', additionalProperties: true },
+          step: { type: 'object', additionalProperties: true },
+          stepsSoFar: { type: 'number' },
+          inspect: { type: 'object', additionalProperties: true },
+          valueMasked: { type: 'boolean' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUiAgentAct(tighten<UiAgentActToolValue>(value)) }],
+    },
+    async execute(args): Promise<UiAgentActToolValue> {
+      const act = args.act as Record<string, unknown>
+      const kind = String(act['kind'] ?? '')
+      const spec = toAgentActSpec(kind, act)
+      if (typeof spec === 'string') return { ok: false, error: spec }
+      return lossless(await agentActForTool(deps, { sessionId: args.session_id, act: spec }))
+    },
+  })
+}
+
+/** 工具参数（snake_case）→ AgentActSpec（camelCase）；缺字段给中文错误，不进会话。 */
+function toAgentActSpec(kind: string, act: Record<string, unknown>): import('./uitest/agentrec.js').AgentActSpec | string {
+  const str = (key: string): string | undefined => (typeof act[key] === 'string' && String(act[key]).trim() !== '' ? String(act[key]).trim() : undefined)
+  const num = (key: string): number | undefined => (typeof act[key] === 'number' && Number.isFinite(act[key]) ? act[key] as number : undefined)
+  switch (kind) {
+    case 'inspect':
+      return { kind: 'inspect' }
+    case 'goto': {
+      const url = str('url')
+      return url === undefined ? 'goto 缺 url' : { kind: 'goto', url }
+    }
+    case 'click': {
+      const selector = str('selector')
+      return selector === undefined ? 'click 缺 selector' : { kind: 'click', selector }
+    }
+    case 'fill': {
+      const selector = str('selector')
+      if (selector === undefined) return 'fill 缺 selector'
+      const value = str('value')
+      const valueFrom = str('value_from')
+      if (value === undefined && valueFrom === undefined) return 'fill 缺 value / value_from'
+      return { kind: 'fill', selector, ...(value === undefined ? {} : { value }), ...(valueFrom === undefined ? {} : { valueFrom }) }
+    }
+    case 'select': {
+      const selector = str('selector')
+      const value = str('value')
+      if (selector === undefined) return 'select 缺 selector'
+      if (value === undefined) return 'select 缺 value'
+      return { kind: 'select', selector, value }
+    }
+    case 'press': {
+      const key = str('key')
+      if (key === undefined) return 'press 缺 key'
+      const selector = str('selector')
+      return { kind: 'press', key, ...(selector === undefined ? {} : { selector }) }
+    }
+    case 'scroll': {
+      const selector = str('selector')
+      const deltaY = num('delta_y')
+      if (selector === undefined && deltaY === undefined) return 'scroll 缺 selector / delta_y'
+      return { kind: 'scroll', ...(selector === undefined ? {} : { selector }), ...(deltaY === undefined ? {} : { deltaY }) }
+    }
+    case 'wait': {
+      const ms = num('ms')
+      return ms === undefined ? 'wait 缺 ms' : { kind: 'wait', ms }
+    }
+    default:
+      return `未支持的 kind：${kind}（可选 inspect/goto/click/fill/select/press/scroll/wait）`
+  }
+}
+
+function renderUiAgentStop(value: UiAgentStopToolValue): string {
+  if (!value.ok) return `❌ ${value.notice ?? value.error ?? '停止代办录制失败'}`
+  const lines = [`⏹ 代办录制已停止：共录 ${value.stepCount ?? 0} 步。`]
+  if (value.saved !== undefined) {
+    lines.push(`📦 已落盘 ${value.saved.site} / ${value.saved.flow} v${value.saved.version}（${value.saved.path}）—— 待审查。`)
+  }
+  if (value.persistedCookies !== undefined) lines.push(`🍪 已持久化 ${value.persistedCookies} 条 cookie（回放带登录态）。`)
+  if (value.notice !== undefined) lines.push(value.notice)
+  return lines.join('\n')
+}
+
+export function defineUiAgentStopTool(deps: UiTestDeps) {
+  return defineTool({
+    name: 'dataforge_ui_agent_stop',
+    description: `停止代办录制：步骤缓冲 → ui-script v1（review=pending 待审查 + 原始任务描述）→ 会话 cookie 落凭证 jar → 关浏览器。
+
+站点/流程名留空自动命名（取当前页面 og:site_name/标题）。落盘后请叫人到面板「UI 测试」审查：
+比对任务描述与步骤，确认后转 confirmed（待审查不影响回放，确认前也可 dataforge_ui_run 验证）。
+没有录到步骤时不落盘（如实回 notice）。`,
+    parameters: {
+      session_id: { type: 'string', required: true, description: 'dataforge_ui_agent_open 返回的 sessionId' },
+      site: { type: 'string', description: '站点名（留空自动命名）' },
+      flow: { type: 'string', description: '流程名（留空自动命名）' },
+      domain: { type: 'string', description: '业务域（列表分组用）' },
+      note: { type: 'string', description: '版本说明' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          sessionId: { type: 'string' },
+          stepCount: { type: 'number' },
+          saved: { type: 'object', additionalProperties: true },
+          persistedCookies: { type: 'number' },
+          steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          notice: { type: 'string' },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUiAgentStop(tighten<UiAgentStopToolValue>(value)) }],
+    },
+    async execute(args, exec: ToolRunContext): Promise<UiAgentStopToolValue> {
+      return lossless(await stopAgentSessionForTool(deps, exec, {
+        sessionId: args.session_id,
+        ...(args.site === undefined ? {} : { site: args.site }),
+        ...(args.flow === undefined ? {} : { flow: args.flow }),
+        ...(args.domain === undefined ? {} : { domain: args.domain }),
+        ...(args.note === undefined ? {} : { note: args.note }),
       }))
     },
   })

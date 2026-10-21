@@ -31,6 +31,7 @@ import {
   defineChainDraftTool, defineDatasetExportTool, defineLookupTool, defineTraceAnalyzeTool, defineTraceGetTool,
   defineUiBatchRunTool, defineUiRecordCloseTool, defineUiRecordOpenTool, defineUiRecordStartTool,
   defineUiRecordStopTool, defineUiRunTool, defineUiRunsTool, defineUiScriptGetTool, defineUiScriptUpsertTool,
+  defineUiAgentOpenTool, defineUiAgentActTool, defineUiAgentStopTool,
 } from './tools.js'
 import type { ChainRunToolDeps, OrchestrationDeps } from './orchestration/application.js'
 import type { ChainDraftDeps, TraceDeps } from './trace/application.js'
@@ -47,8 +48,9 @@ import { createOrchestrationPanelHandler } from './orchestration/panel-routes.js
 import { createUiTestPanelHandler } from './uitest/panel-routes.js'
 import { createArtifactsPanelHandler } from './datasets/panel-routes.js'
 import { UiRecordingSessions } from './uitest/sessions.js'
+import { AgentRecordingSessions } from './uitest/agentrec.js'
 import { loadCookiesForStart, runUiScriptForTool, type UiTestDeps } from './uitest/application.js'
-import { runUiScript } from './uitest/run.js'
+import { openUiBrowser, runUiScript } from './uitest/run.js'
 import { PlaywrightBrowserEngine } from './uitest/engines/playwright.js'
 import { SharedBrowserEngine } from './uitest/engines/shared.js'
 import type { BrowserSeam } from './uitest/browser-seam.js'
@@ -328,6 +330,12 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
     dataRoot: config.dataRoot,
     stepTimeoutMs: config.uiStepTimeoutSeconds * 1_000,
   })
+  // AI 代办录制（agentrec）：独立会话注册表；openBrowser 工厂在这里绑死系统 Chrome 通道，
+  // 会话层不感知 channel（与录制会话同一款浏览器，免下载）。
+  const agentSessions = new AgentRecordingSessions({
+    dataRoot: config.dataRoot,
+    openBrowser: (options) => openUiBrowser({ ...options, channel: config.captureChromeChannel }),
+  })
   /** 按配置选当前引擎；显式选择不可用/未实现时带回退说明（application 会如实报错或降级）。 */
   const resolveUiEngine = (): UiEngineSelection => {
     if (config.uiTestBrowser === 'playwright') return { engine: playwrightEngine }
@@ -352,6 +360,8 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
     ...(credentialStorePath === undefined ? {} : { credentialStorePath }),
     resolveEngine: resolveUiEngine,
     batchEngine: playwrightEngine,
+    agentSessions,
+    agentSecrets: config.uiAgentCredentials ?? {},
   }
 
   // 链级 verify：主链确认后由 chain_run 调用；UI 回放失败只挂 verify 结果，不改主链终态。
@@ -457,6 +467,9 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       defineUiRunTool(uiTestDeps),
       defineUiRunsTool(uiTestDeps),
       defineUiBatchRunTool(uiTestDeps),
+      defineUiAgentOpenTool(uiTestDeps),
+      defineUiAgentActTool(uiTestDeps),
+      defineUiAgentStopTool(uiTestDeps),
     ]) {
       tools.register(tool)
     }

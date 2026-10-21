@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Browser, BrowserContext, Page } from 'playwright-core'
 import { defineUiBatchRunTool, defineUiRecordOpenTool, defineUiRecordStopTool, defineUiRunTool, defineUiScriptGetTool, defineUiScriptUpsertTool } from '../../src/tools.js'
 import type { UiTestDeps } from '../../src/uitest/application.js'
+import { AgentRecordingSessions } from '../../src/uitest/agentrec.js'
 import type { UiBrowserEngine } from '../../src/uitest/engines.js'
 import type { UiRecordingSessions } from '../../src/uitest/sessions.js'
 import type { UiRecordingResult } from '../../src/uitest/recorder.js'
@@ -144,6 +145,8 @@ function deps(overrides: Partial<UiTestDeps> = {}): UiTestDeps {
     enabled: true,
     resolveEngine: () => ({ engine: fakeEngine() }),
     batchEngine: fakeEngine(),
+    agentSessions: new AgentRecordingSessions(),
+    agentSecrets: {},
     ...overrides,
   }
 }

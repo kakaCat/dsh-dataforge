@@ -58,7 +58,9 @@ class FakeSeam implements BrowserSeam {
     this.actions.push({ kind: 'select', target: request.target, value: request.optionValue })
     return { value: request.optionValue }
   }
-  async scroll(): Promise<void> { this.actions.push({ kind: 'scroll' }) }
+  async scroll(_session: string, request: { deltaX?: number; deltaY?: number; selector?: string; toTop?: boolean; toBottom?: boolean }): Promise<void> {
+    this.actions.push({ kind: 'scroll', value: { deltaY: request.deltaY, selector: request.selector } })
+  }
   async screenshot(): Promise<SeamScreenshot> { return { dataUrl: 'data:image/png;base64,AAAA' } }
   async close(session: string): Promise<void> { this.closed.push(session); this.sessions.delete(session) }
 
@@ -248,6 +250,23 @@ describe('SharedBrowserEngine 回放', () => {
     expect(record?.engine).toBe('shared')
     const events = readUiRunEvents(join(dir as string, 'data'), result.runId)
     expect(events.some((event) => event.event === 'terminal' && event.success === true)).toBe(true)
+  })
+
+  it('scroll 步骤：deltaY 窗口滚动 / selector 滚到元素，都经 seam.scroll 发出', async () => {
+    const { engine: e, seam } = engine()
+    const doc = script({
+      steps: [
+        { id: 's1', kind: 'goto', url: 'https://example.com/' },
+        { id: 's2', kind: 'scroll', deltaY: 600 },
+        { id: 's3', kind: 'scroll', selector: '#more' },
+      ],
+    })
+    const result = await e.run(doc, {})
+    expect(result.success, result.error).toBe(true)
+    const scrolls = seam.actions.filter((action) => action.kind === 'scroll')
+    expect(scrolls).toHaveLength(2)
+    expect(scrolls[0]?.value).toEqual({ deltaY: 600, selector: undefined })
+    expect(scrolls[1]?.value).toEqual({ deltaY: undefined, selector: '#more' })
   })
 
   it('原元素位置尺寸未变：直接用录制坐标，不重算', async () => {

@@ -20,6 +20,7 @@ import {
   upsertChainForTool, chainRunForTool, type ChainRunToolDeps, type ChainRunToolValue,
 } from '../../src/orchestration/application.js'
 import { runUiScriptForTool, type UiTestDeps } from '../../src/uitest/application.js'
+import { AgentRecordingSessions } from '../../src/uitest/agentrec.js'
 import { runUiScript } from '../../src/uitest/run.js'
 import { saveUiScript } from '../../src/uitest/store.js'
 import { PlaywrightBrowserEngine } from '../../src/uitest/engines/playwright.js'
@@ -179,6 +180,8 @@ steps:
       enabled: true,
       resolveEngine: () => ({ engine }),
       batchEngine: engine,
+      agentSessions: new AgentRecordingSessions(),
+      agentSecrets: {},
     }
 
     const runDeps: ChainRunToolDeps = {

@@ -357,6 +357,12 @@ interface Config {
    * 批量回归固定走 playwright 无头（见 UiTestDeps.batchEngine）。
    */
   uiTestBrowser: 'auto' | 'playwright' | 'shared' | 'cdp';
+  /**
+   * AI 代办录制的服务端密钥表：dataforge_ui_agent_act 的 valueFrom 在这里按**键名**取值。
+   * 键名会出现在 open 回执里（AI 可见），值永远只在服务端内存过手——
+   * 不进模型上下文、不进步骤、不进留痕。密码框强制走 valueFrom。
+   */
+  uiAgentCredentials: Record<string, string>;
 }
 declare const Config: Schema<Config>;
 /** 归一化（相对路径 → 绝对；~ 展开）。 */

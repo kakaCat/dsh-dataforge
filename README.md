@@ -56,6 +56,7 @@ DSH（DeepSeek Harness）插件：**采集 → trace 分析 → 接口链编排 
 | UI 录制 | `src/uitest/{recorder,sessions}.ts` | DOM 事件→步骤 / 密码脱敏 / 可见 Chrome 会话 |
 | UI 回放 | `src/uitest/{run,run-store}.ts` | 候选解析 / 动作执行 / 页面断言 / 截图 / `dataRoot/ui-runs` 留痕 |
 | UI 应用层 | `src/uitest/application.ts` | UI 三道闸、cookie jar、录制保存；工具与面板共用 |
+| AI 代办录制 | `src/uitest/agentrec.ts` | AI 动作→步骤 / valueFrom 密钥注入 / 验证码探测 / `review: pending` 落盘 / `dataRoot/ui-agent-runs` 留痕 |
 | 浏览器引擎 | `src/uitest/engines*.ts`、`src/uitest/engines/` | `UiBrowserEngine` 契约 + `playwright` / `shared` 两实现（`cdp` 预留）；`RecorderCore` 语义共用 |
 
 ## 可选依赖：共享真实浏览器（dsh-builtin-browser）
@@ -120,6 +121,7 @@ dsh plugin --profile web add dsh-dataforge dsh-builtin-browser@0.4.13
 | `uiTestEnabled` | UI 回放开关；关闭后 `dataforge_ui_run` 一律 `ui-test-disabled`（录制/脚本读写/历史回看照常） | `true` |
 | `uiStepTimeoutSeconds` | UI 回放：单步动作 + 断言超时（秒）；到点该步失败并留截图 | `15` |
 | `uiTestBrowser` | UI 测试浏览器引擎：`auto`（有共享浏览器就用 shared，否则 playwright）/ `playwright` / `shared` / `cdp`（预留，未实现时回退 playwright） | `auto` |
+| `uiAgentCredentials` | AI 代办录制的服务端密钥表（`{ 键名: 值 }`）：`agent_act` 的 `value_from` 按键名取值；键名对 AI 可见，**值永不出服务端**（不进步骤/留痕/回执）；密码框强制走 value_from | `{}` |
 
 ## 流程包发现（后写赢）【legacy：Flow Pack 运行器，S6 移除】
 
@@ -518,7 +520,7 @@ edges:                       # from 可为「节点.出参」或 $inputs.槽位�
 面向「按键精灵式」页面自动化：录制一遍真实操作，回放时在无头 Chrome 里重现，并用页面断言判定通过/失败。
 它是**第三条执行面**——与接口链（纯 HTTP）分开：链断言响应字段，UI 脚本断言页面状态；两条线共享的只有项目资产目录与凭证纪律。
 
-### 工具（九个）
+### 工具（十二个）
 
 | 工具 | 用途 |
 |---|---|
@@ -531,6 +533,9 @@ edges:                       # from 可为「节点.出参」或 $inputs.槽位�
 | `dataforge_ui_run` | 回放（三道闸：入参必填 → confirm 计划卡 → headless 执行 + 断言） |
 | `dataforge_ui_runs` | 运行列表 / 详情（事件流、失败步骤、证据路径） |
 | `dataforge_ui_batch_run` | 批量回归：选脚本（flows / site / 全部）→ 计划 → 串行回放 → 报告（`report.md` + `report.json`） |
+| `dataforge_ui_agent_open` | **AI 代办录制**：打开会话（闸2 计划卡确认）并绑定任务描述；只支持 playwright 引擎 |
+| `dataforge_ui_agent_act` | 代办动作：inspect（观察页面，不录步）/ goto / click / fill / select / press / scroll / wait；动作执行即录步 |
+| `dataforge_ui_agent_stop` | 停止代办录制：步骤缓冲落 ui-script v1（`review: pending` + 任务描述）→ cookie 落 jar → 关浏览器 |
 
 ### 脚本文件（工作区项目资产）
 
@@ -584,6 +589,40 @@ dataforge_ui_run(..., confirm=true)                   ← headless 回放 + 断�
 
 回放失败即停（fail-fast），**不自动重试**（重试 click/submit 可能重复写入）；先看
 `dataforge_ui_runs(run_id)` 的断点/断言/截图，再决定修脚本还是重录。
+
+### AI 代办录制（agentrec）：给 AI 派活 → 人审查
+
+人录的替代品：**把任务描述给 AI，AI 自己开页面、登录、干活，过程同步录成步骤**；
+人在面板逐步比对「任务描述 vs 步骤」，确认一致后转 `confirmed`。一次劳动两种产出：
+审查记录 + 可回放/可回归的脚本。
+
+```text
+dataforge_ui_agent_open(task, start_url)            ← 闸2：先回计划卡（任务/起点/密钥键名），确认才开浏览器
+  → AI 反复 agent_act：
+      inspect（观察页面：URL/标题/可交互元素+候选，不录步）→ 动作（click/fill/scroll/…，执行即录步）
+      每个动作后探测人机验证：challenge.detected=true → 暂停叫人，人过完验证码继续
+dataforge_ui_agent_stop(session_id)                 ← 步骤缓冲 → ui-script v1（review: pending + task）→ cookie 落 jar
+  → 人在面板「UI 测试」审查：任务描述在步骤表上方，「✓ 审查通过」落 confirmed 新版本
+  → （随时可）dataforge_ui_run 回放 / dataforge_ui_batch_run 回归
+```
+
+- **凭证纪律（混合登录）**：`uiAgentCredentials` 配服务端密钥表（`{ 键名: 值 }`）；`fill` 用
+  `value_from: 键名` 取值——**键名进 AI 上下文，值只在服务端内存过手**，步骤里记 `{{键名消毒后的槽位}}`，
+  回放前由人提供。密码框**强制** value_from（明文值直接拒绝）。
+- **验证码交接**：每个 act 回执带 `challenge`（iframe/滑块/验证码输入框/验证文案四类探测）；
+  检测到就暂停叫人，浏览器窗口保持可见，人过完验证 AI 继续。会话默认可见 Chrome，人随时可接管。
+- **引擎独立**：代办录制用自己的浏览器工厂（playwright-core + 系统 Chrome，可见窗口），与
+  `uiTestBrowser` 配置的录制/回放引擎互不干涉——shared 引擎下人录走侧栏共享浏览器，
+  代办录制仍拉自己的窗口，不用改任何配置。
+- **探索的眼睛**：`inspect` 返回当前页可交互元素清单（带选择器候选，最多 60 个），
+  AI 自主规划「点哪、填啥」；动作执行前会先做元素描述（候选 + 语义特征 + 落点），
+  与人录的步骤同一套回放容错（候选链 → features 兜底 → clickPoint 重算）。
+- **scroll 步骤**：滚翻页加载（收集类任务常见）录成 `scroll`（`deltaY` 窗口滚动 / selector 滚到元素），
+  回放同样支持；步骤编辑器也能手动加。
+- **待审查只是元信息**：`meta.review: pending | confirmed` + `meta.task`，回放/批量回归不消费；
+  确认动作落**新版本**（版本不可变），驳回 = 直接编辑步骤/断言另存。
+- **留痕**：每次代办会话落 `dataRoot/ui-agent-runs/<runId>/`（run.json + events.ndjson），
+  事件里只有选择器/步骤形状/脱敏标记，没有值。
 
 ### 边界与纪律（M1 如实标注）
 
@@ -682,6 +721,8 @@ pnpm test        # vitest：全量用例（777 个；真实站点/Chrome 端到�
 pnpm build       # tsdown → dist/ + lib/client.js
 # 真 Chrome 的 UI 录制→回放/点选端到端（默认跳过；需要本机 Chrome）：
 UI_E2E=1 pnpm exec vitest run test/uitest/e2e-local.test.ts
+# 真 Chrome 的 AI 代办录制端到端（登录 valueFrom 脱敏 → 待审查落盘 → 无头回放）：
+UI_E2E=1 pnpm exec vitest run test/uitest/e2e-agentrec.test.ts
 # 共享浏览器引擎（seam）用假 seam 单测（不依赖 dsh-builtin-browser）：
 pnpm exec vitest run test/uitest/shared-engine.test.ts
 # 真实站点只读闭环 E2E（jsonplaceholder；需要网络 + 本机 Chrome）：

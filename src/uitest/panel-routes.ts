@@ -28,10 +28,10 @@ import { readFileSync, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isAbsolute } from 'node:path'
 import {
-  batchRunForTool, closeRecordingForTool, evidencePathOf, loadUiScriptForPanel,
+  batchRunForTool, closeRecordingForTool, confirmAgentReviewForTool, evidencePathOf, loadUiScriptForPanel,
   openRecordingForTool, pickSelectorForTool, recordingSessionsOf, runUiScriptForTool,
   saveUiScriptDocForPanel, saveUiScriptForPanel,
-  startRecordingForTool, stopRecordingForTool, uiVersionInfosForPanel, type UiTestDeps,
+  startRecordingForTool, stopRecordingForTool, uiVersionInfosForPanel, agentSessionsOf, type UiTestDeps,
 } from './application.js'
 import { batchReportPath, listUiBatches, readUiBatch } from './batch-store.js'
 import { listUiScripts } from './store.js'
@@ -162,6 +162,22 @@ async function dispatch(
       const closed = await closeRecordingForTool(deps, { sessionId })
       return closed.ok ? ok(res, closed) : fail(res, 400, closed.error ?? '关闭失败', 'record-close-failed')
     }
+    if (suffix === '/agent-review') {
+      // 人工审查确认：把指定版本确认为「与任务一致」（落 review=confirmed 的新版本）。
+      const body = await readJson(req, MAX_SMALL_BODY_BYTES)
+      const record = asRecord(body)
+      const site = stringField(record, 'site')
+      const flow = stringField(record, 'flow')
+      if (site === undefined || flow === undefined) return fail(res, 400, '缺 site / flow', 'bad-body')
+      const versionRaw = record['version']
+      const result = await confirmAgentReviewForTool(workspaceRoot, {
+        site,
+        flow,
+        ...(typeof versionRaw === 'number' ? { version: versionRaw } : {}),
+        ...(stringField(record, 'note') === undefined ? {} : { note: stringField(record, 'note') }),
+      })
+      return result.ok ? ok(res, result) : fail(res, 404, result.error ?? '审查确认失败', 'review-failed')
+    }
     if (suffix === '/batch/run') {
       const body = await readJson(req, MAX_SMALL_BODY_BYTES)
       const record = asRecord(body)
@@ -228,6 +244,7 @@ async function dispatch(
       })),
       runs: listUiRuns(deps.dataRoot, 10),
       sessions: recordingSessionsOf(deps),
+      agentSessions: agentSessionsOf(deps),
       uiTestsRootHint: `${workspaceRoot}/.dsh/dataforge/ui-tests`,
       browser: (() => {
         const selection = deps.resolveEngine()

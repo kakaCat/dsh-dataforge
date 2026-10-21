@@ -12,6 +12,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createUiTestPanelHandler, isUiTestRequest } from '../../src/uitest/panel-routes.js'
 import type { UiTestDeps } from '../../src/uitest/application.js'
+import { AgentRecordingSessions } from '../../src/uitest/agentrec.js'
 import type { UiBrowserEngine, UiEngineOpenArgs } from '../../src/uitest/engines.js'
 
 let dir: string | undefined
@@ -68,6 +69,8 @@ function deps(overrides: Partial<UiTestDeps> = {}): UiTestDeps {
     enabled: true,
     resolveEngine: () => ({ engine: fakeEngine() }),
     batchEngine: fakeEngine(),
+    agentSessions: new AgentRecordingSessions(),
+    agentSecrets: {},
     ...overrides,
   }
 }

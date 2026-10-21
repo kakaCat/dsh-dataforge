@@ -10,12 +10,22 @@ describe('pickWorkspacePath', () => {
     expect(pickWorkspacePath(items, 's-dataforge')).toBe('/work/dataforge')
   })
 
-  it('会话找不到时回退最近更新；空列表返回 undefined', () => {
+  it('会话找不到时不猜最近更新：返回 undefined，交服务端按 dataforge 数据兜底', () => {
     const items = [
       { path: '/work/old', updatedAt: '2026-10-17T00:00:00Z', sessionIds: [] },
       { path: '/work/new', updatedAt: '2026-10-18T00:00:00Z', sessionIds: [] },
     ]
-    expect(pickWorkspacePath(items, 's-missing')).toBe('/work/new')
+    expect(pickWorkspacePath(items, 's-missing')).toBeUndefined()
+    expect(pickWorkspacePath(items, undefined)).toBeUndefined()
     expect(pickWorkspacePath(undefined, 's')).toBeUndefined()
+  })
+
+  it('归属工作区 path 为空串/缺失时同样不猜', () => {
+    const items = [
+      { path: '', updatedAt: '2026-10-18T00:00:00Z', sessionIds: ['s-empty'] },
+      { updatedAt: '2026-10-18T00:00:00Z', sessionIds: ['s-nopath'] },
+    ]
+    expect(pickWorkspacePath(items, 's-empty')).toBeUndefined()
+    expect(pickWorkspacePath(items, 's-nopath')).toBeUndefined()
   })
 })

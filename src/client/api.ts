@@ -309,6 +309,16 @@ export async function fetchUiSessions(): Promise<{ sessions: UiRecordingSessionV
   return fetchPanelData<{ sessions: UiRecordingSessionView[] }>('/ui-tests/record/sessions')
 }
 
+/** 人工审查确认：把指定版本标记为 review=confirmed（落新版本，旧版本不可变）。 */
+export async function confirmUiAgentReview(args: {
+  site: string
+  flow: string
+  version?: number
+  note?: string
+}): Promise<{ ok: boolean; version?: number; message?: string }> {
+  return postPanelData<{ ok: boolean; version?: number; message?: string }>('/ui-tests/agent-review', args)
+}
+
 export async function fetchUiRunDetail(runId: string): Promise<UiRunDetail> {
   return fetchPanelData<UiRunDetail>(`/ui-tests/runs/${encodeURIComponent(runId)}`)
 }

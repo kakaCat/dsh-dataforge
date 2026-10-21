@@ -369,6 +369,8 @@ async function runStep(
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
     } else if (step.kind === 'press' && step.selector === undefined && (step.candidates?.length ?? 0) === 0) {
       await page.keyboard.press(substituteInputs(step.key ?? '', inputs))
+    } else if (step.kind === 'scroll' && step.selector === undefined && (step.candidates?.length ?? 0) === 0) {
+      await page.mouse.wheel(0, step.deltaY ?? 0)
     } else {
       let resolved: Awaited<ReturnType<typeof resolveTarget>>
       try {
@@ -415,6 +417,8 @@ async function runStep(
       } else if (step.kind === 'upload') {
         const files = (step.files ?? []).map((file) => substituteInputs(file, inputs))
         await resolved.locator.setInputFiles(files, { timeout })
+      } else if (step.kind === 'scroll') {
+        await resolved.locator.scrollIntoViewIfNeeded({ timeout })
       }
     }
 

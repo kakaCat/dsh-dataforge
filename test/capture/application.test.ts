@@ -42,7 +42,7 @@ function fixture(): {
     captureStabilityWindowMs: 1500,
     captureBodyLimitBytes: 262_144,
     captureChromeChannel: 'chrome',
-    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true, uiTestEnabled: true, uiStepTimeoutSeconds: 15, uiTestBrowser: 'playwright',
+    chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true, uiTestEnabled: true, uiStepTimeoutSeconds: 15, uiTestBrowser: 'playwright', uiAgentCredentials: {},
   }
   const dones: Promise<unknown>[] = []
   const jobs = {

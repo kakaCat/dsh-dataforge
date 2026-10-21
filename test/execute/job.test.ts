@@ -168,7 +168,7 @@ function fullConfig(workspace: string): Required<Config> {
     chainConcurrency: 4,
     chainResponseLimitBytes: 2_097_152,
     chainCredentialPersistence: true,
-    uiTestEnabled: true, uiStepTimeoutSeconds: 15, uiTestBrowser: 'playwright',
+    uiTestEnabled: true, uiStepTimeoutSeconds: 15, uiTestBrowser: 'playwright', uiAgentCredentials: {},
   }
 }
 

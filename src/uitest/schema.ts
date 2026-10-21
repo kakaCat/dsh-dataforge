@@ -26,7 +26,7 @@ export const UI_SCRIPT_KIND = 'ui-script'
 
 /** 步骤动作词表：录得出来的、回放得回去的。 */
 export const UI_STEP_KINDS = [
-  'goto', 'click', 'fill', 'press', 'select', 'submit', 'wait', 'upload',
+  'goto', 'click', 'fill', 'press', 'select', 'submit', 'wait', 'upload', 'scroll',
 ] as const
 export type UiStepKind = (typeof UI_STEP_KINDS)[number]
 
@@ -40,6 +40,13 @@ export type UiInputType = (typeof UI_INPUT_TYPES)[number]
 
 /** 版本来源：谁写下的这一版（列表展示用，由写入方声明，不猜）。 */
 export type UiScriptSource = 'record' | 'agent' | 'canvas'
+
+/**
+ * 人工审查状态：AI 代办录制（agentrec）落下的版本缺省是 `pending`——
+ * 步骤是 AI 自主操作生成的，人在面板逐步比对原始任务描述确认后才转 `confirmed`。
+ * 纯元信息：回放/批量回归不消费它。
+ */
+export type UiReviewState = 'pending' | 'confirmed'
 
 /** 一条页面断言。`text` 用 equals/contains；`url` 用 equals/contains；`count` 用 equals。 */
 export type UiExpect = {
@@ -96,6 +103,8 @@ export type UiStep = UiTarget & {
   url?: string
   /** wait 的毫秒数（0..60000）。 */
   ms?: number
+  /** scroll 步骤：无 selector 时滚动的像素（-10000..10000，正数向下）。 */
+  deltaY?: number
   /** upload 的本地文件路径（回放机器上必须存在）；可含 `{{input}}`。 */
   files?: string[]
   /** 动作完成后要校验的页面断言（按顺序执行，任一失败即该步失败）。 */
@@ -130,6 +139,10 @@ export type UiScriptMeta = {
   domain?: string
   /** 版本说明。 */
   note?: string
+  /** AI 代办录制的原始任务描述（审查比对用；人录的版本没有）。 */
+  task?: string
+  /** 人工审查状态（agentrec 落盘为 pending，面板确认后新版本转 confirmed）。 */
+  review?: UiReviewState
   /** 录制/回放视图尺寸（缺省 1280×720；布局敏感断言靠它稳定）。 */
   viewport?: { width: number; height: number }
 }
@@ -419,6 +432,20 @@ function normalizeStep(raw: unknown, index: number, issues: UiIssue[]): UiStep |
     }
     step.ms = Math.round(msRaw)
   }
+  if (kind === 'scroll') {
+    // 两种形态：给 selector = 滚到该元素（滚翻页加载更多）；只给 deltaY = 窗口滚动像素。
+    const deltaYRaw = raw['deltaY']
+    if (selector === undefined && candidates.length === 0) {
+      if (typeof deltaYRaw !== 'number' || !Number.isFinite(deltaYRaw) || Math.round(deltaYRaw) !== deltaYRaw || Math.abs(deltaYRaw) > 10_000) {
+        issues.push(issue(target, 'bad-step-field', 'scroll 步骤需要 selector（滚到元素）或 deltaY（窗口滚动像素，-10000..10000 整数）'))
+        return undefined
+      }
+      step.deltaY = Math.round(deltaYRaw)
+    } else if (deltaYRaw !== undefined) {
+      issues.push(issue(target, 'bad-step-field', 'scroll 步骤的 selector 与 deltaY 二选一'))
+      return undefined
+    }
+  }
   if (kind === 'upload') {
     const filesRaw = Array.isArray(raw['files']) ? raw['files'] : []
     const files: string[] = []
@@ -511,6 +538,8 @@ function normalizeMeta(raw: unknown, issues: UiIssue[]): UiScriptMeta | undefine
     ...(source === undefined ? {} : { source }),
     ...(textOf(raw['domain']) === undefined ? {} : { domain: textOf(raw['domain']) as string }),
     ...(textOf(raw['note']) === undefined ? {} : { note: textOf(raw['note']) as string }),
+    ...(textOf(raw['task']) === undefined ? {} : { task: (textOf(raw['task']) as string).slice(0, 4_000) }),
+    ...(raw['review'] === 'pending' || raw['review'] === 'confirmed' ? { review: raw['review'] } : {}),
     ...(viewport === undefined ? {} : { viewport }),
   }
 }

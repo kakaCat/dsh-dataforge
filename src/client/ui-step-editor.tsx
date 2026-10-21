@@ -13,7 +13,7 @@ import { useState, type ReactNode } from 'react'
 import { pickUiSelector, saveUiScriptDoc } from './api.js'
 import type { UiExpectLike, UiScriptDetail, UiScriptDocLike, UiStepLike } from './types.js'
 
-const STEP_KINDS = ['goto', 'click', 'fill', 'press', 'select', 'submit', 'wait', 'upload'] as const
+const STEP_KINDS = ['goto', 'click', 'fill', 'press', 'select', 'submit', 'wait', 'upload', 'scroll'] as const
 const EXPECT_KINDS = ['visible', 'hidden', 'text', 'value', 'url', 'count'] as const
 
 const STEP_LABELS: Record<string, string> = {
@@ -25,6 +25,7 @@ const STEP_LABELS: Record<string, string> = {
   submit: '提交表单',
   wait: '等待',
   upload: '上传文件',
+  scroll: '滚动',
 }
 
 const EXPECT_LABELS: Record<string, string> = {
@@ -56,6 +57,7 @@ function freshStep(kind: string, id: string): UiStepLike {
     case 'press': return { id, kind, key: 'Enter' }
     case 'select': return { id, kind, selector: '', value: '' }
     case 'wait': return { id, kind, ms: 1_000 }
+    case 'scroll': return { id, kind, deltaY: 600 }
     case 'upload': return { id, kind, selector: '', files: [] }
     default: return { id, kind, selector: '' }
   }
@@ -65,7 +67,7 @@ function freshStep(kind: string, id: string): UiStepLike {
 function changeKind(step: UiStepLike, kind: string): UiStepLike {
   const next = freshStep(kind, step.id)
   if (step.expect !== undefined) next.expect = step.expect
-  if ((kind === 'click' || kind === 'fill' || kind === 'select' || kind === 'submit' || kind === 'upload') && step.selector !== undefined) {
+  if ((kind === 'click' || kind === 'fill' || kind === 'select' || kind === 'submit' || kind === 'upload' || kind === 'scroll') && step.selector !== undefined) {
     next.selector = step.selector
     if (step.candidates !== undefined) next.candidates = step.candidates
   }

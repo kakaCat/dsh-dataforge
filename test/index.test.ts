@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../src/index.js'
 
-it('index: 注册 35 个工具（含 trace/lookup/链草稿/dataset、编排、首跑 probe、绑定回写、结晶、诊断与复跑对照、UI 录制回放/批量），策略段含采集/首跑/结晶/UI 纪律', () => {
+it('index: 注册 38 个工具（含 trace/lookup/链草稿/dataset、编排、首跑 probe、绑定回写、结晶、诊断与复跑对照、UI 录制回放/批量/AI 代办录制），策略段含采集/首跑/结晶/UI 纪律', () => {
   const dir = mkdtempSync(join(tmpdir(), 'cap-idx-'))
   const registered: Array<{ name: string }> = []
   const sections: Array<{ name: string; text: string }> = []
@@ -32,7 +32,7 @@ it('index: 注册 35 个工具（含 trace/lookup/链草稿/dataset、编排、�
     captureChromeChannel: 'chrome',
     chainRunEnabled: true, chainNodeTimeoutSeconds: 30, chainConcurrency: 4, chainResponseLimitBytes: 2_097_152, chainCredentialPersistence: true, uiTestEnabled: true, uiStepTimeoutSeconds: 15, uiTestBrowser: 'playwright',
   } as never)
-  expect(registered).toHaveLength(35)
+  expect(registered).toHaveLength(38)
   const names = registered.map((t) => t.name)
   expect(names.filter((n) => n.startsWith('dataforge_browser_'))).toHaveLength(4)
   expect(names).toContain('dataforge_capture')
@@ -64,6 +64,10 @@ it('index: 注册 35 个工具（含 trace/lookup/链草稿/dataset、编排、�
   expect(names).toContain('dataforge_ui_run')
   expect(names).toContain('dataforge_ui_runs')
   expect(names).toContain('dataforge_ui_batch_run')
+  // AI 代办录制三件套：打开会话（闸2）→ 自主执行即录步 → 停止落待审查版本。
+  expect(names).toContain('dataforge_ui_agent_open')
+  expect(names).toContain('dataforge_ui_agent_act')
+  expect(names).toContain('dataforge_ui_agent_stop')
   expect(sections.some((s) => s.text.includes('dataforge-capture（接口采集）'))).toBe(true)
   expect(sections.some((s) => s.text.includes('不贴 token/cookie 原文'))).toBe(true)
   expect(sections.some((s) => s.text.includes('dataforge-explore（首跑试探）'))).toBe(true)

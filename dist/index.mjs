@@ -931,7 +931,8 @@ const Config = Schema.object({
 		"playwright",
 		"shared",
 		"cdp"
-	]).default("auto")
+	]).default("auto"),
+	uiAgentCredentials: Schema.dict(Schema.string()).default({})
 });
 /** 归一化（相对路径 → 绝对；~ 展开）。 */
 function normalizeConfig(raw) {
@@ -954,7 +955,8 @@ function normalizeConfig(raw) {
 		chainCredentialPersistence: raw.chainCredentialPersistence ?? true,
 		uiTestEnabled: raw.uiTestEnabled,
 		uiStepTimeoutSeconds: raw.uiStepTimeoutSeconds,
-		uiTestBrowser: raw.uiTestBrowser
+		uiTestBrowser: raw.uiTestBrowser,
+		uiAgentCredentials: raw.uiAgentCredentials ?? {}
 	};
 }
 
@@ -8342,7 +8344,7 @@ function toChainIssues$1(issues) {
 		reason: issue.reason
 	}));
 }
-function messageOf$7(error) {
+function messageOf$8(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function isLibraryError(error) {
@@ -8360,7 +8362,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `解析工作区根失败：${messageOf$7(error)}`,
+			message: `解析工作区根失败：${messageOf$8(error)}`,
 			hints: []
 		};
 	}
@@ -8391,7 +8393,7 @@ async function importLibraryForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "library-unavailable",
-			message: `导入接口库失败：${messageOf$7(error)}`,
+			message: `导入接口库失败：${messageOf$8(error)}`,
 			hints: []
 		};
 	}
@@ -8422,7 +8424,7 @@ async function upsertChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `落盘链失败：${messageOf$7(error)}`
+			message: `落盘链失败：${messageOf$8(error)}`
 		};
 	}
 }
@@ -8732,7 +8734,7 @@ async function runVerifyForTool(deps, doc, summary, mainInputs) {
 	} catch (error) {
 		return {
 			...base,
-			message: `UI 验收执行失败：${messageOf$7(error)}`
+			message: `UI 验收执行失败：${messageOf$8(error)}`
 		};
 	}
 }
@@ -8797,7 +8799,7 @@ async function runCleanupForTool(deps, workspaceRoot, doc, summary, mainInputs) 
 	} catch (error) {
 		return {
 			...base,
-			message: `cleanup 执行失败：${messageOf$7(error)}`
+			message: `cleanup 执行失败：${messageOf$8(error)}`
 		};
 	}
 }
@@ -8963,7 +8965,7 @@ async function chainRunForTool(deps, exec, args) {
 			accepted: false,
 			gate: "blocked",
 			code: "invalid-chain",
-			message: `解析工作区根失败：${messageOf$7(error)}`
+			message: `解析工作区根失败：${messageOf$8(error)}`
 		};
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
@@ -9230,7 +9232,7 @@ function plainRecordOf(value) {
 
 //#endregion
 //#region src/orchestration/bind.ts
-function messageOf$6(error) {
+function messageOf$7(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function toChainIssues(issues) {
@@ -9383,7 +9385,7 @@ async function bindChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `读取链失败：${messageOf$6(error)}`,
+			message: `读取链失败：${messageOf$7(error)}`,
 			site,
 			flow
 		};
@@ -9429,7 +9431,7 @@ async function bindChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `落盘链失败：${messageOf$6(error)}`,
+			message: `落盘链失败：${messageOf$7(error)}`,
 			site,
 			flow
 		};
@@ -9452,7 +9454,7 @@ async function bindChainForTool(deps, exec, args) {
 		return {
 			ok: false,
 			code: "invalid-chain",
-			message: `绑定已落盘为 v${saved.version}，但回读失败：${messageOf$6(error)}`,
+			message: `绑定已落盘为 v${saved.version}，但回读失败：${messageOf$7(error)}`,
 			version: saved.version,
 			path: saved.path,
 			site,
@@ -10094,7 +10096,7 @@ async function probeNode(input) {
 *
 * @module dsh-dataforge/orchestration/explore
 */
-function messageOf$5(error) {
+function messageOf$6(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function blocked(code, message, extra = {}) {
@@ -10116,7 +10118,7 @@ async function probeForTool(deps, exec, args) {
 	try {
 		workspaceRoot = await deps.resolveWorkspaceRoot(exec) ?? process.cwd();
 	} catch (error) {
-		return blocked("workspace-unavailable", `解析工作区根失败：${messageOf$5(error)}`);
+		return blocked("workspace-unavailable", `解析工作区根失败：${messageOf$6(error)}`);
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
 	if (!loaded.ok) return {
@@ -10182,7 +10184,7 @@ function suggestionOf(source) {
 	return "input";
 }
 /** 字段叶子名 → 槽位候选（`body.lines[0].quantity` → `quantity`）。 */
-function slotNameOf(path) {
+function slotNameOf$1(path) {
 	const safe = (path.split(/[.[\]]/).filter((part) => part !== "" && part !== "*").pop() ?? "value").replace(/[^\p{L}\p{N}_]/gu, "_");
 	return /^[0-9]/.test(safe) ? `v_${safe}` : safe === "" ? "value" : safe;
 }
@@ -10265,7 +10267,7 @@ function buildCrystalDraft(input) {
 				value,
 				source,
 				suggestion: suggestionOf(source),
-				...suggestionOf(source) === "input" ? { slotName: slotNameOf(path) } : {},
+				...suggestionOf(source) === "input" ? { slotName: slotNameOf$1(path) } : {},
 				type,
 				...typeof item["evidence"] === "string" && item["evidence"] !== "" ? { evidence: item["evidence"] } : {},
 				requiresUserConfirmation: source === "agent-inferred",
@@ -10415,7 +10417,7 @@ function applyCrystalDraft(input) {
 			message: `${row.nodeId}.${row.path} 的类型 ${row.type} 不在链槽位类型词表里`,
 			row
 		};
-		let slotName = decision?.slotName ?? row.slotName ?? slotNameOf(row.path);
+		let slotName = decision?.slotName ?? row.slotName ?? slotNameOf$1(row.path);
 		const existing = inputByName.get(slotName);
 		if (existing !== void 0 && existing.type !== row.type) return {
 			ok: false,
@@ -10485,7 +10487,7 @@ function crystalOutputOf(value) {
 		...value.warnings === void 0 ? {} : { warnings: value.warnings }
 	};
 }
-function messageOf$4(error) {
+function messageOf$5(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function newCrystalRunId(dataRoot, flow, now) {
@@ -10520,7 +10522,7 @@ async function crystalForTool(deps, exec, args) {
 			ok: false,
 			gate: "blocked",
 			code: "crystal-no-source",
-			message: `解析工作区根失败：${messageOf$4(error)}`
+			message: `解析工作区根失败：${messageOf$5(error)}`
 		};
 	}
 	const loaded = loadChain(workspaceRoot, args.site, args.flow, { ...args.version === void 0 ? {} : { version: args.version } });
@@ -12598,7 +12600,8 @@ const UI_STEP_KINDS = [
 	"select",
 	"submit",
 	"wait",
-	"upload"
+	"upload",
+	"scroll"
 ];
 /** 页面断言词表：回放判定只看页面，不看响应（响应断言走接口链）。 */
 const UI_EXPECT_KINDS = [
@@ -12673,7 +12676,7 @@ function substitutableTextsOf(step) {
 	return texts;
 }
 /** 页面地址合法性：只收 http/https（file: 留给单测，不进项目脚本）。 */
-function isHttpUrl(value) {
+function isHttpUrl$1(value) {
 	try {
 		const parsed = new URL(value);
 		return parsed.protocol === "http:" || parsed.protocol === "https:";
@@ -12807,7 +12810,7 @@ function normalizeStep(raw, index, issues) {
 			issues.push(issue(target, "bad-step-field", "goto 步骤缺 url"));
 			return;
 		}
-		if (!isHttpUrl(substituteInputs(url, {})) && !url.includes("{{")) {
+		if (!isHttpUrl$1(substituteInputs(url, {})) && !url.includes("{{")) {
 			issues.push(issue(target, "bad-step-field", `goto url 必须是 http/https：${url}`));
 			return;
 		}
@@ -12844,6 +12847,19 @@ function normalizeStep(raw, index, issues) {
 			return;
 		}
 		step.ms = Math.round(msRaw);
+	}
+	if (kind === "scroll") {
+		const deltaYRaw = raw["deltaY"];
+		if (selector === void 0 && candidates.length === 0) {
+			if (typeof deltaYRaw !== "number" || !Number.isFinite(deltaYRaw) || Math.round(deltaYRaw) !== deltaYRaw || Math.abs(deltaYRaw) > 1e4) {
+				issues.push(issue(target, "bad-step-field", "scroll 步骤需要 selector（滚到元素）或 deltaY（窗口滚动像素，-10000..10000 整数）"));
+				return;
+			}
+			step.deltaY = Math.round(deltaYRaw);
+		} else if (deltaYRaw !== void 0) {
+			issues.push(issue(target, "bad-step-field", "scroll 步骤的 selector 与 deltaY 二选一"));
+			return;
+		}
 	}
 	if (kind === "upload") {
 		const filesRaw = Array.isArray(raw["files"]) ? raw["files"] : [];
@@ -12902,7 +12918,7 @@ function normalizeMeta(raw, issues) {
 	if (typeof versionRaw !== "number" || !Number.isInteger(versionRaw) || versionRaw < 1) issues.push(issue("meta", "bad-meta", "meta.version 必须是 ≥1 的整数"));
 	const startUrl = textOf(raw["startUrl"]);
 	if (startUrl === void 0) issues.push(issue("meta", "bad-start-url", "meta.startUrl 不能为空（回放要一个起点）"));
-	else if (!isHttpUrl(startUrl)) issues.push(issue("meta", "bad-start-url", `meta.startUrl 必须是 http/https：${startUrl}`));
+	else if (!isHttpUrl$1(startUrl)) issues.push(issue("meta", "bad-start-url", `meta.startUrl 必须是 http/https：${startUrl}`));
 	if (issues.length > 0) return void 0;
 	const created = raw["created"] instanceof Date ? raw["created"].toISOString() : textOf(raw["created"]);
 	const sourceRaw = asString(raw["source"]);
@@ -12926,6 +12942,8 @@ function normalizeMeta(raw, issues) {
 		...source === void 0 ? {} : { source },
 		...textOf(raw["domain"]) === void 0 ? {} : { domain: textOf(raw["domain"]) },
 		...textOf(raw["note"]) === void 0 ? {} : { note: textOf(raw["note"]) },
+		...textOf(raw["task"]) === void 0 ? {} : { task: textOf(raw["task"]).slice(0, 4e3) },
+		...raw["review"] === "pending" || raw["review"] === "confirmed" ? { review: raw["review"] } : {},
 		...viewport === void 0 ? {} : { viewport }
 	};
 }
@@ -13207,7 +13225,9 @@ function listUiVersionInfos(workspaceRoot, site, flow) {
 				...doc.doc.meta.source === void 0 ? {} : { source: doc.doc.meta.source },
 				stepCount: doc.doc.steps.length,
 				startUrl: doc.doc.meta.startUrl,
-				...doc.doc.meta.note === void 0 ? {} : { note: doc.doc.meta.note }
+				...doc.doc.meta.note === void 0 ? {} : { note: doc.doc.meta.note },
+				...doc.doc.meta.task === void 0 ? {} : { task: doc.doc.meta.task },
+				...doc.doc.meta.review === void 0 ? {} : { review: doc.doc.meta.review }
 			};
 		} catch (error) {
 			return {
@@ -13233,11 +13253,15 @@ function listUiScripts(workspaceRoot) {
 		let domain;
 		let unreadable;
 		let updatedAt;
+		let review;
+		let task;
 		try {
 			const doc = parseUiScriptYaml(readFileSync(uiScriptPath(workspaceRoot, site, flow, latest), "utf8"));
 			if (doc.ok) {
 				domain = doc.doc.meta.domain;
 				updatedAt = doc.doc.meta.created;
+				review = doc.doc.meta.review;
+				task = doc.doc.meta.task;
 			} else unreadable = doc.issues.map((item) => `${item.target}：${item.reason}`).join("；");
 		} catch (error) {
 			unreadable = String(error?.message ?? error);
@@ -13249,6 +13273,8 @@ function listUiScripts(workspaceRoot) {
 			versions,
 			...domain === void 0 ? {} : { domain },
 			...updatedAt === void 0 ? {} : { updatedAt },
+			...review === void 0 ? {} : { review },
+			...task === void 0 ? {} : { task },
 			...unreadable === void 0 ? {} : { unreadable }
 		});
 	}
@@ -13641,6 +13667,7 @@ async function runStep$1(page, step, inputs, timeoutMs, emit, highlightClicks) {
 				timeout: timeoutMs
 			});
 		} else if (step.kind === "press" && step.selector === void 0 && (step.candidates?.length ?? 0) === 0) await page.keyboard.press(substituteInputs(step.key ?? "", inputs));
+		else if (step.kind === "scroll" && step.selector === void 0 && (step.candidates?.length ?? 0) === 0) await page.mouse.wheel(0, step.deltaY ?? 0);
 		else {
 			let resolved;
 			try {
@@ -13679,7 +13706,7 @@ async function runStep$1(page, step, inputs, timeoutMs, emit, highlightClicks) {
 			else if (step.kind === "upload") {
 				const files = (step.files ?? []).map((file) => substituteInputs(file, inputs));
 				await resolved.locator.setInputFiles(files, { timeout });
-			}
+			} else if (step.kind === "scroll") await resolved.locator.scrollIntoViewIfNeeded({ timeout });
 		}
 		for (const expect of step.expect ?? []) {
 			const assertion = await runExpect$1(page, expect, timeoutMs);
@@ -14333,7 +14360,7 @@ function autoNameFor(meta, now = /* @__PURE__ */ new Date()) {
 async function workspaceOf(deps, exec) {
 	return await deps.resolveWorkspaceRoot(exec) ?? process.cwd();
 }
-function messageOf$3(error) {
+function messageOf$4(error) {
 	return (error instanceof Error ? error.message : String(error)).slice(0, 1e3);
 }
 /**
@@ -14376,7 +14403,7 @@ async function upsertUiScriptForTool(deps, exec, args) {
 	} catch (error) {
 		return {
 			ok: false,
-			message: messageOf$3(error)
+			message: messageOf$4(error)
 		};
 	}
 	if (!parsed.ok) return {
@@ -14402,7 +14429,7 @@ function safeYaml(text) {
 	try {
 		return parseYaml(text);
 	} catch (error) {
-		throw new Error(`YAML 解析失败：${messageOf$3(error)}`);
+		throw new Error(`YAML 解析失败：${messageOf$4(error)}`);
 	}
 }
 function parseYaml(text) {
@@ -14567,6 +14594,215 @@ function recordingSessionsOf(deps) {
 /** 在录制会话页面上点选一个元素（面板补断言/改步骤用；agent 无此工具，避免误触）。 */
 async function pickSelectorForTool(deps, args) {
 	return deps.resolveEngine().engine.pickSelector(args.sessionId, args.timeoutMs);
+}
+/**
+* 打开 AI 代办录制会话（可见 Chrome，人能围观/随时接管）。
+*
+* 三道闸之闸2：不带 confirm 只回计划卡（任务/起点/密钥键名/写操作提示），
+* 一个浏览器都不起；确认后才真开。AI 随后用 agent_act 自主操作，动作同步录步。
+*
+* 引擎说明：代办录制用自己的浏览器工厂（AgentRecordingSessions，playwright-core +
+* 系统 Chrome），与 uiTestBrowser 配置的录制/回放引擎相互独立——shared 引擎下
+* 人录走侧栏共享浏览器，代办录制仍拉自己的可见窗口，互不影响。
+*/
+async function openAgentSessionForTool(deps, exec, args) {
+	const task = args.task.trim();
+	if (task === "") return {
+		ok: false,
+		error: "task 不能为空：写清楚要 AI 完成什么（审查比对的基准）"
+	};
+	let url;
+	try {
+		const parsed = new URL(args.startUrl);
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("protocol");
+		url = parsed.toString();
+	} catch {
+		return {
+			ok: false,
+			error: `startUrl 必须是 http/https 的合法 URL：${args.startUrl}`
+		};
+	}
+	const headless = args.headless ?? false;
+	const credentialKeys = Object.keys(deps.agentSecrets).sort();
+	const card = [
+		`🤖 AI 代办录制计划`,
+		`任务：${task}`,
+		`起点：${url}（${headless ? "无头" : "可见"} Chrome）`,
+		credentialKeys.length > 0 ? `服务端密钥（valueFrom 可用键名）：${credentialKeys.join("、")}` : "未配置服务端密钥（uiAgentCredentials）：fill 只能给明文值，密码字段将无法执行",
+		"⚠️ AI 将自主操作真实页面（点击/输入可能产生真实写入），期间检测到验证码会暂停叫人。",
+		"确认后带 confirm=true 重调才会打开浏览器。"
+	].join("\n");
+	if (args.confirm !== true) return {
+		ok: true,
+		gate: "confirm-required",
+		plan: {
+			card,
+			task,
+			startUrl: url,
+			headless,
+			credentialKeys
+		}
+	};
+	const cookies = await loadCookiesForStart(deps, url);
+	const opened = await deps.agentSessions.open({
+		startUrl: url,
+		task,
+		headless,
+		cookies
+	});
+	if (!opened.ok) return {
+		ok: false,
+		error: opened.error
+	};
+	return {
+		ok: true,
+		sessionId: opened.sessionId,
+		runId: opened.runId,
+		pageUrl: opened.pageUrl,
+		credentialKeys,
+		notice: headless ? "会话已打开（无头）。建议可见窗口以便围观与人工过验证码；如要切换，关闭后重开。" : "会话已打开（可见 Chrome）：你可围观 AI 操作，随时人工接管；AI 应用 dataforge_ui_agent_act 逐步执行，动作会同步录成步骤。"
+	};
+}
+/** 执行一个代办动作：动作进页面，步骤进缓冲；challenge 检测到就如实报（AI 应暂停叫人）。 */
+async function agentActForTool(deps, args) {
+	return deps.agentSessions.act(args.sessionId, args.act, deps.agentSecrets);
+}
+/**
+* 停止代办录制：步骤缓冲 → ui-script v1（review=pending + 原始任务描述）→ cookie 落 jar → 关会话。
+*
+* 没录到步骤不落盘（如实回 notice）。站点/流程名留空时按当前页面自动命名（与录制器同口径）。
+* 回放不消费 review：待审查版本确认前也可以直接回放，只是面板会一直挂「待审查」角标。
+*/
+async function stopAgentSessionForTool(deps, exec, args) {
+	const steps = deps.agentSessions.stepsOf(args.sessionId);
+	if (steps === void 0) return {
+		ok: false,
+		error: `会话 ${args.sessionId} 不存在（可能已关闭）`
+	};
+	const task = deps.agentSessions.taskOf(args.sessionId) ?? "";
+	const startUrl = deps.agentSessions.startUrlOf(args.sessionId) ?? "";
+	const viewport = deps.agentSessions.viewportOf(args.sessionId);
+	const secretSlots = deps.agentSessions.secretSlotsOf(args.sessionId);
+	if (steps.length === 0) {
+		await deps.agentSessions.close(args.sessionId);
+		return {
+			ok: true,
+			sessionId: args.sessionId,
+			stepCount: 0,
+			notice: "没有录到任何步骤（未落盘）"
+		};
+	}
+	let site = args.site?.trim();
+	let flow = args.flow?.trim();
+	let autoNamed = false;
+	if (site === void 0 || site === "" || flow === void 0 || flow === "") {
+		const meta = await deps.agentSessions.pageMetaOf(args.sessionId).catch(() => ({}));
+		const auto = autoNameFor(meta);
+		if (site === void 0 || site === "") {
+			site = auto.site === "" ? "未命名站点" : auto.site;
+			autoNamed = true;
+		}
+		if (flow === void 0 || flow === "") {
+			flow = auto.flow;
+			autoNamed = true;
+		}
+	}
+	const doc = {
+		apiVersion: "dataforge/v1",
+		kind: "ui-script",
+		meta: {
+			site,
+			flow,
+			version: 1,
+			created: (/* @__PURE__ */ new Date()).toISOString(),
+			source: "agent",
+			startUrl,
+			review: "pending",
+			task,
+			...viewport === void 0 ? {} : { viewport },
+			...args.domain === void 0 || args.domain.trim() === "" ? {} : { domain: args.domain.trim() },
+			...args.note === void 0 || args.note.trim() === "" ? {} : { note: args.note.trim() }
+		},
+		inputs: secretSlots.map((name) => ({
+			name,
+			type: "string",
+			required: true,
+			example: "回放时由人提供"
+		})),
+		steps
+	};
+	const saved = saveUiScript(await workspaceOf(deps, exec), doc, { source: "agent" });
+	const persistedCookies = await persistCookiesOf(deps, await deps.agentSessions.cookiesOf(args.sessionId)).catch(() => void 0);
+	await deps.agentSessions.close(args.sessionId);
+	if (!saved.ok) return {
+		ok: false,
+		sessionId: args.sessionId,
+		stepCount: steps.length,
+		steps,
+		persistedCookies,
+		notice: `步骤已录到 ${steps.length} 条，但脚本未通过校验未落盘：${formatUiIssues(saved.issues)}`
+	};
+	return {
+		ok: true,
+		sessionId: args.sessionId,
+		stepCount: steps.length,
+		saved: {
+			site: saved.doc.meta.site,
+			flow: saved.doc.meta.flow,
+			version: saved.version,
+			path: saved.path,
+			review: "pending"
+		},
+		persistedCookies,
+		steps,
+		notice: [
+			`已落盘为 v${saved.version}（待审查）：人在面板比对任务描述与步骤，确认后转 confirmed。`,
+			autoNamed ? `站点/流程名留空，已自动命名：${saved.doc.meta.site} / ${saved.doc.meta.flow}` : "",
+			secretSlots.length > 0 ? `${secretSlots.length} 个字段经服务端密钥注入，已脱敏为入参槽位：${secretSlots.join("、")}（回放前提供）。` : "",
+			"待审查不影响回放：确认前也可直接 dataforge_ui_run 验证。"
+		].filter((item) => item !== "").join("；")
+	};
+}
+/** 代办录制会话列表（面板轮询用）。 */
+function agentSessionsOf(deps) {
+	return deps.agentSessions.list();
+}
+/**
+* 审查确认（面板用）：把指定版本确认为「与任务一致」。
+*
+* 版本不可变：确认不是改旧文件，而是落一个 review=confirmed 的新版本（沿用原 source/task）。
+* 驳回不需要工具：人直接编辑步骤/断言后另存新版本即可（pending 角标随最新版本走）。
+*/
+async function confirmAgentReviewForTool(workspaceRoot, args) {
+	const loaded = loadUiScript(workspaceRoot, args.site, args.flow, args.version);
+	if (!loaded.ok) return {
+		ok: false,
+		error: loaded.message,
+		availableVersions: loaded.availableVersions
+	};
+	const note = args.note?.trim();
+	const doc = {
+		...loaded.doc,
+		meta: {
+			...loaded.doc.meta,
+			created: (/* @__PURE__ */ new Date()).toISOString(),
+			review: "confirmed",
+			...note === void 0 || note === "" ? {} : { note }
+		}
+	};
+	const saved = saveUiScript(workspaceRoot, doc, { source: loaded.doc.meta.source });
+	if (!saved.ok) return {
+		ok: false,
+		error: `确认版本未通过校验：${formatUiIssues(saved.issues)}`
+	};
+	return {
+		ok: true,
+		site: saved.doc.meta.site,
+		flow: saved.doc.meta.flow,
+		version: saved.version,
+		review: "confirmed",
+		message: `已确认：v${saved.version} 标记为 review=confirmed（任务：${saved.doc.meta.task ?? "（无）"}）`
+	};
 }
 /**
 * 回放一个脚本：三道闸 + 执行。
@@ -14855,9 +15091,12 @@ async function loadCookiesForStart(deps, startUrl) {
 *
 * 只报写入条数，cookie 值不经过任何回执/日志。落盘失败不抛（录制本身已成功）。
 */
-async function persistSessionCookies(deps, engine, sessionId) {
+/**
+* 把一组 cookie 写进本地 jar（0600、按 origin 隔离）。只报写入条数，值不经过任何回执/日志。
+* 落盘失败不抛（录制/代办本身已成功）。
+*/
+async function persistCookiesOf(deps, cookies) {
 	if (deps.credentialStorePath === void 0) return void 0;
-	const cookies = await engine.cookiesOf(sessionId);
 	if (cookies.length === 0) return 0;
 	const now = deps.now?.() ?? Date.now();
 	const byOrigin = /* @__PURE__ */ new Map();
@@ -14874,6 +15113,9 @@ async function persistSessionCookies(deps, engine, sessionId) {
 		persisted += persistCookies(deps.credentialStorePath, origin, lines, now);
 	}
 	return persisted;
+}
+async function persistSessionCookies(deps, engine, sessionId) {
+	return persistCookiesOf(deps, await engine.cookiesOf(sessionId));
 }
 /** 运行证据文件（面板 GET 用）：只允许运行目录内的白名单文件名。 */
 function evidencePathOf(dataRoot, runId, name) {
@@ -14892,7 +15134,7 @@ async function saveUiScriptForPanel(deps, workspaceRoot, yaml, source = "agent")
 			issues: [{
 				target: "script",
 				code: "invalid-script",
-				reason: messageOf$3(error)
+				reason: messageOf$4(error)
 			}]
 		};
 	}
@@ -18540,6 +18782,365 @@ function defineUiBatchRunTool(deps) {
 		}
 	});
 }
+function renderUiAgentOpen(value) {
+	if (value.gate === "confirm-required" && value.plan !== void 0) return value.plan.card;
+	if (!value.ok) return `❌ ${value.error ?? "打开代办录制会话失败"}`;
+	return [
+		`🤖 代办录制会话已打开：${value.sessionId}（runId: ${value.runId}）`,
+		`当前页面：${value.pageUrl ?? "（未知）"}`,
+		value.notice ?? ""
+	].filter((line) => line !== "").join("\n");
+}
+function defineUiAgentOpenTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_agent_open",
+		description: `打开 AI 代办录制会话：AI 自主操作页面（打开/登录/干活），每个动作同步录成 UI 步骤，供人审查。
+
+工作流：agent_open(confirm=true) → 反复 agent_act（先 inspect 观察页面再动作）→ agent_stop 落盘为**待审查脚本**（meta.review=pending + 原始任务描述）→ 人在面板逐步比对任务与步骤 → 确认转 confirmed。
+
+三道闸之闸2：不带 confirm 只回计划卡（任务/起点/密钥键名/写操作提示），一个浏览器都不起。
+引擎说明：代办会话用自己的可见 Chrome（playwright-core + 系统 Chrome），与 uiTestBrowser 配置的
+录制/回放引擎相互独立——shared 引擎下人录走侧栏，代办录制仍拉自己的窗口。
+登录（混合模式）：密码框 fill 必须给 valueFrom（服务端密钥表 uiAgentCredentials 的键名，open 回执列出可用键）；
+act 每步后探测人机验证，检测到 challenge.detected=true 就**暂停叫人**，人在可见窗口过完验证码后继续 agent_act。`,
+		parameters: {
+			task: {
+				type: "string",
+				required: true,
+				description: "要 AI 完成的工作内容（审查比对的基准，写清楚验收口径）"
+			},
+			start_url: {
+				type: "string",
+				required: true,
+				description: "起点页面（http/https）"
+			},
+			headless: {
+				type: "boolean",
+				description: "缺省 false = 可见 Chrome（人可围观/接管/过验证码）"
+			},
+			confirm: {
+				type: "boolean",
+				description: "闸2：用户确认计划卡后才允许 true；缺省只出计划卡"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					gate: { type: "string" },
+					plan: {
+						type: "object",
+						additionalProperties: true
+					},
+					sessionId: { type: "string" },
+					runId: { type: "string" },
+					pageUrl: { type: "string" },
+					credentialKeys: {
+						type: "array",
+						items: { type: "string" }
+					},
+					notice: { type: "string" },
+					error: { type: "string" }
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderUiAgentOpen(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(await openAgentSessionForTool(deps, exec, {
+				task: args.task,
+				startUrl: args.start_url,
+				...args.headless === void 0 ? {} : { headless: args.headless },
+				...args.confirm === void 0 ? {} : { confirm: args.confirm }
+			}));
+		}
+	});
+}
+function renderUiAgentAct(value) {
+	if (!value.ok) return `❌ ${value.error ?? "动作失败（未录步）"}`;
+	const lines = [];
+	if (value.inspect !== void 0) {
+		lines.push(`👀 页面观察：${value.inspect.title || "（无标题）"} ${value.inspect.url}`);
+		for (const el of value.inspect.elements.slice(0, 30)) lines.push(`  [${el.index}] <${el.tag}> ${el.text || "（无文本）"} → ${el.candidates[0] ?? "（无候选）"}`);
+		if (value.inspect.elements.length > 30) lines.push(`  … 还有 ${value.inspect.elements.length - 30} 个`);
+	}
+	if (value.step !== void 0) lines.push(`✅ 已执行并录步 ${value.step.id}：${value.step.kind}${value.step.selector === void 0 ? "" : ` ${value.step.selector}`}`);
+	if (value.valueMasked === true) lines.push("🔐 该值经服务端密钥注入，步骤里只记 {{槽位}}。");
+	if (value.challenge?.detected === true) lines.push(`⚠️ 检测到人机验证（${value.challenge.markers.join("、")}）：暂停叫人，人在可见窗口完成验证后再继续 act。`);
+	lines.push(`页面：${value.pageUrl ?? "（未知）"}；已录 ${value.stepsSoFar ?? 0} 步。`);
+	return lines.join("\n");
+}
+function defineUiAgentActTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_agent_act",
+		description: `在代办录制会话上执行一个动作；动作进页面，步骤同步进缓冲（失败不录步）。
+
+动作 kind：
+- inspect：观察页面（URL/标题/可交互元素清单+候选选择器+人机验证探测），**不产生步骤**——自主规划先 inspect 再动作；
+- goto {url} / wait {ms} / scroll {deltaY}（窗口滚动）；
+- click {selector} / scroll {selector}（滚到元素）；
+- fill {selector, value}；密码框或涉密值用 fill {selector, valueFrom}（键名见 open 回执 credentialKeys，值只在服务端过手，步骤记 {{槽位}}）；
+- select {selector, value}；press {key, selector?}（不带 selector = 全局按键）。
+
+selector 建议用 inspect 回执里的候选（元素描述同时录进步骤，回放有容错）。每个动作后回执都带 challenge：
+detected=true 说明出现验证码/滑块，**立即停止叫人**，人过完验证再继续。`,
+		parameters: {
+			session_id: {
+				type: "string",
+				required: true,
+				description: "dataforge_ui_agent_open 返回的 sessionId"
+			},
+			act: {
+				type: "object",
+				required: true,
+				additionalProperties: false,
+				description: "动作描述（kind 必填，其余按 kind 取用）",
+				properties: {
+					kind: {
+						type: "string",
+						required: true,
+						enum: [
+							"inspect",
+							"goto",
+							"click",
+							"fill",
+							"select",
+							"press",
+							"scroll",
+							"wait"
+						]
+					},
+					selector: {
+						type: "string",
+						description: "click/fill/select/scroll/press 的目标（优先用 inspect 给的候选）"
+					},
+					url: {
+						type: "string",
+						description: "goto 的目标地址"
+					},
+					value: {
+						type: "string",
+						description: "fill/select 的值（密码框禁用，见 valueFrom）"
+					},
+					value_from: {
+						type: "string",
+						description: "服务端密钥表键名：值只在服务端过手，步骤记 {{槽位}}"
+					},
+					key: {
+						type: "string",
+						description: "press 的键（Enter/Tab/Escape/ArrowDown…）"
+					},
+					delta_y: {
+						type: "number",
+						description: "scroll 的窗口滚动像素（正数向下；与 selector 二选一）"
+					},
+					ms: {
+						type: "number",
+						description: "wait 的毫秒数（0..60000）"
+					}
+				}
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					error: { type: "string" },
+					pageUrl: { type: "string" },
+					challenge: {
+						type: "object",
+						additionalProperties: true
+					},
+					step: {
+						type: "object",
+						additionalProperties: true
+					},
+					stepsSoFar: { type: "number" },
+					inspect: {
+						type: "object",
+						additionalProperties: true
+					},
+					valueMasked: { type: "boolean" }
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderUiAgentAct(tighten(value))
+			}]
+		},
+		async execute(args) {
+			const act = args.act;
+			const spec = toAgentActSpec(String(act["kind"] ?? ""), act);
+			if (typeof spec === "string") return {
+				ok: false,
+				error: spec
+			};
+			return lossless(await agentActForTool(deps, {
+				sessionId: args.session_id,
+				act: spec
+			}));
+		}
+	});
+}
+/** 工具参数（snake_case）→ AgentActSpec（camelCase）；缺字段给中文错误，不进会话。 */
+function toAgentActSpec(kind, act) {
+	const str = (key) => typeof act[key] === "string" && String(act[key]).trim() !== "" ? String(act[key]).trim() : void 0;
+	const num = (key) => typeof act[key] === "number" && Number.isFinite(act[key]) ? act[key] : void 0;
+	switch (kind) {
+		case "inspect": return { kind: "inspect" };
+		case "goto": {
+			const url = str("url");
+			return url === void 0 ? "goto 缺 url" : {
+				kind: "goto",
+				url
+			};
+		}
+		case "click": {
+			const selector = str("selector");
+			return selector === void 0 ? "click 缺 selector" : {
+				kind: "click",
+				selector
+			};
+		}
+		case "fill": {
+			const selector = str("selector");
+			if (selector === void 0) return "fill 缺 selector";
+			const value = str("value");
+			const valueFrom = str("value_from");
+			if (value === void 0 && valueFrom === void 0) return "fill 缺 value / value_from";
+			return {
+				kind: "fill",
+				selector,
+				...value === void 0 ? {} : { value },
+				...valueFrom === void 0 ? {} : { valueFrom }
+			};
+		}
+		case "select": {
+			const selector = str("selector");
+			const value = str("value");
+			if (selector === void 0) return "select 缺 selector";
+			if (value === void 0) return "select 缺 value";
+			return {
+				kind: "select",
+				selector,
+				value
+			};
+		}
+		case "press": {
+			const key = str("key");
+			if (key === void 0) return "press 缺 key";
+			const selector = str("selector");
+			return {
+				kind: "press",
+				key,
+				...selector === void 0 ? {} : { selector }
+			};
+		}
+		case "scroll": {
+			const selector = str("selector");
+			const deltaY = num("delta_y");
+			if (selector === void 0 && deltaY === void 0) return "scroll 缺 selector / delta_y";
+			return {
+				kind: "scroll",
+				...selector === void 0 ? {} : { selector },
+				...deltaY === void 0 ? {} : { deltaY }
+			};
+		}
+		case "wait": {
+			const ms = num("ms");
+			return ms === void 0 ? "wait 缺 ms" : {
+				kind: "wait",
+				ms
+			};
+		}
+		default: return `未支持的 kind：${kind}（可选 inspect/goto/click/fill/select/press/scroll/wait）`;
+	}
+}
+function renderUiAgentStop(value) {
+	if (!value.ok) return `❌ ${value.notice ?? value.error ?? "停止代办录制失败"}`;
+	const lines = [`⏹ 代办录制已停止：共录 ${value.stepCount ?? 0} 步。`];
+	if (value.saved !== void 0) lines.push(`📦 已落盘 ${value.saved.site} / ${value.saved.flow} v${value.saved.version}（${value.saved.path}）—— 待审查。`);
+	if (value.persistedCookies !== void 0) lines.push(`🍪 已持久化 ${value.persistedCookies} 条 cookie（回放带登录态）。`);
+	if (value.notice !== void 0) lines.push(value.notice);
+	return lines.join("\n");
+}
+function defineUiAgentStopTool(deps) {
+	return defineTool({
+		name: "dataforge_ui_agent_stop",
+		description: `停止代办录制：步骤缓冲 → ui-script v1（review=pending 待审查 + 原始任务描述）→ 会话 cookie 落凭证 jar → 关浏览器。
+
+站点/流程名留空自动命名（取当前页面 og:site_name/标题）。落盘后请叫人到面板「UI 测试」审查：
+比对任务描述与步骤，确认后转 confirmed（待审查不影响回放，确认前也可 dataforge_ui_run 验证）。
+没有录到步骤时不落盘（如实回 notice）。`,
+		parameters: {
+			session_id: {
+				type: "string",
+				required: true,
+				description: "dataforge_ui_agent_open 返回的 sessionId"
+			},
+			site: {
+				type: "string",
+				description: "站点名（留空自动命名）"
+			},
+			flow: {
+				type: "string",
+				description: "流程名（留空自动命名）"
+			},
+			domain: {
+				type: "string",
+				description: "业务域（列表分组用）"
+			},
+			note: {
+				type: "string",
+				description: "版本说明"
+			}
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean" },
+					sessionId: { type: "string" },
+					stepCount: { type: "number" },
+					saved: {
+						type: "object",
+						additionalProperties: true
+					},
+					persistedCookies: { type: "number" },
+					steps: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: true
+						}
+					},
+					notice: { type: "string" },
+					error: { type: "string" }
+				}
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: renderUiAgentStop(tighten(value))
+			}]
+		},
+		async execute(args, exec) {
+			return lossless(await stopAgentSessionForTool(deps, exec, {
+				sessionId: args.session_id,
+				...args.site === void 0 ? {} : { site: args.site },
+				...args.flow === void 0 ? {} : { flow: args.flow },
+				...args.domain === void 0 ? {} : { domain: args.domain },
+				...args.note === void 0 ? {} : { note: args.note }
+			}));
+		}
+	});
+}
 
 //#endregion
 //#region src/lookup/page-reader.ts
@@ -19253,7 +19854,7 @@ function parseArray(raw) {
 *
 * @module dsh-dataforge/capture/credentials
 */
-function messageOf$2(error) {
+function messageOf$3(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 /** 卡来源里的 captureId（去重、保序、去掉空串）。 */
@@ -19441,7 +20042,7 @@ function createCaptureCredentialProvider(options) {
 			return {
 				cookieRows: [],
 				tokenRows: [],
-				databaseError: messageOf$2(error)
+				databaseError: messageOf$3(error)
 			};
 		}
 	};
@@ -20836,6 +21437,20 @@ async function dispatch(panel, req, res, url, suffix, method) {
 			const closed = await closeRecordingForTool(deps, { sessionId });
 			return closed.ok ? ok$1(res, closed) : fail$1(res, 400, closed.error ?? "关闭失败", "record-close-failed");
 		}
+		if (suffix === "/agent-review") {
+			const record = asRecord(await readJson(req, MAX_SMALL_BODY_BYTES));
+			const site = stringField(record, "site");
+			const flow = stringField(record, "flow");
+			if (site === void 0 || flow === void 0) return fail$1(res, 400, "缺 site / flow", "bad-body");
+			const versionRaw = record["version"];
+			const result = await confirmAgentReviewForTool(workspaceRoot, {
+				site,
+				flow,
+				...typeof versionRaw === "number" ? { version: versionRaw } : {},
+				...stringField(record, "note") === void 0 ? {} : { note: stringField(record, "note") }
+			});
+			return result.ok ? ok$1(res, result) : fail$1(res, 404, result.error ?? "审查确认失败", "review-failed");
+		}
 		if (suffix === "/batch/run") {
 			const record = asRecord(await readJson(req, MAX_SMALL_BODY_BYTES));
 			const inputsRaw = record["inputs"];
@@ -20892,6 +21507,7 @@ async function dispatch(panel, req, res, url, suffix, method) {
 			})),
 			runs: listUiRuns(deps.dataRoot, 10),
 			sessions: recordingSessionsOf(deps),
+			agentSessions: agentSessionsOf(deps),
 			uiTestsRootHint: `${workspaceRoot}/.dsh/dataforge/ui-tests`,
 			browser: (() => {
 				const selection = deps.resolveEngine();
@@ -21995,7 +22611,7 @@ var UiRecordingSessions = class {
 			});
 			await opened.page.evaluate(SELECTOR_HELPER_SCRIPT).catch(() => void 0);
 			await opened.context.addInitScript(SELECTOR_HELPER_SCRIPT).catch(() => void 0);
-			if (args.cookies !== void 0 && args.cookies.length > 0) await opened.context.addCookies(args.cookies.map(toPlaywrightCookie)).catch(() => void 0);
+			if (args.cookies !== void 0 && args.cookies.length > 0) await opened.context.addCookies(args.cookies.map(toPlaywrightCookie$1)).catch(() => void 0);
 			const timeout = args.navigationTimeoutMs ?? 2e4;
 			await opened.page.goto(args.startUrl, {
 				waitUntil: "domcontentloaded",
@@ -22004,12 +22620,12 @@ var UiRecordingSessions = class {
 			return {
 				ok: true,
 				sessionId,
-				pageUrl: safeUrl(opened.page)
+				pageUrl: safeUrl$1(opened.page)
 			};
 		} catch (error) {
 			return {
 				ok: false,
-				error: messageOf$1(error)
+				error: messageOf$2(error)
 			};
 		}
 	}
@@ -22025,13 +22641,13 @@ var UiRecordingSessions = class {
 			record.recorder = await UiRecorder.start(record.page, record.context);
 			return {
 				ok: true,
-				pageUrl: safeUrl(record.page),
+				pageUrl: safeUrl$1(record.page),
 				...already ? { alreadyRecording: true } : {}
 			};
 		} catch (error) {
 			return {
 				ok: false,
-				error: messageOf$1(error)
+				error: messageOf$2(error)
 			};
 		}
 	}
@@ -22057,7 +22673,7 @@ var UiRecordingSessions = class {
 			record.recorder = void 0;
 			return {
 				ok: false,
-				error: messageOf$1(error)
+				error: messageOf$2(error)
 			};
 		}
 	}
@@ -22086,7 +22702,7 @@ var UiRecordingSessions = class {
 		const record = this.sessions.get(sessionId);
 		if (record === void 0) return {};
 		try {
-			const url = safeUrl(record.page);
+			const url = safeUrl$1(record.page);
 			const title = await record.page.title().catch(() => "");
 			const siteName = await record.page.evaluate(`(() => {
         const contentOf = (selector) => {
@@ -22129,14 +22745,14 @@ var UiRecordingSessions = class {
 	list() {
 		return [...this.sessions.entries()].map(([sessionId, record]) => ({
 			sessionId,
-			pageUrl: safeUrl(record.page),
+			pageUrl: safeUrl$1(record.page),
 			recording: record.recorder !== void 0,
 			startedAt: record.startedAt
 		}));
 	}
 	pageUrlOf(sessionId) {
 		const record = this.sessions.get(sessionId);
-		return record === void 0 ? void 0 : safeUrl(record.page);
+		return record === void 0 ? void 0 : safeUrl$1(record.page);
 	}
 	has(sessionId) {
 		return this.sessions.has(sessionId);
@@ -22147,7 +22763,7 @@ var UiRecordingSessions = class {
 		await Promise.all(ids.map((id) => this.close(id)));
 	}
 };
-function toPlaywrightCookie(cookie) {
+function toPlaywrightCookie$1(cookie) {
 	return {
 		name: cookie.name,
 		value: cookie.value,
@@ -22157,6 +22773,706 @@ function toPlaywrightCookie(cookie) {
 		...cookie.expires === void 0 ? {} : { expires: cookie.expires }
 	};
 }
+function safeUrl$1(page) {
+	try {
+		return page.url();
+	} catch {
+		return "";
+	}
+}
+function messageOf$2(error) {
+	return String(error?.message ?? error).slice(0, 500);
+}
+
+//#endregion
+//#region src/uitest/agentrec.ts
+/**
+* AI 代办录制（agent-driven recording）：AI 自主操作页面，动作同步录成 UI 步骤。
+*
+* 与「人录」（recorder/sessions）的关系：同一批资产（ui-script），同一种步骤语义，
+* 但动作的触发方从「页面 DOM 事件」换成「AI 通过工具下发的意图」：
+*   - 人录：DOM 事件 → RecorderCore 去重 → 步骤；
+*   - 代办：AI 给一个动作（click/fill/scroll/…）→ 本模块定位元素 → 执行 →
+*     用与人录同一套口径收集候选/特征/落点 → 步骤。
+* 两套产物互相可回放：步骤都进同一个 ui-script schema。
+*
+* 纪律（与录制器一致，不另造）：
+*   - 密码字段：实际值永远只进浏览器 context，步骤里记 `{{password}}` 槽位（回放时人填）；
+*   - valueFrom：从服务端配置注入的密钥取值，模型上下文只见键名不见值；
+*   - 每个 act 后探测人机验证（验证码/滑块）：检测到就回报 challenge，AI 应暂停叫人，
+*     浏览器窗口保持可见，人过完验证码 AI 继续（混合登录）；
+*   - 全量留痕 dataRoot/ui-agent-runs/<runId>/（run.json + events.ndjson），
+*     事件里只有选择器/步骤形状，没有值。
+*
+* 引擎边界：代办录制需要直接持有 Playwright Page（执行 + 元素描述），
+* 因此只支持 playwright 引擎；配置指向 shared 时由应用层明确报错并给出切换指引。
+*
+* @module dsh-dataforge/uitest/agentrec
+*/
+const HELPER_VERSION = 1;
+/**
+* 代办执行面注入的页面脚本：在 __dfUiSelectorCandidates 之上补三个函数。
+* 幂等（版本守卫），重复注入不重复定义。
+*/
+const AGENT_HELPER_SCRIPT = `(() => {
+  var VERSION = ${HELPER_VERSION}
+  if (window.__dfUiAgentVersion === VERSION) return
+  window.__dfUiAgentVersion = VERSION
+
+  function cleanText(value) {
+    return String(value == null ? '' : value).replace(/\\s+/g, ' ').trim()
+  }
+  function pickTestId(el) {
+    var attrs = ['data-testid', 'data-test-id', 'data-test', 'data-qa']
+    for (var i = 0; i < attrs.length; i += 1) {
+      var value = el.getAttribute(attrs[i])
+      if (value) return value
+    }
+    return ''
+  }
+  function labelTextOf(el) {
+    try {
+      if (el.labels && el.labels.length > 0) return cleanText(el.labels[0].textContent).slice(0, 80)
+    } catch (err) {}
+    return ''
+  }
+  function describeElement(el) {
+    var rect = el.getBoundingClientRect()
+    var features = { tag: el.tagName.toLowerCase() }
+    var id = pickTestId(el); if (id) features.testId = id
+    if (el.id) features.id = el.id
+    if (el.name) features.name = String(el.name)
+    var aria = el.getAttribute('aria-label'); if (aria) features.ariaLabel = aria
+    var placeholder = el.getAttribute('placeholder'); if (placeholder) features.placeholder = placeholder
+    var role = el.getAttribute('role'); if (role) features.role = role
+    if (el.type) features.type = String(el.type)
+    var title = el.getAttribute('title'); if (title) features.title = title
+    var alt = el.getAttribute('alt'); if (alt) features.alt = alt
+    var href = el.getAttribute('href'); if (href) features.href = href
+    var label = labelTextOf(el); if (label) features.label = label
+    var text = cleanText(el.innerText || el.textContent).slice(0, 80)
+    if (text) features.text = text
+    return {
+      found: true,
+      tag: el.tagName,
+      isPassword: el.tagName === 'INPUT' && String(el.type).toLowerCase() === 'password',
+      text: text.slice(0, 60),
+      candidates: (window.__dfUiSelectorCandidates ? window.__dfUiSelectorCandidates(el) : []) || [],
+      features: features,
+      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      vw: window.innerWidth,
+      vh: window.innerHeight
+    }
+  }
+  /** 按 CSS 选择器描述第一个命中元素（AI 多数时候给的就是 CSS）。 */
+  window.__dfUiDescribe = function (selector) {
+    var el = null
+    try { el = document.querySelector(selector) } catch (err) { return { found: false, error: String(err && err.message ? err.message : err) } }
+    if (!el) return { found: false }
+    return describeElement(el)
+  }
+  /** 人机验证探测：验证码 iframe / 滑块 / 验证码输入框 / 验证文案。 */
+  window.__dfUiChallenge = function () {
+    var markers = []
+    var push = function (marker) { if (markers.indexOf(marker) < 0) markers.push(marker) }
+    try {
+      if (document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="turnstile"], iframe[src*="captcha"]')) push('captcha-iframe')
+      if (document.querySelector('#captcha, .geetest_panel, [id*="geetest"], [class*="geetest"], [class*="verify-slider"], [id*="slideVerify"]')) push('captcha-element')
+      if (document.querySelector('input[name*="captcha"], input[id*="captcha"], input[placeholder*="验证码"], input[placeholder*="验证"]')) push('captcha-input')
+      if (window.grecaptcha || window.hcaptcha || window.turnstile) push('captcha-global')
+      var bodyText = document.body ? cleanText(document.body.innerText || document.body.textContent).slice(0, 2000) : ''
+      if (/安全验证|请完成验证|拖动滑块|滑块验证|人机验证|输入验证码|向右滑动|verification code|verify you are human/i.test(bodyText)) push('captcha-text')
+    } catch (err) {}
+    return { detected: markers.length > 0, markers: markers }
+  }
+  /** 页面观察：URL/标题 + 可交互元素清单（AI 自主规划的眼睛；不产生步骤）。 */
+  window.__dfUiInspect = function () {
+    var nodes = document.querySelectorAll('a,button,input,textarea,select,label,[role="button"],[role="link"],[role="tab"],[role="checkbox"],[role="menuitem"],h1,h2,[data-testid]')
+    var elements = []
+    for (var i = 0; i < nodes.length && elements.length < 60; i += 1) {
+      var el = nodes[i]
+      var text = cleanText(el.innerText || el.textContent).slice(0, 60)
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
+        text = cleanText(el.getAttribute('placeholder') || el.name || el.id || el.tagName).slice(0, 60)
+      }
+      var candidates = []
+      try { candidates = (window.__dfUiSelectorCandidates ? window.__dfUiSelectorCandidates(el) : []) || [] } catch (err) {}
+      elements.push({ index: i, tag: el.tagName.toLowerCase(), text: text, candidates: candidates.slice(0, 3) })
+    }
+    var challenge = window.__dfUiChallenge()
+    return { url: location.href, title: document.title, elements: elements, challenge: challenge }
+  }
+})()`;
+/** click 的落点：元素中心按视口坐标 + 元素内比例（canvas/结构漂移兜底，与人录同口径）。 */
+function clickPointOfDesc(desc) {
+	const rect = desc.rect;
+	const vw = desc.vw;
+	const vh = desc.vh;
+	if (rect === void 0 || vw === void 0 || vh === void 0 || vw <= 0 || vh <= 0) return void 0;
+	if (rect.width <= 0 || rect.height <= 0) return void 0;
+	return {
+		fx: .5,
+		fy: .5,
+		x: rect.x + rect.width / 2,
+		y: rect.y + rect.height / 2,
+		vw,
+		vh,
+		...desc.tag === void 0 ? {} : { tag: desc.tag },
+		bx: rect.x,
+		by: rect.y,
+		bw: rect.width,
+		bh: rect.height,
+		...desc.text === void 0 || desc.text === "" ? {} : { name: desc.text.slice(0, 120) }
+	};
+}
+const AGENT_PASSWORD_SLOT = "password";
+/**
+* 动作 + 元素描述 → UI 步骤（执行成功后调用）。
+*
+* 密钥纪律在这里收口：
+*   - valueFrom 的字段：步骤值记 `{{slot}}`（slot = 键名消毒后的槽位名），实际值不进步骤；
+*   - 密码字段：必须走 valueFrom（明文值根本不进密码框），步骤值同样只写槽位。
+*/
+function buildAgentStep(seq, spec, desc, pageUrl, slot) {
+	const id = `s${seq}`;
+	const at = pageUrl === "" ? void 0 : pageUrl.slice(0, 2e3);
+	const target = () => {
+		const candidates = (desc?.candidates ?? []).filter((item) => typeof item === "string" && item !== "");
+		if (candidates.length === 0) return {};
+		return {
+			selector: candidates[0],
+			candidates
+		};
+	};
+	const features = normalizeFeatures(desc?.features);
+	const withCommon = (step) => ({
+		...step,
+		...features === void 0 ? {} : { features },
+		...at === void 0 ? {} : { at }
+	});
+	switch (spec.kind) {
+		case "goto": return {
+			id,
+			kind: "goto",
+			url: spec.url
+		};
+		case "wait": return {
+			id,
+			kind: "wait",
+			ms: spec.ms
+		};
+		case "scroll":
+			if (spec.selector === void 0 || spec.selector === "") return {
+				id,
+				kind: "scroll",
+				deltaY: spec.deltaY ?? 0
+			};
+			return withCommon({
+				id,
+				kind: "scroll",
+				...target()
+			});
+		case "click": return withCommon({
+			id,
+			kind: "click",
+			...target(),
+			...desc === void 0 ? {} : { clickPoint: clickPointOfDesc(desc) }
+		});
+		case "fill": {
+			const masked = desc?.isPassword === true || spec.valueFrom !== void 0;
+			const slotName = slot ?? (spec.valueFrom !== void 0 ? slotNameOf(spec.valueFrom) : "password");
+			return withCommon({
+				id,
+				kind: "fill",
+				...target(),
+				value: masked ? `{{${slotName}}}` : spec.value ?? ""
+			});
+		}
+		case "select": return withCommon({
+			id,
+			kind: "select",
+			...target(),
+			value: spec.value
+		});
+		case "press":
+			if (spec.selector === void 0 || spec.selector === "") return {
+				id,
+				kind: "press",
+				key: spec.key
+			};
+			return withCommon({
+				id,
+				kind: "press",
+				...target(),
+				key: spec.key
+			});
+		case "inspect": throw new Error("inspect 动作不产生步骤");
+	}
+}
+const NO_CHALLENGE = {
+	detected: false,
+	markers: []
+};
+function messageOf$1(error) {
+	return String(error?.message ?? error).slice(0, 800);
+}
+/** 代办录制会话 registry：进程内；脚本才是资产，会话只活在执行期。 */
+var AgentRecordingSessions = class {
+	sessions = /* @__PURE__ */ new Map();
+	openBrowser;
+	dataRoot;
+	now;
+	constructor(io = {}) {
+		this.openBrowser = io.openBrowser ?? openUiBrowser;
+		this.dataRoot = io.dataRoot;
+		this.now = io.now ?? Date.now;
+	}
+	async open(args) {
+		const sessionId = `uia_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+		const runId = `uiar_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+		try {
+			const viewport = args.viewport ?? {
+				width: 1280,
+				height: 720
+			};
+			const opened = await this.openBrowser({
+				headless: args.headless ?? false,
+				viewport,
+				channel: ""
+			});
+			const record = {
+				sessionId,
+				runId,
+				task: args.task.slice(0, 4e3),
+				startUrl: args.startUrl,
+				viewport,
+				browser: opened.browser,
+				context: opened.context,
+				page: opened.page,
+				steps: [],
+				secretSlots: /* @__PURE__ */ new Set(),
+				startedAt: this.now()
+			};
+			this.sessions.set(sessionId, record);
+			await opened.page.evaluate(SELECTOR_HELPER_SCRIPT).catch(() => void 0);
+			await opened.page.evaluate(AGENT_HELPER_SCRIPT).catch(() => void 0);
+			await opened.context.addInitScript(SELECTOR_HELPER_SCRIPT).catch(() => void 0);
+			await opened.context.addInitScript(AGENT_HELPER_SCRIPT).catch(() => void 0);
+			if (args.cookies !== void 0 && args.cookies.length > 0) await opened.context.addCookies(args.cookies.map(toPlaywrightCookie)).catch(() => void 0);
+			this.initTrace(record);
+			const timeout = args.navigationTimeoutMs ?? 2e4;
+			await opened.page.goto(args.startUrl, {
+				waitUntil: "domcontentloaded",
+				timeout
+			}).catch(() => void 0);
+			this.appendTrace(record, {
+				at: this.now(),
+				event: "open",
+				startUrl: args.startUrl
+			});
+			return {
+				ok: true,
+				sessionId,
+				runId,
+				pageUrl: safeUrl(opened.page)
+			};
+		} catch (error) {
+			this.sessions.delete(sessionId);
+			return {
+				ok: false,
+				error: messageOf$1(error)
+			};
+		}
+	}
+	has(sessionId) {
+		return this.sessions.has(sessionId);
+	}
+	pageUrlOf(sessionId) {
+		const record = this.sessions.get(sessionId);
+		return record === void 0 ? void 0 : safeUrl(record.page);
+	}
+	taskOf(sessionId) {
+		return this.sessions.get(sessionId)?.task;
+	}
+	stepsOf(sessionId) {
+		const record = this.sessions.get(sessionId);
+		return record === void 0 ? void 0 : [...record.steps];
+	}
+	/** 已用到的密钥槽位（落盘 inputs 用；顺序稳定，先 password 兜底键后按插入序）。 */
+	secretSlotsOf(sessionId) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return [];
+		return [...record.secretSlots];
+	}
+	runIdOf(sessionId) {
+		return this.sessions.get(sessionId)?.runId;
+	}
+	/** 会话打开时的起点 URL（脚本 meta.startUrl 用当前页会带上登录跳转变迁）。 */
+	startUrlOf(sessionId) {
+		return this.sessions.get(sessionId)?.startUrl;
+	}
+	viewportOf(sessionId) {
+		return this.sessions.get(sessionId)?.viewport;
+	}
+	list() {
+		return [...this.sessions.values()].map((record) => ({
+			sessionId: record.sessionId,
+			runId: record.runId,
+			pageUrl: safeUrl(record.page),
+			task: record.task,
+			steps: record.steps.length,
+			startedAt: record.startedAt
+		}));
+	}
+	/** 执行一个动作并同步录步；任何一步失败都不进步骤缓冲（执行与录制不脱节）。 */
+	async act(sessionId, spec, secrets = {}) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return {
+			ok: false,
+			error: `会话 ${sessionId} 不存在（可能已关闭）`
+		};
+		const page = record.page;
+		const validateError = validateAct(spec);
+		if (validateError !== void 0) return {
+			ok: false,
+			error: validateError,
+			pageUrl: safeUrl(page)
+		};
+		try {
+			if (spec.kind === "inspect") {
+				const inspect = await page.evaluate(`(window.__dfUiInspect ? window.__dfUiInspect() : null)`);
+				if (inspect === null) return {
+					ok: false,
+					error: "页面脚本未注入（请刷新会话页面或重开会话）",
+					pageUrl: safeUrl(page)
+				};
+				this.appendTrace(record, {
+					at: this.now(),
+					event: "act",
+					kind: "inspect",
+					url: inspect.url
+				});
+				return {
+					ok: true,
+					pageUrl: inspect.url,
+					inspect
+				};
+			}
+			if (spec.kind === "goto") {
+				await page.goto(spec.url, {
+					waitUntil: "domcontentloaded",
+					timeout: 2e4
+				});
+				const step = buildAgentStep(record.steps.length + 1, spec, void 0, safeUrl(page));
+				record.steps.push(step);
+				this.appendTrace(record, {
+					at: this.now(),
+					event: "act",
+					kind: "goto",
+					url: spec.url,
+					step: step.id
+				});
+				return this.finishAct(record, step);
+			}
+			if (spec.kind === "wait") {
+				await page.waitForTimeout(Math.min(Math.max(spec.ms, 0), 6e4));
+				const step = buildAgentStep(record.steps.length + 1, spec, void 0, safeUrl(page));
+				record.steps.push(step);
+				this.appendTrace(record, {
+					at: this.now(),
+					event: "act",
+					kind: "wait",
+					ms: step.ms
+				});
+				return this.finishAct(record, step);
+			}
+			if (spec.kind === "scroll" && (spec.selector === void 0 || spec.selector === "")) {
+				const deltaY = Math.min(Math.max(Math.round(spec.deltaY ?? 0), -1e4), 1e4);
+				await page.mouse.wheel(0, deltaY);
+				const step = buildAgentStep(record.steps.length + 1, {
+					...spec,
+					deltaY
+				}, void 0, safeUrl(page));
+				record.steps.push(step);
+				this.appendTrace(record, {
+					at: this.now(),
+					event: "act",
+					kind: "scroll",
+					deltaY
+				});
+				return this.finishAct(record, step);
+			}
+			const selector = actSelectorOf(spec);
+			if (selector === void 0) return {
+				ok: false,
+				error: "动作缺 selector",
+				pageUrl: safeUrl(page)
+			};
+			const described = await this.describe(record, selector);
+			const locator = await this.resolveLocator(record, selector, described);
+			if (locator === void 0) return {
+				ok: false,
+				error: described?.found === false && described.error !== void 0 ? `selector 语法错误：${described.error}` : `定位不到元素：${selector}（可先 inspect 看页面结构）`,
+				pageUrl: safeUrl(page)
+			};
+			const desc = described?.found === true ? described : await this.describeLocator(locator);
+			let value;
+			let valueMasked = false;
+			let slot;
+			if (spec.kind === "fill") {
+				if (spec.valueFrom !== void 0) {
+					value = secrets[spec.valueFrom];
+					if (value === void 0) return {
+						ok: false,
+						error: `valueFrom 键 ${spec.valueFrom} 不在服务端密钥表（uiAgentCredentials 可用键：${Object.keys(secrets).join("、") || "（未配置）"}）`,
+						pageUrl: safeUrl(page)
+					};
+					slot = slotNameOf(spec.valueFrom);
+					record.secretSlots.add(slot);
+					valueMasked = true;
+				} else if (desc.isPassword === true) return {
+					ok: false,
+					error: "目标是密码字段：请用 valueFrom 从服务端密钥表取值（明文值不允许进密码框，也不进脚本）",
+					pageUrl: safeUrl(page)
+				};
+				else value = spec.value ?? "";
+			}
+			const timeout = 15e3;
+			switch (spec.kind) {
+				case "click":
+					await locator.click({ timeout });
+					break;
+				case "fill":
+					await locator.fill(value ?? "", { timeout });
+					break;
+				case "select":
+					await locator.selectOption(spec.value, { timeout });
+					break;
+				case "press":
+					await locator.press(spec.key, { timeout });
+					break;
+				case "scroll":
+					await locator.scrollIntoViewIfNeeded({ timeout });
+					break;
+				default: return {
+					ok: false,
+					error: `未支持的动作：${spec.kind}`,
+					pageUrl: safeUrl(page)
+				};
+			}
+			const step = buildAgentStep(record.steps.length + 1, spec, desc, safeUrl(page), slot);
+			record.steps.push(step);
+			this.appendTrace(record, {
+				at: this.now(),
+				event: "act",
+				kind: spec.kind,
+				selector: step.selector,
+				step: step.id,
+				...valueMasked ? { valueMasked: true } : {}
+			});
+			return {
+				...await this.finishAct(record, step),
+				...valueMasked ? { valueMasked: true } : {}
+			};
+		} catch (error) {
+			return {
+				ok: false,
+				error: messageOf$1(error),
+				pageUrl: safeUrl(page)
+			};
+		}
+	}
+	/** 动作收尾：探测人机验证 + 组装回执（challenge 永远尽力而为，探测失败不遮动作结果）。 */
+	async finishAct(record, step) {
+		const challenge = await this.detectChallenge(record).catch(() => NO_CHALLENGE);
+		return {
+			ok: true,
+			pageUrl: safeUrl(record.page),
+			challenge,
+			step,
+			stepsSoFar: record.steps.length
+		};
+	}
+	async detectChallenge(record) {
+		const result = await record.page.evaluate("(window.__dfUiChallenge ? window.__dfUiChallenge() : null)").catch(() => null);
+		if (result === null || typeof result !== "object") return NO_CHALLENGE;
+		const value = result;
+		return {
+			detected: value.detected === true,
+			markers: Array.isArray(value.markers) ? value.markers.filter((item) => typeof item === "string") : []
+		};
+	}
+	/** CSS describe：返回页面脚本描述（未命中返回 found:false，不抛）。 */
+	async describe(record, selector) {
+		const expr = `(window.__dfUiDescribe ? window.__dfUiDescribe(${JSON.stringify(selector)}) : null)`;
+		const result = await record.page.evaluate(expr).catch(() => null);
+		if (result === null || typeof result !== "object") return void 0;
+		return result;
+	}
+	/** Playwright 专属选择器（text= 等）路径：动作由 locator 执行，描述事后从元素上现取。 */
+	async describeLocator(locator) {
+		const collected = await locator.evaluate((el) => {
+			const win = globalThis;
+			return {
+				candidates: typeof win.__dfUiSelectorCandidates === "function" ? win.__dfUiSelectorCandidates(el) ?? [] : [],
+				tag: el?.tagName ?? ""
+			};
+		}).catch(() => ({
+			candidates: [],
+			tag: ""
+		}));
+		const rect = await locator.boundingBox().catch(() => null);
+		return {
+			found: true,
+			tag: collected.tag,
+			candidates: collected.candidates,
+			...rect === null ? {} : { rect }
+		};
+	}
+	async resolveLocator(record, selector, described) {
+		const page = record.page;
+		const candidates = described?.found === true ? described.candidates ?? [] : [];
+		for (const candidate of candidates.length > 0 ? candidates : [selector]) {
+			const locator = page.locator(candidate).first();
+			try {
+				await locator.waitFor({
+					state: "attached",
+					timeout: 2e3
+				});
+				return locator;
+			} catch {}
+		}
+	}
+	/** 读当前页面元信息（自动命名用；读不到返回空对象，绝不抛）。 */
+	async pageMetaOf(sessionId) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return {};
+		try {
+			const url = safeUrl(record.page);
+			const title = await record.page.title().catch(() => "");
+			const siteName = await record.page.evaluate(`(() => {
+        const contentOf = (selector) => {
+          try { const el = document.querySelector(selector); return el && el.getAttribute('content') ? el.getAttribute('content') : '' } catch (err) { return '' }
+        }
+        return contentOf('meta[property="og:site_name"]') || contentOf('meta[name="application-name"]') || contentOf('meta[name="apple-mobile-web-app-title"]')
+      })()`).catch(() => "");
+			return {
+				url,
+				...typeof title === "string" && title !== "" ? { title } : {},
+				...typeof siteName === "string" && siteName !== "" ? { siteName } : {}
+			};
+		} catch {
+			return {};
+		}
+	}
+	/** 取会话 cookie（落凭证 jar 用；值只交给调用方，不进任何回执）。 */
+	async cookiesOf(sessionId) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return [];
+		return (await record.context.cookies().catch(() => [])).map((cookie) => ({
+			name: cookie.name,
+			value: cookie.value,
+			domain: cookie.domain,
+			path: cookie.path,
+			secure: cookie.secure,
+			...cookie.expires > 0 ? { expires: cookie.expires } : {}
+		}));
+	}
+	/** 关闭会话并写留痕终态。 */
+	async close(sessionId) {
+		const record = this.sessions.get(sessionId);
+		if (record === void 0) return { ok: false };
+		this.sessions.delete(sessionId);
+		this.appendTrace(record, {
+			at: this.now(),
+			event: "close",
+			steps: record.steps.length
+		});
+		this.finishTrace(record);
+		await record.browser.close().catch(() => void 0);
+		return { ok: true };
+	}
+	async closeAll() {
+		await Promise.all([...this.sessions.keys()].map((id) => this.close(id)));
+	}
+	initTrace(record) {
+		if (this.dataRoot === void 0) return;
+		const dir = join(this.dataRoot, "ui-agent-runs", record.runId);
+		record.traceDir = dir;
+		try {
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, "run.json"), JSON.stringify({
+				runId: record.runId,
+				sessionId: record.sessionId,
+				task: record.task,
+				startUrl: record.startUrl,
+				viewport: record.viewport,
+				startedAt: record.startedAt
+			}, null, 2), "utf8");
+		} catch {
+			record.traceDir = void 0;
+		}
+	}
+	appendTrace(record, event) {
+		if (record.traceDir === void 0) return;
+		try {
+			appendFileSync(join(record.traceDir, "events.ndjson"), `${JSON.stringify(event)}\n`, "utf8");
+		} catch {}
+	}
+	finishTrace(record) {
+		if (record.traceDir === void 0) return;
+		try {
+			writeFileSync(join(record.traceDir, "run.json"), JSON.stringify({
+				runId: record.runId,
+				sessionId: record.sessionId,
+				task: record.task,
+				startUrl: record.startUrl,
+				viewport: record.viewport,
+				startedAt: record.startedAt,
+				finishedAt: this.now(),
+				steps: record.steps.length,
+				secretsUsed: record.secretSlots.size
+			}, null, 2), "utf8");
+		} catch {}
+	}
+};
+function validateAct(spec) {
+	switch (spec.kind) {
+		case "inspect":
+		case "wait": return;
+		case "goto": return isHttpUrl(spec.url) ? void 0 : `goto 的 url 必须是 http/https：${spec.url}`;
+		case "click": return spec.selector.trim() === "" ? "click 缺 selector" : void 0;
+		case "fill":
+			if (spec.selector.trim() === "") return "fill 缺 selector";
+			if (spec.value === void 0 && spec.valueFrom === void 0) return "fill 需要 value 或 valueFrom";
+			return;
+		case "select":
+			if (spec.selector.trim() === "") return "select 缺 selector";
+			return spec.value.trim() === "" ? "select 缺 value（选项值或可见文本）" : void 0;
+		case "press": return spec.key.trim() === "" ? "press 缺 key（Enter/Tab/…）" : void 0;
+		case "scroll":
+			if (spec.selector !== void 0 && spec.selector.trim() !== "") return void 0;
+			if (spec.deltaY === void 0 || !Number.isFinite(spec.deltaY)) return "scroll 需要 selector 或 deltaY";
+			return;
+		default: return `未支持的动作：${spec.kind}`;
+	}
+}
+function actSelectorOf(spec) {
+	if ("selector" in spec && typeof spec.selector === "string") return spec.selector.trim();
+}
+/** valueFrom 键名 → 合法槽位名（字母/数字/下划线，字母开头；映射稳定，录进脚本/回放同一入口）。 */
+function slotNameOf(key) {
+	const cleaned = key.replace(/[^A-Za-z0-9_]/g, "_");
+	return (/^[A-Za-z_]/.test(cleaned) ? cleaned : `_${cleaned}`) || "password";
+}
+function isHttpUrl(value) {
+	try {
+		const parsed = new URL(value);
+		return parsed.protocol === "http:" || parsed.protocol === "https:";
+	} catch {
+		return false;
+	}
+}
 function safeUrl(page) {
 	try {
 		return page.url();
@@ -22164,8 +23480,15 @@ function safeUrl(page) {
 		return "";
 	}
 }
-function messageOf$1(error) {
-	return String(error?.message ?? error).slice(0, 500);
+function toPlaywrightCookie(cookie) {
+	return {
+		name: cookie.name,
+		value: cookie.value,
+		domain: cookie.domain,
+		path: cookie.path ?? "/",
+		secure: cookie.secure ?? false,
+		...cookie.expires === void 0 ? {} : { expires: cookie.expires }
+	};
 }
 
 //#endregion
@@ -22504,6 +23827,9 @@ async function runStep(io, sessionId, step, inputs, emit, doc) {
 			const key = substituteInputs(step.key ?? "", inputs);
 			assertKey(key);
 			await io.seam.key(sessionId, { key });
+		} else if (step.kind === "scroll") {
+			if (step.selector !== void 0) await io.seam.scroll(sessionId, { selector: step.selector });
+			else await io.seam.scroll(sessionId, { deltaY: step.deltaY ?? 0 });
 		} else if (step.kind === "submit") {
 			const selector = cssCandidatesOf(step)[0];
 			if (selector === void 0) throw new Error("submit 步骤没有 CSS selector（共享引擎只能用 CSS 触发表单提交）");
@@ -23575,6 +24901,13 @@ function apply(ctx, rawConfig) {
 		dataRoot: config.dataRoot,
 		stepTimeoutMs: config.uiStepTimeoutSeconds * 1e3
 	});
+	const agentSessions = new AgentRecordingSessions({
+		dataRoot: config.dataRoot,
+		openBrowser: (options) => openUiBrowser({
+			...options,
+			channel: config.captureChromeChannel
+		})
+	});
 	/** 按配置选当前引擎；显式选择不可用/未实现时带回退说明（application 会如实报错或降级）。 */
 	const resolveUiEngine = () => {
 		if (config.uiTestBrowser === "playwright") return { engine: playwrightEngine };
@@ -23595,7 +24928,9 @@ function apply(ctx, rawConfig) {
 		enabled: config.uiTestEnabled,
 		...credentialStorePath === void 0 ? {} : { credentialStorePath },
 		resolveEngine: resolveUiEngine,
-		batchEngine: playwrightEngine
+		batchEngine: playwrightEngine,
+		agentSessions,
+		agentSecrets: config.uiAgentCredentials ?? {}
 	};
 	chainRunDeps.verifyUi = async (request) => {
 		const value = await runUiScriptForTool(uiTestDeps, void 0, {
@@ -23683,7 +25018,10 @@ function apply(ctx, rawConfig) {
 			defineUiRecordCloseTool(uiTestDeps),
 			defineUiRunTool(uiTestDeps),
 			defineUiRunsTool(uiTestDeps),
-			defineUiBatchRunTool(uiTestDeps)
+			defineUiBatchRunTool(uiTestDeps),
+			defineUiAgentOpenTool(uiTestDeps),
+			defineUiAgentActTool(uiTestDeps),
+			defineUiAgentStopTool(uiTestDeps)
 		]) tools.register(tool);
 		logger?.info?.(`已注册 35 个工具：flows/run/status + capture/status/result/cancel + trace_get/trace_analyze/chain_draft/lookup/dataset_export + browser_open/act/snapshot/close + library_import/chain_upsert/chain_get/chain_bind/chain_run/chain_runs/chain_probe/chain_crystallize/chain_diagnose/chain_compare + ui_script_get/ui_script_upsert/ui_record_open/ui_record_start/ui_record_stop/ui_record_close/ui_run/ui_runs/ui_batch_run（引擎：${config.engineRoot}；数据根：${config.dataRoot}）`);
 		if (!config.uiTestEnabled) logger?.info?.("UI 回放开关 uiTestEnabled=false：dataforge_ui_run 一律 ui-test-disabled");
